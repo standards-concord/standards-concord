@@ -2,78 +2,27 @@ import { test, expect, demoOntology, signIn, signInAsPersona, uniq } from './fix
 
 /**
  * OWL 2 DL reasoning with sparq (WebAssembly) in place of HermiT on Java. The server runs
- * it for every validation and change request; the health panel can run the same reasoner
- * in the browser and compare verdicts.
+ * it for every validation and change request, and the health panel shows its verdict.
  */
 
 const VOL = 'https://w3id.org/odi/volunteering#';
 
 test.describe('OWL reasoning with sparq', () => {
-  test('the working draft is checked by sparq, and the check runs again in the browser with the same verdict', async ({ page, request }) => {
+  test('the working draft is checked by sparq on the server, and only the verdict is shown', async ({ page, request }) => {
     const demo = await demoOntology(request);
     await signIn(page, { name: `Reasoner steward ${uniq()}`, role: 'steward' });
+    const report = await (await page.request.get(`/api/ontologies/${demo.id}/validation?ref=working`)).json();
+    expect(report.reasoner.engine).toBe('sparq');
     await page.goto(`/o/${demo.id}`);
     const health = page.locator('#health');
     await expect(health.getByText('Consistent.', { exact: true })).toBeVisible({ timeout: 30_000 });
-    // Which engine ran and how long it took is under-the-hood detail: it used to sit beside the
-    // verdict ("sparq · reasoning 3.8 ms (10 ms in all)") and now waits behind "Reasoner details".
-    const timing = health.getByText(/^Checked by sparq in [\d.]+ ms \(\d+ ms in all\)\.$/);
-    await expect(timing).toBeHidden();
-    await expect(health.getByText(/sparq ·|Reasoner \(sparq\)/)).toHaveCount(0);
-    await health.getByRole('button', { name: /Reasoner details/ }).click();
-    await expect(timing).toBeVisible();
     // The OWL reasoner ran, so the summary tile isn't "Not run".
     await expect(health.getByRole('group', { name: 'Health summary' })).toContainText('Consistent');
-
-    // Only the draft's Turtle comes from the server; the reasoner itself is fetched and run here.
-    const validationCalls: string[] = [];
-    page.on('request', (r) => { if (r.url().includes('/validation')) validationCalls.push(r.url()); });
-    const wasm = page.waitForResponse((r) => /sparq_dl_wasm_bg[^/]*\.wasm/.test(r.url()) && r.ok());
-    const source = page.waitForResponse((r) => r.url().includes(`/api/ontologies/${demo.id}/source`) && r.ok());
-    // The reasoner runs in a Web Worker, so a large ontology doesn't freeze the page.
-    const worker = page.waitForEvent('worker', (w) => /reasonWorker/.test(w.url()));
-    await health.getByRole('button', { name: 'Check again in this browser' }).click();
-    await Promise.all([wasm, source, worker]);
-    const status = health.getByRole('status');
-    await expect(status).toContainText('This browser: consistent, all classes satisfiable.');
-    await expect(status).not.toContainText(/ ms\b/);
-    await expect(status).toContainText('Same result as the server.');
-    expect(validationCalls).toEqual([]);
-  });
-
-  test("the browser result is only compared with the server's when both are for the same revision", async ({ page, request }) => {
-    const demo = await demoOntology(request);
-    await signIn(page, { name: `Reasoner revision ${uniq()}`, role: 'steward' });
-    // Used to go wrong: the page compared a fresh in-browser run with a report from when the page
-    // loaded, so an edit in between showed up as the server "disagreeing". Here the draft moves on
-    // (a different revision is served) and then differs at the same revision.
-    let mode: 'moved' | 'tampered' = 'moved';
-    // The real draft and its revision, fetched up front so the handler answers at once.
-    const real = await page.request.get(`/api/ontologies/${demo.id}/source?format=turtle&ref=working`);
-    const turtle = await real.text();
-    const revision = real.headers()['x-concord-revision'];
-    expect(revision).toBeTruthy();
-    await page.route(new RegExp(`/api/ontologies/${demo.id}/source\\?`), (route) =>
-      route.fulfill({
-        contentType: 'text/turtle; charset=utf-8',
-        headers: { 'x-concord-revision': mode === 'moved' ? 'a-later-revision' : revision },
-        body: mode === 'moved' ? turtle : `${turtle}\n<${VOL}Person> <http://www.w3.org/2002/07/owl#disjointWith> <${VOL}Volunteer> .\n`,
-      }),
-    );
-    await page.goto(`/o/${demo.id}`);
-    const health = page.locator('#health');
-    await expect(health.getByText('Consistent.', { exact: true })).toBeVisible({ timeout: 30_000 });
-    const check = health.getByRole('button', { name: 'Check again in this browser' });
-    const status = health.getByRole('status');
-    await check.click();
-    await expect(status).toContainText("This check and the server's result are for different revisions of the draft, so they can't be compared. Reload the page to compare.");
-    await expect(status).not.toContainText('Same result as the server.');
-
-    mode = 'tampered';
-    await check.click();
-    await expect(status).toContainText('This browser: unsatisfiable:');
-    await expect(status).toContainText("The server's result for the same revision differs.");
-    await page.unrouteAll({ behavior: 'wait' });
+    // Under-the-hood detail is gone (Jesse, 6 Nov 2026): which engine ran and how long it took
+    // ("Reasoner details"), and re-running the reasoner in the browser to compare with the server.
+    await expect(health.getByRole('button', { name: /Reasoner details/ })).toHaveCount(0);
+    await expect(health.getByRole('button', { name: 'Check again in this browser' })).toHaveCount(0);
+    await expect(health.getByText(/sparq|\d+ ms\b/)).toHaveCount(0);
   });
 
   test('a change that makes a class unsatisfiable is caught by sparq on the server', async ({ page, request }) => {
@@ -99,10 +48,6 @@ test.describe('OWL reasoning with sparq', () => {
     await page.goto(`/o/${demo.id}/changes/${cr.id}?view=checks`);
     await expect(page.getByText('1 unsatisfiable class.')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText(new RegExp(`^Unsatisfiable: ${name.toLowerCase()}$`, 'i'))).toBeVisible();
-    await page.getByRole('button', { name: /Reasoner details/ }).first().click();
-    await expect(page.getByText(/^Checked by sparq in [\d.]+ ms/).first()).toBeVisible();
-    // The in-browser re-check is only offered for the working draft, not for a proposal.
-    await expect(page.getByRole('button', { name: 'Check again in this browser' })).toHaveCount(0);
   });
 
   // Used to go wrong: when the reasoner timed out or crashed, the health popover said "Not run

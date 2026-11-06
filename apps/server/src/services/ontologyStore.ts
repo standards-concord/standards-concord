@@ -780,6 +780,19 @@ export const gitStore = {
     }
   },
 
+  async commitOf(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<{ parent?: string; subject: string }> {
+    if (!/^[0-9a-f]{7,64}$/.test(commit)) throw new HttpError(404, `No commit ${commit || '(empty)'}`);
+    let out: string;
+    try {
+      // Labelled lines: output is trimmed, which would drop a first commit's empty parent line.
+      out = await git(repoDir(project), ['log', '-1', '--format=parents %P%nsubject %s', commit]);
+    } catch {
+      throw new HttpError(404, `No commit ${commit}`);
+    }
+    const line = (k: string) => out.split('\n').find((l) => l.startsWith(`${k} `))?.slice(k.length + 1) ?? '';
+    return { parent: line('parents').split(' ').filter(Boolean)[0], subject: line('subject') };
+  },
+
   /** The ontology at a commit (a fork's head, or the draft it was based on, for three-way comparisons). */
   async graphAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<OntologyGraph> {
     const key = `${project.slug}@${commit}`;
@@ -934,6 +947,8 @@ export interface OntologyStoreApi {
   forkBranch(forkSlug: string): string;
   hasForkBranch(project: Pick<OntologyProject, 'slug'>, forkSlug: string): Promise<boolean>;
   readAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<string>;
+  /** A commit's first parent (none for the first commit) and the first line of its message. */
+  commitOf(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<{ parent?: string; subject: string }>;
   graphAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<OntologyGraph>;
   commitFork(
     project: Pick<OntologyProject, 'slug'>,

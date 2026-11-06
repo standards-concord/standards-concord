@@ -533,27 +533,6 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
               />
               <div className="space-y-3 p-4">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Select
-                    value=""
-                    onChange={(e) => {
-                      const ex = examples.find((x) => x.id === e.target.value);
-                      if (ex) {
-                        setQuery(ex.query);
-                        setColumns([]);
-                        if (ex.id === 'instances') setTarget('data');
-                      }
-                    }}
-                    aria-label="Example queries"
-                    className="w-auto!"
-                    disabled={asking}
-                  >
-                    <option value="">Examples…</option>
-                    {examples.map((x) => (
-                      <option key={x.id} value={x.id} title={x.description}>
-                        {x.title}
-                      </option>
-                    ))}
-                  </Select>
                   <label className="ml-auto flex items-center gap-2 text-sm">
                     <span className="text-muted">Run against</span>
                     <Select value={target} onChange={(e) => setTarget(e.target.value as Target)} aria-label="Run against" className="w-auto!" disabled={asking}>

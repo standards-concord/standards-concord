@@ -17,13 +17,8 @@ export default defineConfig({
   // build already rewrites the URL to a hashed asset.
   optimizeDeps: {
     exclude: ['@sparq-org/sparq'],
-    // The dependency scan starts from index.html and doesn't follow `new Worker(new URL(...))`,
-    // so the reasoner worker's dependencies were found only when it first ran. Vite then
-    // re-optimised and reloaded the page mid-check (a cold dev server's first in-browser check).
-    entries: ['index.html', 'src/lib/reasonWorker.ts'],
   },
-  // The in-browser reasoner (src/lib/reasonWorker.ts) and the query worker run as module Web Workers: they
-  // code-split, and the query worker loads sparq with a dynamic import.
+  // The query worker runs as a module Web Worker: it code-splits, and loads sparq with a dynamic import.
   worker: { format: 'es' },
   server: {
     port: 5173,

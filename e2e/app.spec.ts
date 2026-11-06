@@ -84,6 +84,8 @@ test.describe('signed in', () => {
 
   test('every ontology section and page opens', async ({ page, request }) => {
     const demo = await demoOntology(request);
+    // Query only shows in the navigation with Settings → Advanced features on (see advanced.spec.ts).
+    await page.addInitScript(() => localStorage.setItem('concord.advancedFeatures', 'true'));
     await page.goto(`/o/${demo.id}`);
     const sections = page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link');
     await expect(sections.first()).toBeVisible();

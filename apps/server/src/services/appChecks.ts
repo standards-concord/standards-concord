@@ -20,7 +20,7 @@ import type {
 import { clock } from '../clock.js';
 import { get, HttpError, list, mustGet, put, remove, transaction } from '../db.js';
 import { newId } from '../ids.js';
-import { addReview, addVote, advance, changeCR, getCR, listCRs, peopleWhoSpoke, reviewsFor, sayIsCurrent, votesFor } from './changeRequests.js';
+import { addReview, addVote, advance, changeCR, getCR, listCRs, mergeContext, peopleWhoSpoke, reviewsFor, sayIsCurrent, votesFor } from './changeRequests.js';
 import { canVote, effectiveRule } from './governance.js';
 import { getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -297,6 +297,33 @@ export async function proposedSource(cr: ChangeRequest, format: OutputFormat): P
   if (proposedCache.size > 200) proposedCache.clear();
   proposedCache.set(key, text);
   return { text, revision, filename };
+}
+
+/**
+ * The ontology file before and after this change, for the change request's Diff tab. A merged (or
+ * released) change shows its merge commit against the draft it was committed on: exactly the bytes
+ * it changed. An open one shows the working draft now, and with the edits applied as merge() would
+ * apply them (mergeContext: today's date and the generated provenance), serialized as merge() writes it.
+ */
+export async function turtleDiff(cr: ChangeRequest): Promise<{ before: string; after: string } | { error: string }> {
+  const project = await getProject(cr.ontologyId);
+  if (cr.status === 'merged' || cr.status === 'released') {
+    if (!cr.mergedCommit) return { error: 'This change was merged before Concord kept a record of its commit, so there is no diff to show.' };
+    const commit = await ontologyStore.commitOf(project, cr.mergedCommit);
+    const after = await ontologyStore.readAt(project, cr.mergedCommit);
+    // A change that left the file as it was made no commit of its own: its "commit" is the draft it merged into.
+    if (!commit.parent || !commit.subject.startsWith(`#${cr.number} `)) return { before: after, after };
+    return { before: await ontologyStore.readAt(project, commit.parent), after };
+  }
+  const working = await ontologyStore.working(project);
+  let after;
+  try {
+    after = applyChangeOps(working, cr.ops, mergeContext(project, cr, clock.iso().slice(0, 10))).graph;
+  } catch (err) {
+    return { error: `This change can't be applied to the current working draft: ${(err as Error).message}` };
+  }
+  const [before, text] = await Promise.all([working.toTurtle(), after.toTurtle()]);
+  return { before, after: text };
 }
 
 /* ------------------------------------------------------------------------ */

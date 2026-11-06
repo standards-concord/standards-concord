@@ -1,11 +1,11 @@
 import { useState, type ReactNode } from 'react';
 import type { ValidationReport } from '@concord/shared';
-import type { IssueSeverity, ReasonerResult as ReasonerReport } from '@concord/core/types';
-import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Cpu, Info, TriangleAlert } from 'lucide-react';
+import type { IssueSeverity } from '@concord/core/types';
+import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleAlert } from 'lucide-react';
 import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';
-import { checkedOf, compareWithServer } from '../lib/reasonerCompare';
-import { Badge, ProgressBar, cx } from './ui';
+import { checkedOf } from '../lib/reasonerCompare';
+import { ProgressBar, cx } from './ui';
 import { HighlightedCode } from './code/CodeView';
 import { Disclosure } from './Disclosure';
 
@@ -14,6 +14,8 @@ const SEV: Record<IssueSeverity, { icon: typeof Info; cls: string; label: string
   warning: { icon: TriangleAlert, cls: 'text-warn', label: 'Warnings' },
   info: { icon: Info, cls: 'text-muted', label: 'Suggestions' },
 };
+
+const SEV_ONE: Record<IssueSeverity, string> = { error: 'Error', warning: 'Warning', info: 'Suggestion' };
 
 /** One-word-ish verdict that never claims more than was checked: without the reasoner, a pass covers only the checks that ran. */
 export function validationVerdict(report: Pick<ValidationReport, 'passed' | 'reasoner'>, style: 'title' | 'inline' = 'title'): string {
@@ -70,15 +72,12 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
         const list = (
           <ul className="divide-y divide-line rounded-lg border border-line">
             {items.map((i, idx) => (
-              <li key={idx} className="flex flex-wrap items-start justify-between gap-2 px-3 py-2 text-sm">
+              <li key={idx} className="flex items-start gap-2 px-3 py-2 text-sm">
+                <StatusIcon icon={Icon} cls={cls} status={SEV_ONE[sev]} note={[i.code, i.reference].filter(Boolean).join(' · ')} />
                 <div className="min-w-0">
                   <p>{i.message}</p>
-                  <p className="mt-0.5 text-xs text-muted">
-                    <code className="font-mono">{i.code}</code>
-                    {i.iri && <> · {label(i.iri)}</>}
-                  </p>
+                  {i.iri && <p className="mt-0.5 text-xs text-muted">{label(i.iri)}</p>}
                 </div>
-                {i.reference && <Badge tone="outline">{i.reference}</Badge>}
               </li>
             ))}
           </ul>
@@ -103,78 +102,9 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
   );
 }
 
-/**
- * "Checked by sparq in 1.2 ms (14 ms in all)", or "Checked by structural in 3 ms". Under-the-hood detail,
- * so it is only shown inside "Reasoner details".
- */
-function timing(r: ReasonerReport) {
-  return r.checkMs !== undefined ? `Checked by ${r.engine} in ${r.checkMs} ms (${r.durationMs} ms in all).` : `Checked by ${r.engine} in ${r.durationMs} ms.`;
-}
-
-/** The working draft's Turtle and the revision it is. */
-export type DraftLoader = () => Promise<{ turtle: string; revision?: string }>;
-
-/**
- * Runs the same OWL reasoner (sparq, WebAssembly) on this device, in a Web Worker, over the
- * draft's Turtle, and compares the result with the server's when both are for the same revision.
- */
-function BrowserCheck({ server, revision, load, label }: { server: ReasonerReport; revision?: string; load: DraftLoader; label: Labeler }) {
-  // The revision the browser checked is kept, not a "same revision" flag, so the comparison
-  // stays right when the server's report is reloaded for a newer revision.
-  const [state, setState] = useState<{ status: 'idle' | 'running' | 'done' | 'error'; r?: ReasonerReport; checkedRevision?: string; error?: string }>({ status: 'idle' });
-  const run = async () => {
-    setState({ status: 'running' });
-    try {
-      const draft = await load();
-      const { reasonInBrowser } = await import('../lib/reasonInBrowser');
-      const r = await reasonInBrowser(draft.turtle);
-      setState({ status: 'done', r, checkedRevision: draft.revision });
-    } catch (e) {
-      setState({ status: 'error', error: (e as Error).message });
-    }
-  };
-  const r = state.r;
-  const comparison = r && compareWithServer(r, state.checkedRevision, server, revision);
-  return (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      <button type="button" onClick={run} disabled={state.status === 'running'} className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-surface-2 disabled:opacity-60">
-        <Cpu className="size-3.5" aria-hidden /> {state.status === 'running' ? 'Checking in this browser…' : 'Check again in this browser'}
-      </button>
-      <span role="status" className="text-muted">
-        {state.status === 'error' && <span className="text-danger">The in-browser check failed: {state.error}</span>}
-        {state.status === 'done' && r && (
-          <>
-            This browser:{' '}
-            <strong className={checkedOf(r) !== 'complete' ? 'text-warn' : r.consistent && !r.unsatisfiable.length ? 'text-ok' : 'text-danger'}>
-              {checkedOf(r) === 'none'
-                ? 'no verdict'
-                : !r.consistent
-                  ? 'inconsistent'
-                  : checkedOf(r) === 'consistency'
-                    ? 'consistent, but not every class could be checked'
-                    : r.unsatisfiable.length
-                      ? `unsatisfiable: ${r.unsatisfiable.map(label).join(', ')}`
-                      : 'consistent, all classes satisfiable'}
-            </strong>
-            .{' '}
-            {comparison === 'other-revision' ? (
-              <span className="text-warn">This check and the server's result are for different revisions of the draft, so they can't be compared. Reload the page to compare.</span>
-            ) : comparison === 'same' ? (
-              'Same result as the server.'
-            ) : (
-              <span className="text-warn">The server's result for the same revision differs.</span>
-            )}
-          </>
-        )}
-      </span>
-    </div>
-  );
-}
-
-export function ReasonerResult({ report, label, checkInBrowser }: { report: ValidationReport; label: Labeler; /** Loads the working draft, to re-run the reasoner in this browser. */ checkInBrowser?: DraftLoader }) {
+export function ReasonerResult({ report, label }: { report: ValidationReport; label: Labeler }) {
   const r = report.reasoner;
   const checked = checkedOf(r);
-  const problem = !r.consistent || r.unsatisfiable.length > 0;
   const verdict = checked === 'consistency' && r.consistent ? (
     <span>
       <strong className="text-warn">Consistent, but not every class could be checked.</strong> Validation doesn't pass until the reasoner can check them all.
@@ -188,72 +118,38 @@ export function ReasonerResult({ report, label, checkInBrowser }: { report: Vali
   ) : (
     <strong className="text-danger">Inconsistent — no data could ever conform to this ontology.</strong>
   );
-  // What went wrong shows straight away; everything else (inferences, profile notes, which engine ran and how long it took) is one click away.
-  const hasProblemDetail = (checked !== 'complete' && !!r.error) || r.unsatisfiable.length > 0 || !!r.explanation;
-  const problemDetail = hasProblemDetail && (
-    <div className="space-y-2">
-      {checked !== 'complete' && r.error && <p className="text-xs text-muted">Why: {r.error}</p>}
-      {r.unsatisfiable.length > 0 && <p className="text-danger">Unsatisfiable: {r.unsatisfiable.map(label).join(', ')}</p>}
-      {r.explanation && <p className="rounded-lg bg-surface-2 p-2 text-xs whitespace-pre-line">{r.explanation}</p>}
-    </div>
-  );
-  const detail = (
-    <div className="space-y-2">
-      {!problem && problemDetail}
-      {!!r.profile?.length && (
-        <div>
-          <p className="text-xs text-muted">OWL 2 DL profile notes (reasoning still ran):</p>
-          <ul className="mt-1 text-xs">
-            {r.profile.map((n, i) => (
-              <li key={i}>{n.detail}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {r.inferredSubClassOf.length > 0 && (
-        <div>
-          <p className="text-xs text-muted">Inferred (not asserted) subclass relations:</p>
-          <ul className="mt-1 text-xs">
-            {r.inferredSubClassOf.map(([a, b], i) => (
-              <li key={i}>
-                {label(a)} ⊑ {label(b)}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <p className="text-xs text-subtle">{timing(r)}</p>
-    </div>
-  );
+  // Only what needs fixing is shown. Which engine ran, how long it took, inferred relations and
+  // profile notes are under-the-hood detail, so they aren't (Jesse, 6 Nov 2026).
   return (
     <div className="space-y-2 text-sm">
       <p className="flex flex-wrap items-center gap-2">
         <Brain className="size-4 text-muted" />
         {verdict}
       </p>
-      {problem && problemDetail}
-      <Disclosure tone="muted" title={<span className="text-xs">Reasoner details</span>} summary={r.inferredSubClassOf.length ? plural(r.inferredSubClassOf.length, 'inferred relation') : undefined}>
-        {detail}
-      </Disclosure>
-      {checkInBrowser && <BrowserCheck server={r} revision={report.revision} load={checkInBrowser} label={label} />}
+      {checked !== 'complete' && r.error && <p className="text-xs text-muted">Why: {r.error}</p>}
+      {r.unsatisfiable.length > 0 && <p className="text-danger">Unsatisfiable: {r.unsatisfiable.map(label).join(', ')}</p>}
+      {r.explanation && <p className="rounded-lg bg-surface-2 p-2 text-xs whitespace-pre-line">{r.explanation}</p>}
     </div>
   );
 }
 
-const PRINCIPLES = [
-  { key: 'F', name: 'Findable' },
-  { key: 'A', name: 'Accessible' },
-  { key: 'I', name: 'Interoperable' },
-  { key: 'R', name: 'Reusable' },
-] as const;
-
 /**
- * Only the failing checks, unless expanded: then every check (failing first), with the scoring
- * note, the per-principle breakdown and each check's FOOPS!/FAIR reference.
+ * A pass/fail icon whose technical reference (a FOOPS! test, a lint rule) shows on hover or
+ * focus, so the list itself reads in plain words.
  */
+function StatusIcon({ icon: Icon, cls, status, note }: { icon: typeof Info; cls: string; status: string; note?: string }) {
+  if (!note) return <Icon className={cx('mt-0.5 size-4 shrink-0', cls)} aria-label={status} role="img" />;
+  return (
+    <span tabIndex={0} role="img" aria-label={`${status}. ${note}`} title={note} className="mt-0.5 shrink-0 cursor-help rounded-full focus-visible:outline-2 focus-visible:outline-accent" data-testid="status-note">
+      <Icon className={cx('size-4', cls)} aria-hidden />
+    </span>
+  );
+}
+
+/** Only the failing checks, unless expanded: then every check, failing first. Each check's FOOPS!/FAIR reference is on its icon's hover. */
 export function FairChecks({ report }: { report: ValidationReport }) {
   const [open, setOpen] = useState(false);
-  const { checks, byPrinciple } = report.fair;
+  const { checks } = report.fair;
   const status = (c: (typeof checks)[number]) => c.status ?? (c.passed ? 'pass' : 'fail');
   const failed = checks.filter((c) => status(c) === 'fail');
   const order = { fail: 0, 'not-checked': 1, pass: 2 } as const;
@@ -261,51 +157,25 @@ export function FairChecks({ report }: { report: ValidationReport }) {
   const skipped = checks.filter((c) => status(c) === 'not-checked').length;
   return (
     <div className="text-sm">
-      {/* Reports saved before per-principle scoring have no breakdown. */}
-      {open && byPrinciple && <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {PRINCIPLES.map(({ key, name }) => {
-          const p = byPrinciple[key];
-          return (
-            <div key={key} className="rounded-lg border border-line p-2">
-              <div className="flex items-baseline justify-between gap-1">
-                <span className="text-xs font-medium">{name}</span>
-                <span className="text-xs tabular-nums text-muted">
-                  {p.passed}/{p.total}
-                </span>
-              </div>
-              <ProgressBar className="mt-1.5" value={p.score} tone={p.score >= 0.8 ? 'ok' : p.score >= 0.5 ? 'warn' : 'danger'} />
-            </div>
-          );
-        })}
-      </div>}
-      {open && (
-        <p className="mb-3 text-xs text-muted">
-          The FAIR score is the average of these four, so each principle counts equally. Each check follows a FOOPS! test (Garijo, Corcho and Poveda-Villalón, 2021).
-          {skipped > 0 && ` ${plural(skipped, 'check')} could not be run here and ${skipped === 1 ? 'is' : 'are'} left out.`}
-        </p>
-      )}
       <ul className="space-y-1.5">
         {shown.map((c) => (
           <li key={c.id} className="flex items-start gap-2">
             {status(c) === 'pass' ? (
-              <CircleCheck className="mt-0.5 size-4 shrink-0 text-ok" />
+              <StatusIcon icon={CircleCheck} cls="text-ok" status="Passes" note={c.reference} />
             ) : status(c) === 'fail' ? (
-              <CircleX className="mt-0.5 size-4 shrink-0 text-danger" />
+              <StatusIcon icon={CircleX} cls="text-danger" status="Fails" note={c.reference} />
             ) : (
-              <Info className="mt-0.5 size-4 shrink-0 text-muted" />
+              <StatusIcon icon={Info} cls="text-muted" status="Not checked" note={c.reference} />
             )}
             <span className="min-w-0">
-              <span className="mr-1.5 rounded bg-surface-2 px-1 font-mono text-[0.7rem]">{c.principle}</span>
               <span className="font-medium">{c.title}</span>
-              <span className="block text-xs text-muted">
-                {c.message}
-                {open && c.reference && <span className="text-subtle"> · {c.reference}</span>}
-              </span>
+              <span className="block text-xs text-muted">{c.message}</span>
             </span>
           </li>
         ))}
         {!shown.length && <li className="text-muted">All {checks.length - skipped} FAIR checks that could be run pass.</li>}
       </ul>
+      {open && skipped > 0 && <p className="mt-2 text-xs text-muted">{plural(skipped, 'check')} could not be run here and {skipped === 1 ? 'is' : 'are'} left out of the score.</p>}
       {checks.length > failed.length || open ? (
         <button type="button" aria-expanded={open} onClick={() => setOpen((o) => !o)} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-accent">
           {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
@@ -376,7 +246,6 @@ export function ValidationDetails({
   openLintKey,
   lintNote,
   headingLevel = 4,
-  checkInBrowser,
 }: {
   report: ValidationReport;
   label: Labeler;
@@ -385,8 +254,6 @@ export function ValidationDetails({
   lintNote?: ReactNode;
   /** Level of the Lint / FAIR / Competency question headings: one below the section that holds them. */
   headingLevel?: 3 | 4;
-  /** Loads the working draft, to re-run the reasoner in this browser. */
-  checkInBrowser?: DraftLoader;
 }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
@@ -399,7 +266,7 @@ export function ValidationDetails({
   return (
     <div className="space-y-5">
       <ValidationSummary report={report} />
-      <ReasonerResult report={report} label={label} checkInBrowser={checkInBrowser} />
+      <ReasonerResult report={report} label={label} />
       <div className="divide-y divide-line rounded-lg border border-line">
         <Disclosure className="px-4 py-3" heading={headingLevel} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
           <LintIssues report={report} label={label} />
