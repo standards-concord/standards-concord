@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.37.0',
+    version: '0.38.0',
     date: '2026-11-06',
     title: 'Instant term browsing, and data checked in your browser',
     pr: 92,
@@ -81,6 +81,39 @@ export const APP_RELEASES: AppRelease[] = [
         type: 'perf',
         title: 'Clicking between terms is instant',
         detail: 'Term details, what uses each term, and search now come from the ontology the page already holds, so following a link in Browse shows the term at once instead of waiting for the server.',
+        roles: [],
+        to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.37.0',
+    date: '2026-11-06',
+    title: 'Tidier Browse pages and plain type names',
+    pr: 93,
+    changes: [
+      {
+        id: 'browse-list-view',
+        type: 'feat',
+        title: 'Fold away the class list',
+        detail: 'In Browse, the class list now folds away like the property lists, and the view is called List (beside Diagram and Graph) instead of Classes.',
+        roles: [],
+        to: '{o}/browse',
+      },
+      {
+        id: 'plain-datatype-names',
+        type: 'fix',
+        title: 'Types like Boolean and String, not xsd:boolean',
+        detail: 'Property types now read as plain names (Boolean, String, Non-negative integer, Date and time). Hover over one to see the exact XSD type.',
+        roles: [],
+        to: '{o}/browse',
+      },
+      {
+        id: 'alignment-sweep',
+        type: 'fix',
+        title: 'Things line up again',
+        detail:
+          'A long property name that wraps onto two lines stays left-aligned instead of centring. The governance rules start in one column, every governance section has an icon, system events in the activity feed get a round icon, and the Concord name is no longer cut short on a phone.',
         roles: [],
         to: '{o}/browse',
       },

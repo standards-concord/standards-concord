@@ -15,7 +15,12 @@ export function ActivityList({ items, compact }: { items: ActivityItem[]; compac
       {items.map((a) => {
         const body = (
           <div className={cx('flex gap-3 rounded-lg px-2 py-2', a.link && 'hover:bg-surface-2')}>
-            {a.actorName ? <Avatar name={a.actorName} src={a.actorAvatarUrl} size={compact ? 22 : 26} simulated={a.simulated} /> : <span className="mt-0.5 rounded-full bg-surface-2 p-1"><Bot className="size-3.5 text-muted" /></span>}
+            {a.actorName ? <Avatar name={a.actorName} src={a.actorAvatarUrl} size={compact ? 22 : 26} simulated={a.simulated} /> : (
+              // The same size and place as an avatar, so system events line up with people's (it used to stretch into a tall pill).
+              <span className={cx('inline-flex shrink-0 items-center justify-center self-start rounded-full bg-surface-2', compact ? 'size-[22px]' : 'size-[26px]')}>
+                <Bot className="size-3.5 text-muted" aria-hidden />
+              </span>
+            )}
             <div className="min-w-0 flex-1 text-sm">
               <p className="leading-snug">
                 {a.actorName && <span className="font-medium">{a.actorName} </span>}
