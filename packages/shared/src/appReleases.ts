@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.33.0',
+    date: '2026-11-06',
+    title: 'See who runs an ontology at a glance',
+    changes: [
+      {
+        id: 'role-rings',
+        type: 'feat',
+        title: 'Coloured rings for owners, stewards and ODI oversight',
+        detail:
+          'In the members list, owners, the steward (who chairs) and ODI oversight have a coloured ring round their picture, with a small key underneath. Hover over a picture to see their roles. Role chips on the Governance page use the same colours.',
+        roles: [],
+        to: '{o}',
+        ask: 'Could you tell who runs the working group from the rings? Are the colours clear in the look you use?',
+      },
+    ],
+  },
+  {
     version: '0.32.0',
     date: '2026-11-05',
     title: 'Less to read on every page',

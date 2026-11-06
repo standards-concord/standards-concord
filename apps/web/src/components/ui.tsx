@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState, type AnchorHTMLAttributes, type But
 import { Link, type LinkProps } from 'react-router';
 import { CircleAlert, Check, Copy, LoaderCircle, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { errorMessage, ApiError } from '../api';
-import { initials } from '../lib/format';
+import { initials, listRoles, type RingRole } from '../lib/format';
 
 export function cx(...xs: (string | false | null | undefined)[]) {
   return xs.filter(Boolean).join(' ');
@@ -174,7 +174,7 @@ export function Async<T>({ state, children, label }: { state: { data: T | undefi
 
 /* ---------------------------------------------------------------- Badges */
 
-type Tone = 'neutral' | 'accent' | 'ok' | 'warn' | 'danger' | 'outline';
+type Tone = 'neutral' | 'accent' | 'ok' | 'warn' | 'danger' | 'outline' | 'odi';
 const TONES: Record<Tone, string> = {
   neutral: 'bg-surface-2 text-muted',
   accent: 'bg-accent-soft text-accent',
@@ -182,6 +182,8 @@ const TONES: Record<Tone, string> = {
   warn: 'bg-warn-soft text-warn',
   danger: 'bg-danger-soft text-danger',
   outline: 'border border-line-strong text-muted',
+  // ODI oversight's role colour, matching its avatar ring (index.css).
+  odi: 'bg-[var(--role-odi-soft)] text-[var(--role-odi)]',
 };
 export function Badge({ tone = 'neutral', children, className, icon: Icon, title }: { tone?: Tone; children: ReactNode; className?: string; icon?: LucideIcon; title?: string }) {
   return (
@@ -192,10 +194,13 @@ export function Badge({ tone = 'neutral', children, className, icon: Icon, title
   );
 }
 
-export function Avatar({ name, src, size = 28, simulated }: { name?: string; src?: string; size?: number; simulated?: boolean }) {
+export function Avatar({ name, src, size = 28, simulated, roles }: { name?: string; src?: string; size?: number; simulated?: boolean; roles?: readonly RingRole[] }) {
   const [broken, setBroken] = useState(false);
   const hue = [...(name ?? '?')].reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
-  const label = (name ?? 'Unknown') + (simulated ? ' (simulated)' : '');
+  // Owners, stewards and ODI oversight get a ring in their most senior role's colour (see ringRoles);
+  // the name says which roles, for the tooltip and for screen readers.
+  const ring = roles?.[0];
+  const label = (name ?? 'Unknown') + (simulated ? ' (simulated)' : '') + (roles?.length ? `, ${listRoles(roles)}` : '');
   // A picture if there is one (demo accounts get a bundled one; see apps/server/src/services/avatars.ts),
   // otherwise, or if it fails to load, the person's initials on their colour.
   const picture = src && !broken;
@@ -205,9 +210,19 @@ export function Avatar({ name, src, size = 28, simulated }: { name?: string; src
       aria-label={label}
       title={label}
       data-avatar={picture ? 'picture' : 'initials'}
-      className={cx('relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[var(--r-avatar)] text-[0.65rem] font-semibold text-white', simulated && 'ring-2 ring-dashed ring-line-strong')}
+      data-role-ring={ring}
+      className={cx(
+        'relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[var(--r-avatar)] text-[0.65rem] font-semibold text-white',
+        ring ? 'outline-2 outline-offset-1' : simulated && 'ring-1 ring-line-strong',
+      )}
       // The pictures are black line art, so they sit on a light tint of the person's colour; initials are white on the darker shade.
-      style={{ width: size, height: size, background: `hsl(${hue} var(--avatar-s) ${picture ? 'var(--avatar-picture-l, 86%)' : 'var(--avatar-l)'})`, fontSize: size * 0.38 }}
+      style={{
+        width: size,
+        height: size,
+        background: `hsl(${hue} var(--avatar-s) ${picture ? 'var(--avatar-picture-l, 86%)' : 'var(--avatar-l)'})`,
+        fontSize: size * 0.38,
+        ...(ring && { outlineStyle: 'solid', outlineColor: `var(--role-${ring})` }),
+      }}
     >
       {picture ? <img src={src} alt="" decoding="async" className="size-full object-cover" onError={() => setBroken(true)} /> : <span aria-hidden="true">{initials(name)}</span>}
     </span>

@@ -107,6 +107,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Behaviour | Status | Specs |
 | --- | --- | --- |
 | Profile pictures: simulated members and demo testers show a bundled picture (members list, account menu, activity feed); initials when a picture fails to load | ✅ | avatars |
+| Role rings: owners, the steward and ODI oversight get a coloured ring on their avatar (Overview members, Governance members) with a key under the Overview avatars; role chips use the same colours; others get no ring; a contributor sees them but can't change roles; ring colours meet 3:1 and stay distinct in every look | ✅ | role-rings, looks |
 
 ## Open pull requests that bring their own specs
 
