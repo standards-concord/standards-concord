@@ -21,8 +21,13 @@ import { Badge, Button, Card, InlineError, Select, buttonClasses, cx } from './u
  */
 export function TesterStatus({ className, returnTo = '/alpha', compact }: { className?: string; returnTo?: string; compact?: boolean }) {
   const t = useTester();
+  const { session } = useSession();
+  // Whose answer in the fold this is: once someone picks a version there, the fold stays (mounted and open) for
+  // them, so the picker doesn't vanish from under the keyboard and "This is my first time" doesn't fold it away.
+  const [pickedBy, setPickedBy] = useState<string | null>();
+  const who = session?.user?.id ?? null;
   // A first-time tester needs neither the version picker nor the sign-in prompt, so both fold into one link.
-  if (!t.since)
+  if (!t.since || (pickedBy !== undefined && pickedBy === who))
     return (
       <Card className={cx('divide-y divide-line', className)}>
         <div className={compact ? 'p-4' : 'p-4 sm:p-5'}>
@@ -31,7 +36,7 @@ export function TesterStatus({ className, returnTo = '/alpha', compact }: { clas
         <div className={compact ? 'px-4 py-3' : 'px-4 py-3 sm:px-5'}>
           <Disclosure title="What’s new since you last tested?">
             <div className="space-y-4 pt-1">
-              <WhatsChanged showTitle={false} />
+              <WhatsChanged showTitle={!!t.since} onPick={() => setPickedBy(who)} />
               <SavePrompt returnTo={returnTo} />
             </div>
           </Disclosure>
@@ -245,7 +250,7 @@ const SOURCE_LABEL = { picked: 'you picked it', pod: 'from your pod', browser: '
  * picker stays open while they try versions, until they press Done, which
  * returns focus to the button that opened it; a status line announces the result.
  */
-export function WhatsChanged({ showTitle = true }: { showTitle?: boolean } = {}) {
+export function WhatsChanged({ showTitle = true, onPick }: { showTitle?: boolean; onPick?: () => void } = {}) {
   const t = useTester();
   const demo = useDemoOntology();
   const role = TESTER_ROLES.find((r) => r.key === t.roleKey);
@@ -293,7 +298,15 @@ export function WhatsChanged({ showTitle = true }: { showTitle?: boolean } = {})
         {status}
       </p>
       {undecided && <p className="text-sm text-muted">Pick the last version you tried and we’ll show you what’s changed since, point you at it, and ask about that rather than everything.</p>}
-      {showPicker && <VersionPicker id={pickerId} onPicked={() => setPicking(true)} />}
+      {showPicker && (
+        <VersionPicker
+          id={pickerId}
+          onPicked={() => {
+            setPicking(true);
+            onPick?.();
+          }}
+        />
+      )}
       {!t.since && t.baselineSource === 'picked' && <p className="text-sm text-muted">Welcome! Everything is new to you, so the walkthrough covers it all.</p>}
       {t.since && (
         <>

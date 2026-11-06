@@ -135,6 +135,34 @@ test('a returning tester’s versions and feedback are saved to their pod and st
   await expectNoCrash(page);
 });
 
+// Picking a version used to swap the folded card for the expanded one, so the picker vanished from under the
+// keyboard before Done, and picking "This is my first time" afterwards folded everything away again.
+test('a first-time tester picks a version in the fold by keyboard, and it stays open while they change their mind', async ({ page }) => {
+  await page.goto('/alpha');
+  await openWhatsNew(page);
+  const changed = page.getByRole('region', { name: 'What’s changed' });
+  const picker = changed.getByLabel('Last version you tested');
+  await picker.focus();
+  await picker.selectOption('0.6.0');
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.6.0' })).toBeVisible();
+  // The picker stays put, with focus, until Done.
+  await expect(picker).toBeFocused();
+  await expect(changed.getByRole('status')).toHaveText(`Showing ${changesSince('0.6.0').length} changes since 0.6.0.`);
+  await changed.getByRole('button', { name: 'Done' }).click();
+  await expect(picker).toHaveCount(0);
+  await expect(changed.getByRole('button', { name: 'Change', exact: true })).toBeFocused();
+
+  // Changing their mind to "first time" keeps the fold open, with the welcome and the sign-in prompt.
+  await changed.getByRole('button', { name: 'Change', exact: true }).click();
+  await changed.getByLabel('Last version you tested').focus();
+  await changed.getByLabel('Last version you tested').selectOption('first');
+  await expect(whatsNew(page)).toHaveAttribute('aria-expanded', 'true');
+  await expect(changed.getByText('Welcome! Everything is new to you, so the walkthrough covers it all.')).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Your testing record' })).toContainText('Sign in so we can remember what you tested');
+  await expect(changed.getByLabel('Last version you tested')).toBeFocused();
+  await expectNoCrash(page);
+});
+
 test('a tester with history can compare with another version and come back, by keyboard', async ({ page }) => {
   await page.goto('/alpha');
   await openWhatsNew(page);
