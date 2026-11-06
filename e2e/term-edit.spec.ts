@@ -145,40 +145,41 @@ test.describe('editing a term inline', () => {
     expect(cr.classification.reasons.map((r: { rule: string }) => r.rule)).toContain('meaning-changed');
   });
 
-  test('switching terms closes the editor, and Edit waits for the selected term to load', async ({ page }) => {
+  test('switching terms closes the editor, and the next term opens at once with no request', async ({ page }) => {
     const id = await openTerm(page, 'Skill');
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     await expect(editor(page)).toBeVisible();
-    // Hold the next term's response so we can act while it loads.
-    let release!: () => void;
-    const held = new Promise<void>((r) => (release = r));
-    await page.route('**/api/ontologies/*/terms/**', async (route) => {
-      await held;
-      await route.continue();
+    // A term's details come from the ontology the page already holds: following a term
+    // asks the server nothing (it used to fetch each term, with a spinner, on every click).
+    const asked: string[] = [];
+    page.on('request', (r) => {
+      if (r.url().includes('/terms/')) asked.push(r.url());
     });
     await classItem(page, 'time commitment').click();
     await expect(editor(page)).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeDisabled();
-    release();
-    await expect(page.getByRole('button', { name: 'Edit', exact: true })).toBeEnabled();
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     await expect(editor(page).getByRole('heading', { name: 'Edit “time commitment”' })).toBeVisible();
     await expect(editor(page).getByLabel(/^Label( changed)?$/)).toHaveValue('time commitment');
     expect(page.url()).toContain(`/o/${id}/browse`);
+    expect(asked).toEqual([]);
   });
 
   test('a conflicting change is refused; loading the latest keeps your edits, refreshes the rest and asks about overlaps', async ({ page, consoleGuard }) => {
     consoleGuard.allow(/status of 409/);
-    // Pretend someone else changed the label and comment after this page loaded
-    // the term: the first response the editor sees carries out-of-date values.
+    // Pretend someone else changed the label and comment after this page loaded the
+    // ontology: the term the editor opens on (from the page's copy) has out-of-date values.
     let stale = true;
+    await page.route(/\/api\/ontologies\/[^/]+\/view/, async (route) => {
+      const res = await route.fetch();
+      if (!stale) return route.fulfill({ response: res });
+      const view = await res.json();
+      for (const c of view.classes) if (c.iri === `${VOL}Session`) Object.assign(c, { label: 'old session label', comment: 'An older comment that has since been replaced.' });
+      await route.fulfill({ response: res, json: view });
+    });
     let hold: Promise<void> | undefined;
     await page.route('**/api/ontologies/*/terms/**', async (route) => {
       if (hold) await hold;
-      if (!stale) return route.continue();
-      const res = await route.fetch();
-      const body = await res.json();
-      await route.fulfill({ response: res, json: { ...body, label: 'old session label', comment: 'An older comment that has since been replaced.' } });
+      await route.continue();
     });
     await openTerm(page, 'Session');
     stale = false;

@@ -24,6 +24,21 @@ const Ctx = createContext<SessionCtx | null>(null);
 let activeAccount: string | undefined;
 
 /**
+ * Called whenever this tab's account changes: signing in, out (here or in another tab) or as someone
+ * else. Anything kept in memory that only one account could read is dropped then.
+ */
+const accountListeners = new Set<() => void>();
+export function onAccountChange(fn: () => void): () => void {
+  accountListeners.add(fn);
+  return () => accountListeners.delete(fn);
+}
+function setActiveAccount(next: string | undefined) {
+  if (next === activeAccount) return;
+  activeAccount = next;
+  for (const fn of accountListeners) fn();
+}
+
+/**
  * Counts sign-outs across every tab of this browser (in localStorage, so it is
  * shared and read synchronously). Work started before a sign-out anywhere
  * compares it before saving: a tab that hasn't heard about another tab's
@@ -61,7 +76,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const fetchedAt = useRef(Date.now());
 
   const setSession = useCallback((s: SessionInfo) => {
-    activeAccount = s.user?.id ?? 'guest';
+    setActiveAccount(s.user?.id ?? 'guest');
     fetchedAt.current = Date.now();
     setSessionState(s);
     setError(undefined);
@@ -109,7 +124,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const was = current?.user?.id;
       if (was) clearDrafts(was);
       if (current) setSession({ ...current, user: undefined });
-      activeAccount = undefined;
+      setActiveAccount(undefined);
       void fetchSession()
         .then((s) => s && setSession(s))
         .catch(() => {});
@@ -164,11 +179,11 @@ export function useSession() {
  * otherwise. The query drafts and assistant chats are what is cleared.
  */
 export function beginSignOut(userId: string) {
-  activeAccount = undefined;
+  setActiveAccount(undefined);
   clearDrafts(userId);
 }
 export function finishSignOut(userId: string) {
-  activeAccount = undefined;
+  setActiveAccount(undefined);
   try {
     localStorage.setItem(SIGN_OUTS, String(Number(signOuts()) + 1));
   } catch {

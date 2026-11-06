@@ -8,12 +8,13 @@ import type {
   ClassView, IndividualView, IRI, OntologyMetadata, OntologyView, PropertyCharacteristic,
   PropertyView, Restriction, TermAnnotations, TermView,
 } from './types.js';
-import { NS, RDF_TYPE, STANDARD_PREFIXES, isSafeNamespace, isSafePrefix, localName, today } from './ns.js';
+import { NS, RDF_TYPE, STANDARD_PREFIXES, isSafeNamespace, isSafePrefix, today } from './ns.js';
 import {
   cloneStore, firstObject, hasType, langLit, manchesterExpr, namedNode, nn, objects, readList,
   subjects, typedLit, quad, defaultGraph,
 } from './rdf.js';
 import { writeTurtle } from './turtle.js';
+import { allTerms, searchTerms } from './termIndex.js';
 import { REMOTE_REFUSED, noRemoteDocuments } from './jsonld-loader.js';
 
 export const CHARACTERISTIC_TYPES: Record<PropertyCharacteristic, string> = {
@@ -268,36 +269,9 @@ export class OntologyGraph {
 
   /** Ranked fuzzy search over labels, alt labels, local names and definitions. */
   search(query: string, limit = 20): TermView[] {
-    const q = query.trim().toLowerCase();
-    if (!q) return [];
-    const tokens = q.split(/\s+/);
-    const v = this.view();
-    const all: TermView[] = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.annotationProperties, ...v.individuals];
-    const scored: [number, TermView][] = [];
-    for (const t of all) {
-      const label = (t.label ?? '').toLowerCase();
-      const ln = localName(t.iri).toLowerCase();
-      const alts = (t.altLabels ?? []).map((a) => a.toLowerCase());
-      const def = (t.definition ?? '').toLowerCase();
-      let score = 0;
-      if (label === q || ln === q.replace(/\s+/g, '')) score = 100;
-      else if (alts.includes(q)) score = 90;
-      else if (label.startsWith(q) || ln.startsWith(q.replace(/\s+/g, ''))) score = 80;
-      else if (label.includes(q) || ln.includes(q.replace(/\s+/g, ''))) score = 70;
-      else if (alts.some((a) => a.includes(q))) score = 60;
-      else {
-        const hay = [label, ln, ...alts].join(' ');
-        const hits = tokens.filter((tok) => hay.includes(tok)).length;
-        const defHits = tokens.filter((tok) => def.includes(tok)).length;
-        if (hits === tokens.length) score = 50;
-        else if (hits + defHits >= tokens.length) score = 30 + hits;
-        else if (hits > 0 || defHits > 0) score = 10 + hits * 2 + defHits;
-        else if (isSubsequence(q.replace(/\s+/g, ''), ln)) score = 5;
-      }
-      if (score > 0) scored.push([score - (t.deprecated ? 20 : 0), t]);
-    }
-    return scored.sort((a, b) => b[0] - a[0] || a[1].iri.localeCompare(b[1].iri)).slice(0, limit).map((x) => x[1]);
+    return searchTerms(allTerms(this.view()), query, limit);
   }
+
 
   metadata(): OntologyMetadata {
     const iri = this.ontologyIRI;
@@ -550,12 +524,6 @@ function nonEmpty<T>(xs: T[]): T[] | undefined {
 function clean<T extends object>(o: T): T {
   for (const k of Object.keys(o) as (keyof T)[]) if (o[k] === undefined) delete o[k];
   return o;
-}
-
-function isSubsequence(needle: string, hay: string): boolean {
-  let i = 0;
-  for (const ch of hay) if (ch === needle[i]) i++;
-  return i === needle.length && needle.length > 2;
 }
 
 /* ------------------------------------------------------------------------ */

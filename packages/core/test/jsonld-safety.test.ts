@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { OntologyGraph, applyChangeOps, serialize } from '../src/index.js';
 import { setMetadata } from '../src/changes.js';
 import { compactJsonLd } from '../src/serialize.js';
-import { isSafeNamespace, isSafePrefix, namespaceCacheForTests, setOxigraphLoaderForTests } from '../src/ns.js';
+import { OxigraphNotInNode, isSafeNamespace, isSafePrefix, namespaceCacheForTests, setOxigraphLoaderForTests } from '../src/ns.js';
 import { createRequire } from 'node:module';
 import v8 from 'node:v8';
 import vm from 'node:vm';
@@ -174,6 +174,24 @@ describe('editable metadata can’t put JSON-LD keywords in a context', () => {
       expect(isSafeNamespace(ns)).toBe(false);
       expect(isSafeNamespace(ns)).toBe(false);
       expect(errors).toHaveBeenCalledTimes(1);
+      setOxigraphLoaderForTests(() => createRequire(import.meta.url)('oxigraph'));
+      expect(isSafeNamespace(ns)).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  // Used to go wrong: in a browser (no Oxigraph by design) the first new namespace logged a console
+  // error, which pages that build an OntologyGraph for an ontology just created showed as a failure.
+  it('outside Node, refuses an unchecked namespace without reporting an error', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const ns = `https://browser.example/${Date.now()}#`;
+    try {
+      setOxigraphLoaderForTests(() => {
+        throw new OxigraphNotInNode();
+      });
+      expect(isSafeNamespace(ns)).toBe(false);
+      expect(errors).not.toHaveBeenCalled();
       setOxigraphLoaderForTests(() => createRequire(import.meta.url)('oxigraph'));
       expect(isSafeNamespace(ns)).toBe(true);
     } finally {
