@@ -125,3 +125,56 @@ export function VSCodeLogo() {
     </svg>
   );
 }
+
+/** The apps Concord has a logo for. */
+export type AgentApp = 'claude' | 'chatgpt' | 'claude-code' | 'codex' | 'cursor' | 'vscode';
+
+const LOGOS: Record<AgentApp, () => React.JSX.Element> = {
+  claude: ClaudeLogo,
+  chatgpt: OpenAILogo,
+  'claude-code': ClaudeCodeLogo,
+  codex: CodexLogo,
+  cursor: CursorLogo,
+  vscode: VSCodeLogo,
+};
+
+/** The names each app registers with, compared after normalizeAgentName. Exact matches only (a Map, so "constructor" is just a name). */
+const ALIASES = new Map<string, AgentApp>([
+  ['claude', 'claude'],
+  ['claude code', 'claude-code'],
+  ['chatgpt', 'chatgpt'],
+  ['codex', 'codex'],
+  ['cursor', 'cursor'],
+  ['visual studio code', 'vscode'],
+  ['vs code', 'vscode'],
+  ['vscode', 'vscode'],
+]);
+
+/** Lower case, with runs of whitespace (spaces, tabs, non-breaking spaces) collapsed to one space and trimmed. */
+export function normalizeAgentName(name: string) {
+  return name.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * Which app a connected agent is, from the name it registered with. The whole
+ * name must be one of the app's names. The one exception is Claude Code, which
+ * registers as "Claude Code (<server name>)", so it may carry one bracketed
+ * label. "Not Claude", "Cursor-malware" or "Cursor (malware)" get the generic
+ * mark, not an official one.
+ *
+ * Accepted limit: the name is the app's own claim, and nothing stops another
+ * app registering as exactly "Claude". The row already shows that same name as
+ * text, so the logo claims no more than the name does. Whether Concord could
+ * confirm who made an app is said on the consent page, before it connects.
+ */
+export function agentAppFor(clientName: string): AgentApp | undefined {
+  const name = normalizeAgentName(clientName);
+  if (/^claude code \([^()]*\)$/.test(name)) return 'claude-code';
+  return ALIASES.get(name);
+}
+
+/** The logo for an app, decorative and the same size as in the Connect picker. */
+export function AgentLogo({ app }: { app: AgentApp }) {
+  const Logo = LOGOS[app];
+  return <Logo />;
+}
