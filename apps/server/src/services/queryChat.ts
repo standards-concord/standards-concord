@@ -59,7 +59,8 @@ function unchanged(req: QueryChatRequest, reply: string): Draft {
 function checked(req: QueryChatRequest, d: Draft): Draft {
   if (d.unchanged) return d;
   const problem = queryProblem(d.query);
-  return problem ? unchanged(req, `I couldn’t write a query for that. ${problem}`) : tidyColumns({ ...d, reply: tidyReply(d.reply) });
+  // The page decides what the query runs over (its sample data whenever it has records), so the answer keeps that.
+  return problem ? unchanged(req, `I couldn’t write a query for that. ${problem}`) : tidyColumns({ ...d, target: req.target, reply: tidyReply(d.reply) });
 }
 
 /* ------------------------------------------------------------------------ */

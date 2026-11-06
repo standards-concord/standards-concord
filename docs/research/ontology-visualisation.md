@@ -16,11 +16,10 @@ What existing ontology tools show, what holds up and what doesn't, and what Conc
 
 ## What Concord does
 
-The Browse tab has three views that share the class tree on the left and the term page below.
+The Browse tab has two views that share the class tree on the left and the term page below. (A third, a WebVOWL-style force-directed **Graph**, was removed on 6 Nov 2026: it drew the same classes as the Diagram in a layout that was harder to read.)
 
 - **Classes.** An accessible tree (WAI-ARIA tree pattern: one tab stop, arrow keys, Home and End, type-ahead, expand and collapse all). Ancestors of the selected class open automatically. A class with several parents appears under each. Each class page now has breadcrumbs for every inheritance path, its subclasses, a schema.org-style **property table** (own properties, then those inherited from each ancestor, with expected type and cardinality from domains, ranges, restrictions and functional characteristics), the relationships that can point at it, and a small **neighbourhood diagram**.
 - **Diagram.** A UML-style class diagram, because the ODI works in LinkML and data modellers read UML. Boxes list datatype attributes as `name : type [min..max]`. Object properties are labelled associations with cardinalities. Subclasses point to their parent with a hollow triangle. Layout is layered top-down (parents above children) with dagre, so the hierarchy stays readable. It can show the whole ontology, or a class and everything one or two links away. Attributes, inherited attributes, relationships and subclass links can each be turned off. It's drawn as SVG, so it's sharp at any zoom and can be downloaded.
-- **Graph.** A network overview in the spirit of WebVOWL and OntoGraf, with a hierarchical layout by default and force-directed and radial alternatives. Node size reflects the number of subclasses. Attributes (as yellow datatype nodes, VOWL style) and disjointness can be switched on. Selecting a class outlines its neighbours and thickens their links. Clicking a relationship opens the property. It can be downloaded as a PNG.
 
 ### Following Astra's UI review (findings 10, 11 and 25)
 
