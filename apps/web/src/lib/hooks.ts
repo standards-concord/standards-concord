@@ -53,7 +53,16 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
     }
   }, [owner]);
 
+  // The deps the loader last started with. When they change, the effect that starts the next load runs only after
+  // the render, so that one render used to report the old load as finished (loading false, with the old deps' data).
+  // Feedback's choice buttons enabled for that render and disabled again a moment later, and a click in between
+  // did nothing. Until the new load has started, report it as loading.
+  const startedWith = useRef<unknown[]>(undefined);
+  const prev = startedWith.current;
+  const stale = !prev || prev.length !== deps.length || deps.some((d, i) => !Object.is(d, prev[i]));
+
   useEffect(() => {
+    startedWith.current = deps;
     void run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
@@ -67,7 +76,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
     setDataState((prev) => (typeof d === 'function' ? (d as (p: T | undefined) => T)(prev) : d));
   }, [owner]);
 
-  return { data, error, loading, reload: run, setData };
+  return { data, error, loading: loading || stale, reload: run, setData };
 }
 
 /** Wrap an async action with pending/error state. */
