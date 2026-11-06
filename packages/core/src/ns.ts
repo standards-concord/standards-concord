@@ -48,9 +48,15 @@ export const isSafePrefix = (p: string): boolean =>
 // Node's require, looked up only when Oxigraph is first needed. No static import of node:module,
 // so the module also loads in a browser (the in-browser reasoner imports it through graph.ts).
 type NodeModule = { createRequire(url: string): (id: string) => unknown };
+/** Thrown outside Node (in a browser), where there is no Oxigraph by design: namespaces fail closed, quietly. */
+export class OxigraphNotInNode extends Error {
+  constructor() {
+    super('Oxigraph is only available in Node');
+  }
+}
 const nodeRequire = (id: string): unknown => {
   const mod = (globalThis as { process?: { getBuiltinModule?: (id: string) => unknown } }).process?.getBuiltinModule?.('node:module') as NodeModule | undefined;
-  if (!mod) throw new Error('Oxigraph is only available in Node');
+  if (!mod) throw new OxigraphNotInNode();
   return mod.createRequire(import.meta.url)(id);
 };
 type Oxigraph = { parse(input: string, options: { format: string }): Array<{ subject: { value: string }; object: { value: string } }> };
@@ -109,7 +115,8 @@ function remember(iri: string, ok: boolean): boolean {
     verdictChars = 0;
   }
   // A copy, not the string itself: a parser's substring would keep its whole source document alive in the cache.
-  verdicts.set(Buffer.from(iri, 'utf8').toString('utf8'), ok);
+  // (Buffer only exists in Node; a browser has no such parser source to keep alive.)
+  verdicts.set(typeof Buffer === 'undefined' ? iri : Buffer.from(iri, 'utf8').toString('utf8'), ok);
   verdictChars += iri.length;
   return ok;
 }
@@ -127,7 +134,9 @@ function parsersAgree(iri: string): boolean | 'unavailable' {
     try {
       oxigraph = loadOxigraph();
     } catch (err) {
-      if (!loadFailureReported) console.error(`Namespace checks are refusing every namespace: Oxigraph could not be loaded (${(err as Error).message}).`);
+      // In a browser this is expected (nothing there writes Turtle or JSON-LD for others to read), so
+      // it isn't reported as an error; on the server it means the check is broken.
+      if (!loadFailureReported && !(err instanceof OxigraphNotInNode)) console.error(`Namespace checks are refusing every namespace: Oxigraph could not be loaded (${(err as Error).message}).`);
       loadFailureReported = true;
       return 'unavailable';
     }
