@@ -8,7 +8,7 @@ GitHub Actions minutes are free and unlimited on a public repository, but metere
 | --- | --- | --- |
 | Push to a branch with no PR | nothing | 0 min |
 | Push to a draft PR | `test` (typecheck, unit tests, build, listing checks) | 14 min |
-| PR marked ready for review, and every push after | `test`, `e2e` (dev and preview), `walkthrough` | 25 min |
+| PR marked ready for review, and every push after | `test`, `e2e` (preview: everything; dev: smoke test), `walkthrough` | 25 min |
 | Push to `main` | all of the above, then `image` (backend deploy) | 30 min |
 | Vercel production deploy | `Live site` smoke test | 2 min |
 | Only `docs/`, `deploy/` or Markdown changed (outside `walkthrough/`) | nothing | 0 min |
@@ -39,7 +39,13 @@ scripts/ci-local.sh --report      # test, e2e-dev, e2e-preview, e2e-solid, walkt
 scripts/ci-local.sh e2e-dev       # or just some jobs, without posting anything
 ```
 
-The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. A full run takes about an hour (in a Claude sandbox: `test` 14 min, `e2e-dev` 24, `e2e-preview` 15, `e2e-solid` 1, `walkthrough` 7).
+The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. A full run takes about 13 minutes in a 4-CPU Claude sandbox (it took an hour before these changes):
+
+- Jobs run side by side (`--parallel`, one per CPU by default), and the browser suite is split into three shards (`--shards`), each with its own API server, web server, data directory and ports, so no two share state.
+- The web app is built once, up front.
+- As in CI, the production build gets the whole browser suite and the Vite dev server a smoke test (`pnpm test:e2e:smoke`: the pages, the alpha walkthrough, the reasoner and Validate data). Running all ~490 tests against both took 24 minutes more and caught little: what breaks in only one of them almost always breaks the build.
+- The server's test files run in parallel, each worker with its own Postgres database (apps/server/test/setup.ts).
+- `settle()` in the browser tests waits until the page has no request in flight for 150 ms, instead of Playwright's `networkidle`, which always waits out 500 ms and took about 40% of a typical test.
 
 With `--report` it records the result for the commit it tested, and refuses to run with uncommitted changes, so the record always describes exactly that commit:
 

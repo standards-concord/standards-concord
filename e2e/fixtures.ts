@@ -1,4 +1,4 @@
-import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test';
+import { test as base, expect, type APIRequestContext, type Page, type Request } from '@playwright/test';
 
 /**
  * Shared test fixture. Every test fails if the page throws an uncaught error, logs a
@@ -14,9 +14,33 @@ export interface ConsoleGuard {
 // Network failures the app handles itself, e.g. GET /api/session before sign-in.
 const ALWAYS_ALLOWED = [/Failed to load resource: the server responded with a status of 401/];
 
+/**
+ * Requests in flight per page, so `settle` can tell when a page has finished loading without
+ * Playwright's `networkidle`, which always waits out 500 ms of silence (about 40% of a typical
+ * test's time went there). Event streams stay open by design, so they don't count.
+ */
+const network = new WeakMap<Page, { inflight: Set<Request>; last: number }>();
+function trackNetwork(page: Page) {
+  if (network.has(page)) return;
+  const t = { inflight: new Set<Request>(), last: Date.now() };
+  network.set(page, t);
+  page.on('request', (r) => {
+    if (r.resourceType() === 'eventsource') return;
+    t.inflight.add(r);
+    t.last = Date.now();
+  });
+  const done = (r: Request) => {
+    if (t.inflight.delete(r)) t.last = Date.now();
+  };
+  page.on('requestfinished', done);
+  page.on('requestfailed', done);
+}
+
 export const test = base.extend<{ consoleGuard: ConsoleGuard }>({
   consoleGuard: [
-    async ({ page }, use) => {
+    async ({ page, context }, use) => {
+      trackNetwork(page);
+      context.on('page', trackNetwork);
       const allowed = [...ALWAYS_ALLOWED];
       const errors: string[] = [];
       page.on('pageerror', (e) => errors.push(`Uncaught: ${e.message}`));
@@ -73,9 +97,24 @@ export async function expectNoCrash(page: Page) {
     await expect(page.getByRole('alert').filter({ hasText: title }), `error card "${title}"`).toHaveCount(0);
 }
 
-/** Waits until no "Loading…" spinners remain in the main content. */
+/**
+ * Waits until the page has had no request in flight for `quietMs` (or `timeoutMs` passes, as
+ * `networkidle` used to give up): the page's data and code have arrived, and a request that
+ * a render starts straight after a response still counts.
+ */
+export async function networkQuiet(page: Page, { quietMs = 150, timeoutMs = 10_000 } = {}) {
+  const t = network.get(page);
+  if (!t) return page.waitForLoadState('networkidle').catch(() => {});
+  await page.waitForLoadState('load').catch(() => {});
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && (t.inflight.size > 0 || Date.now() - t.last < quietMs)) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+/** Waits until the page has loaded its data and no "Loading…" spinners remain in the main content. */
 export async function settle(page: Page) {
-  await page.waitForLoadState('networkidle').catch(() => {});
+  await networkQuiet(page);
   await expect(page.locator('[aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
 }
 

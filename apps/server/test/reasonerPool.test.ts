@@ -58,7 +58,14 @@ describe('reasoner worker pool', () => {
     expect(r).toMatchObject({ engine: 'none', available: false, checked: 'none', consistent: false, unsatisfiable: [] });
     expect(r.error).toMatch(/took longer than 20 ms.*structural checks took longer than 50 ms/);
     expect(elapsed).toBeLessThan(1000);
-    expect(ticks).toBeGreaterThan(elapsed / 10 / 3);
+    // The main thread kept ticking at least a third as often as it does with nothing to do, over
+    // the same time. Used to compare with the ideal 10 ms rate instead, which failed whenever the
+    // machine was busy with other work (tests running side by side), blocked or not.
+    let idle = 0;
+    const idleBeat = setInterval(() => idle++, 10);
+    await new Promise((resolve) => setTimeout(resolve, elapsed));
+    clearInterval(idleBeat);
+    expect(ticks).toBeGreaterThan(Math.min(elapsed / 10, idle) / 3);
   });
 
   // The same gap as a timeout, for a crash: the worker dying mid-check must not read as "consistent".

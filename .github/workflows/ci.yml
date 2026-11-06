@@ -116,8 +116,10 @@ jobs:
       - name: Check the MCP Registry entry
         run: ~/.local/bin/mcp-publisher validate
 
-  # Browser tests: the alpha walkthrough and every page of the app, against both the
-  # Vite dev server (what `pnpm dev` runs) and the production build (what Vercel serves).
+  # Browser tests: the alpha walkthrough and every page of the app. The whole suite runs
+  # against the production build (what Vercel serves); the Vite dev server (what `pnpm dev`
+  # runs) gets a smoke test of the pages, the walkthrough, the reasoner and Validate data,
+  # since breakage that shows only under one of them is rare and the full run took 24 minutes.
   e2e:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
@@ -135,7 +137,7 @@ jobs:
         if: matrix.mode == 'preview'
         run: pnpm --filter @concord/web build
       - name: Playwright
-        run: pnpm test:e2e
+        run: pnpm ${{ matrix.mode == 'dev' && 'test:e2e:smoke' || 'test:e2e' }}
         env:
           E2E_MODE: ${{ matrix.mode }}
       - uses: actions/upload-artifact@v4
