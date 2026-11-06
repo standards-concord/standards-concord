@@ -300,6 +300,21 @@ test.describe('Validate data', () => {
     await expect(page.getByRole('alert')).toBeVisible();
   });
 
+  // Used to go wrong: choosing a file over 5 MB showed why it was refused, then the check that the
+  // choice set off for the data already there finished and cleared the message.
+  test('a file over 5 MB is refused, and the message stays', async ({ page }) => {
+    await page.goto('/o/volunteering/validate');
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    const buffer = Buffer.alloc(5 * 1024 * 1024 + 1, ' ');
+    await page.getByTestId('validate-file').setInputFiles({ name: 'too-big.ttl', mimeType: 'text/turtle', buffer });
+    const refused = page.getByRole('alert').filter({ hasText: 'too-big.ttl is larger than 5 MB' });
+    await expect(refused).toBeVisible();
+    // A check takes milliseconds here, so one set off by the choice would have answered by now.
+    await page.waitForTimeout(1000);
+    await expect(refused).toBeVisible();
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+  });
+
   // Query used to have a "Check data" workspace beside Validate data. It's gone: Query links here to edit its sample data.
   test('Query has no Check data any more, and the old address opens the query workspace', async ({ page }) => {
     await page.goto('/o/volunteering/query?view=check');

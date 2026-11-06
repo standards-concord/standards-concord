@@ -67,6 +67,37 @@ describe('checkDataInBrowser', () => {
     await expect(latest).resolves.toMatchObject({ conforms: true });
   });
 
+  // Used to go wrong: a check moved to a new worker kept its old timer, so it could be stopped
+  // as "too slow" moments after the new worker started it.
+  it('a check moved to a new worker gets its full time limit again', async () => {
+    vi.useFakeTimers();
+    const { checkDataInBrowser } = await load();
+    const slow = checkDataInBrowser(job('slow'), { timeoutMs: 1000 });
+    const newer = checkDataInBrowser(job('newer'), { timeoutMs: 1500 });
+    vi.advanceTimersByTime(1001);
+    await expect(slow).rejects.toMatchObject({ status: 422 });
+    let settled = false;
+    newer.then(() => (settled = true), () => (settled = true));
+    vi.advanceTimersByTime(1000);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    FakeWorker.all.at(-1)!.answer('newer');
+    await expect(newer).resolves.toMatchObject({ conforms: true });
+  });
+
+  // Used to go wrong: only an explicit sign-out reset the checker, so signing in as someone else
+  // (or out in another tab) left the last account's parsed ontologies in the worker.
+  it('any change of account forgets everything the worker parsed', async () => {
+    const listeners: (() => void)[] = [];
+    vi.doMock('./session', () => ({ onAccountChange: (fn: () => void) => (listeners.push(fn), () => undefined) }));
+    const { checkDataInBrowser } = await load();
+    const pending = checkDataInBrowser(job('x'));
+    for (const fn of listeners) fn();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(FakeWorker.all[0].terminated).toBe(true);
+    vi.doUnmock('./session');
+  });
+
   it('signing out forgets everything the worker parsed', async () => {
     const { checkDataInBrowser, resetDataCheck } = await load();
     const pending = checkDataInBrowser(job('x'));

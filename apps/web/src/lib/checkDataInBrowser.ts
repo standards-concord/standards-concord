@@ -1,6 +1,6 @@
 import type { DataCheckOutcome } from '@concord/core/data-check';
 import type { DataFormat } from '@concord/core/data-formats';
-import { onSignOut } from './session';
+import { onAccountChange } from './session';
 
 export interface DataCheckJob {
   /** Names the ontology version (and its exact text), so the worker can reuse what it parsed. */
@@ -26,7 +26,7 @@ let worker: Worker | undefined;
 let nextId = 0;
 /** An outcome, with how long the check itself took in the worker (parsing and checking, not the ontology download). */
 export type TimedOutcome = DataCheckOutcome & { ms: number };
-type Pending = { job: DataCheckJob & { id: number }; resolve: (o: TimedOutcome) => void; reject: (e: Error) => void };
+type Pending = { job: DataCheckJob & { id: number }; timeoutMs: number; timer?: ReturnType<typeof setTimeout>; resolve: (o: TimedOutcome) => void; reject: (e: Error) => void };
 const pending = new Map<number, Pending>();
 
 /** Stops the worker (and what it has parsed) and fails every check still waiting. */
@@ -51,14 +51,21 @@ function cancel(id: number, reason: Error) {
   worker = undefined;
   if (!pending.size) return;
   worker = start();
-  for (const other of pending.values()) worker.postMessage(other.job);
+  for (const other of pending.values()) post(other);
 }
 
-/** Forgets every parsed ontology: on signing out, so nothing one account could read stays in memory for the next. */
+/** Sends a check to the worker, with its full time limit from now (so one moved to a new worker gets its time again). */
+function post(p: Pending) {
+  clearTimeout(p.timer);
+  p.timer = setTimeout(() => cancel(p.job.id, new DataCheckError(`Checking took longer than ${Math.round(p.timeoutMs / 1000)} s and was stopped. Try smaller data.`, 422)), p.timeoutMs);
+  worker!.postMessage(p.job);
+}
+
+/** Forgets every parsed ontology and fails the checks under way: on any change of account, so nothing one account could read stays in memory for the next. */
 export function resetDataCheck() {
   stop(new DOMException('Cancelled', 'AbortError') as unknown as Error);
 }
-onSignOut(resetDataCheck);
+onAccountChange(resetDataCheck);
 
 function start(): Worker {
   const w = new Worker(new URL('./dataCheckWorker.ts', import.meta.url), { type: 'module', name: 'sparq-data-check' });
@@ -82,20 +89,20 @@ export function checkDataInBrowser(job: DataCheckJob, { signal, timeoutMs = 60_0
     if (signal?.aborted) return reject(new DOMException('Cancelled', 'AbortError'));
     worker ??= start();
     const id = ++nextId;
-    const timer = setTimeout(() => cancel(id, new DataCheckError(`Checking took longer than ${Math.round(timeoutMs / 1000)} s and was stopped. Try smaller data.`, 422)), timeoutMs);
     const onAbort = () => cancel(id, new DOMException('Cancelled', 'AbortError') as unknown as Error);
     signal?.addEventListener('abort', onAbort, { once: true });
-    const settle = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', onAbort);
-    };
-    const message = { ...job, id };
-    pending.set(id, {
-      job: message,
+    const entry: Pending = {
+      job: { ...job, id },
+      timeoutMs,
       resolve: (o) => (settle(), resolve(o)),
       reject: (e) => (settle(), reject(e)),
-    });
-    worker.postMessage(message);
+    };
+    const settle = () => {
+      clearTimeout(entry.timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    pending.set(id, entry);
+    post(entry);
   });
 }
 

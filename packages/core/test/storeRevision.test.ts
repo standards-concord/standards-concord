@@ -39,12 +39,24 @@ describe('storeRevision', () => {
     changed('removeMatches');
     store.deleteMatches(nn('https://e/b'));
     changed('deleteMatches');
+    // import reads a stream of quads: done once it ends.
+    await new Promise((r) => store.import(new Store([q('g')]).match(null, null, null, null)).on('end', r));
+    changed('import');
+    store.addQuad(quad(nn('https://e/h'), nn('https://e/p'), nn('https://e/o'), nn('https://e/graph')));
+    changed('addQuad to a named graph');
+    await new Promise((r) => store.deleteGraph(nn('https://e/graph')).on('end', r));
+    changed('deleteGraph');
     // Replacing one triple with another keeps the size the same, but is a change.
     const size = store.size;
     store.removeQuad(q('a'));
     store.addQuad(q('a', 'other'));
     expect(store.size).toBe(size);
     changed('replace');
+  });
+
+  it("gives a new number every time for a store it can't watch, so caches rebuild rather than go stale", () => {
+    const odd = { size: 0 } as unknown as Store;
+    expect(storeRevision(odd)).not.toBe(storeRevision(odd));
   });
 });
 

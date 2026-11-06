@@ -4,7 +4,7 @@ import { CheckCircle2, Download, FileUp, ListChecks, LoaderCircle, RotateCcw, Sh
 import { DATA_FORMATS, dataFormatForFile, sniffDataFormat, type DataFormat } from '@concord/core/data-formats';
 import { DATA_CHECK_LIMITS, DEFAULT_DATA_BASE } from '@concord/core/data-check';
 import { DataCheckError, checkDataInBrowser, resetDataCheck, warmDataCheck } from '../../lib/checkDataInBrowser';
-import { accountToken, onSignOut, stillCurrent } from '../../lib/session';
+import { accountToken, onAccountChange, stillCurrent } from '../../lib/session';
 import { api, type DataValidation } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { Badge, Button, Card, CardHeader, CopyButton, InlineError, Select, cx } from '../../components/ui';
@@ -34,8 +34,9 @@ type Sources = { key: string; turtle: string; shapes: string };
  * A version's ontology and shapes. A release never changes, so it is fetched once. The working
  * draft can change at any time, so each check fetches it again, except that a check made soon
  * after the page prefetched it uses that copy. What is kept is what this account could read: it
- * is forgotten when the account changes or anyone signs out (in any tab), along with what the
- * checker parsed, so the next account goes through the server's access check again.
+ * is forgotten as soon as the account changes (signing in, out, here or in another tab), along with
+ * what the checker parsed and the checks under way, so the next account goes through the server's
+ * access check again.
  */
 const sources = new Map<string, { at: number; sources: Promise<Sources> }>();
 const DRAFT_FRESH_MS = 30_000;
@@ -44,7 +45,7 @@ function forgetSources() {
   sources.clear();
   resetDataCheck();
 }
-onSignOut(forgetSources);
+onAccountChange(forgetSources);
 
 /** The draft's Turtle and shapes from the same revision: read again if a merge landed between the two downloads. */
 async function draftSources(id: string): Promise<{ turtle: string; shapes: string }> {
@@ -223,6 +224,19 @@ export function ValidateTab() {
   // A syntax error is shown where it is, in the list below the editor, rather than as the check's error too.
   const parseError = (error as { status?: number } | undefined)?.status === 400;
   const showError = !!error && !(turtleMode && parseError && (checks.syntaxError || checks.syntaxPending));
+  // Signing in or out (here or in another tab) drops what the last account's sources showed and checks again as the new one.
+  const [accountEpoch, setAccountEpoch] = useState(0);
+  useEffect(() => {
+    const off = onAccountChange(() => {
+      setSrc(undefined);
+      setAccountEpoch((n) => n + 1);
+      invalidate(true);
+    });
+    return () => {
+      off();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- invalidate only touches refs and setters
+  }, []);
   // Fetch the version's ontology and shapes as soon as it is picked, so Validate answers at once.
   useEffect(() => {
     versionSources(id, version, true)
@@ -233,7 +247,7 @@ export function ValidateTab() {
       .catch(() => {
         /* reported by the check */
       });
-  }, [id, version]);
+  }, [id, version, accountEpoch]);
 
   const setVersion = (v: string) => {
     const n = new URLSearchParams(params);
@@ -277,8 +291,9 @@ export function ValidateTab() {
   const run = async () => {
     const id = ++request.current;
     const snapshot = { text, format, version };
-    // A long check for older inputs (a large file) is stopped; a quick one finishes and its answer is dropped.
-    for (const previous of inFlight.current) if (Date.now() - previous.started > 500) previous.controller.abort();
+    // A check for older inputs is stopped once it has run 500 ms (a large file), now or later; a quick one
+    // finishes first and its answer is dropped. Either way it never holds up this one for long.
+    for (const previous of inFlight.current) setTimeout(() => previous.controller.abort(), Math.max(0, previous.started + 500 - Date.now()));
     const controller = new AbortController();
     const mine = { controller, started: Date.now() };
     inFlight.current.add(mine);
@@ -307,9 +322,10 @@ export function ValidateTab() {
   };
 
   const load = async (f: File) => {
+    // Refused before anything changes, so no new check comes along and clears the message.
+    if (f.size > MAX_BYTES) return setError(new Error(`${f.name} is larger than 5 MB, the most the validator accepts.`));
     setError(undefined);
     invalidate(true);
-    if (f.size > MAX_BYTES) return setError(new Error(`${f.name} is larger than 5 MB, the most the validator accepts.`));
     const token = loads.current;
     setReading(true);
     let content: string;
