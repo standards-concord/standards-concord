@@ -28,6 +28,8 @@ const DISPATCH_GAP_MS = 2 * 60 * 1000;
 const RETRY_MS = 15 * 60 * 1000;
 /** How long a claim to start a run holds if the process that made it never finishes asking GitHub. */
 const CLAIM_MS = 5 * 60 * 1000;
+/** How many workflow merges per app are remembered, to recognise a webhook delivered again. */
+const MERGES_KEPT = 50;
 
 export const githubAppStatus = () => {
   const s = githubAppSettings();
@@ -157,14 +159,17 @@ export async function onWebhook(event: string, payload: Record<string, unknown>)
     });
   } else if (event === 'pull_request' && payload.action === 'closed') {
     // Concord's workflow pull request was merged: the workflow is there now, so start a run straight
-    // away. Once per merge: a redelivered (or duplicated) webhook finds it already recorded.
+    // away. Once per merge: a redelivered (or duplicated) webhook finds it already recorded, and a
+    // run started before the merge doesn't stand in for one after it (`generation`).
     const pr = payload.pull_request as { merged?: boolean; number?: unknown; merge_commit_sha?: unknown; merged_at?: unknown; head?: { ref?: string } } | undefined;
     const repoId = String((payload.repository as { id?: unknown } | undefined)?.id ?? '');
     if (!pr?.merged || pr.head?.ref !== BRANCH) return { handled: false, apps: 0 };
     const merge = `${String(pr.number ?? '')}@${String(pr.merge_commit_sha ?? pr.merged_at ?? '')}`;
-    changed = await changeLinked((l) => sameInstallation(l) && l.repoId === repoId && l.workflowMerged !== merge, (d) => {
-      d.github!.workflowMerged = merge;
-      d.github!.fingerprint = d.github!.retryAt = d.github!.dispatchAt = undefined;
+    changed = await changeLinked((l) => sameInstallation(l) && l.repoId === repoId && !l.workflowMerges?.includes(merge), (d) => {
+      const l = d.github!;
+      l.workflowMerges = [...(l.workflowMerges ?? []), merge].slice(-MERGES_KEPT);
+      l.generation = (l.generation ?? 0) + 1;
+      l.fingerprint = l.retryAt = l.dispatchAt = undefined;
     });
     for (const doc of changed) await dispatchIfNeeded(doc.id).catch((err) => console.warn(`[github-app] ${doc.id}:`, (err as Error).message));
   } else if (event === 'installation_repositories' && payload.action === 'removed') {
@@ -222,7 +227,7 @@ export async function dispatchIfNeeded(appId: string, now = Date.now()): Promise
     if (l.pending && now < l.pending.until) return undefined;
     if ((l.dispatchAt && now - l.dispatchAt < DISPATCH_GAP_MS) || (l.retryAt && now < l.retryAt)) return undefined;
     if (!(await ownerStillHere(doc))) return undefined;
-    l.pending = { fingerprint: fp, until: now + CLAIM_MS };
+    l.pending = { fingerprint: fp, until: now + CLAIM_MS, generation: l.generation ?? 0 };
     l.dispatchAt = now;
     await saveApp(doc);
     return { ...l };
@@ -245,20 +250,26 @@ export async function dispatchIfNeeded(appId: string, now = Date.now()): Promise
     ok = false;
     message = err instanceof GithubError && (err.githubStatus === 401 || err.githubStatus === 403 || err.githubStatus === 404) && /installation|access_tokens/i.test(err.message) ? 'GitHub refused: is the Concord app still installed on this repository?' : (err as Error).message;
   }
-  await transaction(async () => {
+  const generation = link.pending!.generation;
+  const overtaken = await transaction(async () => {
     const doc = await get<AppDoc>('apps', appId);
-    if (!doc?.github || doc.github.installationId !== link.installationId || doc.github.repoId !== link.repoId) return;
-    doc.github.lastDispatch = { at: clock.iso(), ok, ...(message && { message }) };
-    if (doc.github.pending?.fingerprint === fp) doc.github.pending = undefined;
-    if (ok) {
-      doc.github.fingerprint = fp;
-      doc.github.retryAt = undefined;
-    } else if (doc.github.workflowMerged === link.workflowMerged) doc.github.retryAt = now + RETRY_MS;
-    // (Refused, but the workflow pull request was merged meanwhile: the next sweep tries again at once.)
-    if (renamed) doc.github.repo = doc.repo = renamed;
+    if (!doc?.github || doc.github.installationId !== link.installationId || doc.github.repoId !== link.repoId) return false;
+    const l = doc.github;
+    l.lastDispatch = { at: clock.iso(), ok, ...(message && { message }) };
+    if (l.pending?.fingerprint === fp && l.pending.generation === generation) l.pending = undefined;
+    // The workflow pull request was merged while GitHub was being asked: this run (or refusal) was
+    // for what was there before, so it neither counts as done nor delays the run for the merge.
+    const sameGeneration = (l.generation ?? 0) === generation;
+    if (sameGeneration && ok) {
+      l.fingerprint = fp;
+      l.retryAt = undefined;
+    } else if (sameGeneration) l.retryAt = now + RETRY_MS;
+    if (renamed) l.repo = doc.repo = renamed;
     await saveApp(doc);
+    return !sameGeneration;
   });
   if (!ok) console.warn(`[github-app] couldn't start a run for app ${appId}: ${message}`);
+  if (overtaken) await dispatchIfNeeded(appId, now);
   return ok ? 'started' : 'failed';
 }
 

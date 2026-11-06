@@ -91,9 +91,14 @@ export interface GithubLink extends ConnectedAppGithub {
    * processes don't both start one, and expiring so a process that stopped halfway doesn't
    * block the next try.
    */
-  pending?: { fingerprint: string; until: number };
-  /** The merge of Concord's workflow pull request that last started a run, so a redelivered webhook doesn't start another. */
-  workflowMerged?: string;
+  pending?: { fingerprint: string; until: number; generation: number };
+  /**
+   * Bumped when Concord's workflow pull request is merged: a run started before that (for the old
+   * workflow, or none) doesn't count as the run for what is there now.
+   */
+  generation?: number;
+  /** The merges of Concord's workflow pull request already acted on (the latest few), so a redelivered webhook starts nothing. */
+  workflowMerges?: string[];
   /** When Concord last asked GitHub to start a run, and the earliest it tries again after a failure (ms). */
   dispatchAt?: number;
   retryAt?: number;

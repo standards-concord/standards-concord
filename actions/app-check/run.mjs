@@ -99,7 +99,19 @@ async function api(method, p, body, { tries = 3 } = {}) {
       await new Promise((r) => setTimeout(r, attempt * 2000));
       continue;
     }
-    const text = await res.text();
+    let text;
+    try {
+      text = await res.text();
+    } catch (err) {
+      // The connection dropped partway through the reply: as if Concord couldn't be reached.
+      if (attempt < tries) {
+        await new Promise((r) => setTimeout(r, attempt * 2000));
+        continue;
+      }
+      const e = new Error(`${method} ${url.pathname}: the reply from Concord was cut off (${err.message})`);
+      e.transient = true;
+      throw e;
+    }
     if (!res.ok) {
       let msg = text;
       try {

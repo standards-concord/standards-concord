@@ -7,7 +7,8 @@
 //   Concord's callback), the installer's one-time code, installation tokens (checking the App's
 //   JWT against its public key), starting workflows, branches, files and pull requests;
 //   GET /__app shows what happened, POST /__app/next-install sets up the next installation,
-//   POST /__app/merge merges a pull request, POST /__app/reset forgets everything;
+//   POST /__app/merge merges a pull request, POST /__app/hold and /__app/release keep workflow
+//   dispatches unanswered until released, POST /__app/reset forgets everything;
 // - GitHub Actions' OIDC issuer: GET /.well-known/jwks, and GET /__oidc/token mints a run's token.
 //
 // Run as a script (`node e2e/github-stub.mjs`, PORT, GITHUB_APP_ID, GITHUB_APP_PUBLIC_KEY,
@@ -44,6 +45,9 @@ export function createGithubStub(opts = {}) {
       /** installation token -> { installationId, repoIds, permissions } */
       tokens: new Map(),
       dispatches: [],
+      /** While `holdDispatches`, workflow dispatches wait here (unanswered) until POST /__app/release. */
+      holdDispatches: false,
+      held: [],
       revoked: [],
       tokenRequests: [],
     };
@@ -139,6 +143,7 @@ export function createGithubStub(opts = {}) {
       if (req.method === 'GET' && p === '/__app')
         return send(200, {
           dispatches: app.dispatches,
+          held: app.held.length,
           revoked: app.revoked,
           tokenRequests: app.tokenRequests,
           installations: [...app.installations].map(([id, i]) => ({ id, repos: i.repos.map((r) => repoById(r)?.full_name) })),
@@ -159,6 +164,15 @@ export function createGithubStub(opts = {}) {
         pr.state = 'closed';
         pr.merged = true;
         return send(200, pr);
+      }
+      if (req.method === 'POST' && p === '/__app/hold') {
+        app.holdDispatches = !!json().hold;
+        return send(200, {});
+      }
+      if (req.method === 'POST' && p === '/__app/release') {
+        const held = app.held.splice(0);
+        for (const answer of held) answer();
+        return send(200, { released: held.length });
       }
       if (req.method === 'POST' && p === '/__app/reset') {
         resetApp();
@@ -230,8 +244,13 @@ export function createGithubStub(opts = {}) {
           if (!may(r, 'actions')) return send(403, { message: 'Resource not accessible by integration' });
           const ref = json().ref;
           if (!r.branches.get(ref)?.has(`.github/workflows/${decodeURIComponent(mm[1])}`)) return send(404, { message: 'Not Found' });
-          app.dispatches.push({ repo: r.full_name, workflow: decodeURIComponent(mm[1]), ref, at: new Date().toISOString() });
-          return send(204);
+          const workflow = decodeURIComponent(mm[1]);
+          const accept = () => {
+            app.dispatches.push({ repo: r.full_name, workflow, ref, at: new Date().toISOString() });
+            send(204);
+          };
+          if (app.holdDispatches) return void app.held.push(accept);
+          return accept();
         }
         if ((mm = rest.match(/^\/contents\/(.+)$/))) {
           const path = decodeURIComponent(mm[1]);

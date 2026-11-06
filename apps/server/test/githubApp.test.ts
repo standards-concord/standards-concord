@@ -228,6 +228,18 @@ describe('the Concord GitHub App', () => {
       tokens.push(res.body.token);
     }
     for (const t of [tokens[0], tokens[11]]) expect((await asRun(t)).status).toBe(200);
+
+    // Past 500 at once, a new run is asked to wait, and its proof from GitHub isn't used up.
+    const d = (await doc(a.id))!;
+    const filler = Array.from({ length: 500 - d.runTokens!.length }, (_, i) => ({ hash: `filler-${i}`, until: Date.now() + 60 * 60 * 1000, repoId: d.github!.repoId }));
+    await put('apps', { ...d, runTokens: [...d.runTokens!, ...filler] }, d.ontologyId);
+    const proof = await oidc({ audience: `concord-app-check:${a.id}`, repository: 'example/busy' });
+    const full = await request(app).post('/api/app-checks/session').send({ app: a.id, oidc: proof });
+    expect(full.status, full.text).toBe(429);
+    expect((await asRun(tokens[0])).status).toBe(200);
+    const room = (await doc(a.id))!;
+    await put('apps', { ...room, runTokens: room.runTokens!.filter((t) => !t.hash.startsWith('filler-')) }, room.ontologyId);
+    expect((await request(app).post('/api/app-checks/session').send({ app: a.id, oidc: proof })).status).toBe(200);
   });
 
   it('a run in the linked repository trades GitHub’s proof for a run token, once', async () => {
@@ -299,6 +311,75 @@ describe('the Concord GitHub App', () => {
     const both = await Promise.all([dispatchIfNeeded(a.id, later), dispatchIfNeeded(a.id, later)]);
     expect(both.sort()).toEqual(['skipped', 'started']);
     expect(await runs()).toBe(2);
+  });
+
+  // Only the latest merge used to be remembered, so merge A, then merge B, then A delivered again
+  // started another run.
+  it('each merge of the workflow pull request starts one run, however often or late GitHub delivers it', async () => {
+    const owner = await login('Merges');
+    const { app: a, repoId, installationId } = await readyToRun(owner, 'example/merges');
+    const deliver = async (sha: string) =>
+      (await signed('pull_request', { action: 'closed', installation: { id: Number(installationId) }, repository: { id: Number(repoId) }, pull_request: { number: 1, merged: true, merge_commit_sha: sha, head: { ref: 'concord/app-checks' } } })).body.apps as number;
+    expect(await deliver('merge-a')).toBe(1);
+    expect(await runsIn('example/merges')).toBe(1);
+    expect(await deliver('merge-b')).toBe(1);
+    expect(await runsIn('example/merges')).toBe(2);
+    expect(await deliver('merge-a')).toBe(0);
+    expect(await deliver('merge-b')).toBe(0);
+    // Two deliveries of a new merge at once: one of them acts on it.
+    expect((await Promise.all([deliver('merge-c'), deliver('merge-c')])).sort()).toEqual([0, 1]);
+    expect(await runsIn('example/merges')).toBe(3);
+    expect((await doc(a.id))!.github!.pending).toBeUndefined();
+  });
+
+  // A run for the old workflow that GitHub accepted after the workflow pull request was merged
+  // used to be recorded as the run for what was there now, so the merged workflow never ran.
+  it('a merge while a run is being started still gets its own run', async () => {
+    const owner = await login('Overlap');
+    const { app: a, repoId, installationId } = await readyToRun(owner, 'example/overlap');
+    await fetch(`${base}/__app/hold`, { method: 'POST', body: JSON.stringify({ hold: true }) });
+    let earlier!: Promise<string>;
+    try {
+      earlier = dispatchIfNeeded(a.id);
+      await expect.poll(async () => ((await (await fetch(`${base}/__app`)).json()) as { held: number }).held).toBe(1);
+      const merged = await signed('pull_request', { action: 'closed', installation: { id: Number(installationId) }, repository: { id: Number(repoId) }, pull_request: { number: 7, merged: true, merge_commit_sha: 'overlap', head: { ref: 'concord/app-checks' } } });
+      // Its run waits for the one already being started.
+      expect(merged.body).toEqual({ handled: true, apps: 1 });
+      expect(await runsIn('example/overlap')).toBe(0);
+    } finally {
+      await fetch(`${base}/__app/hold`, { method: 'POST', body: JSON.stringify({ hold: false }) });
+      await fetch(`${base}/__app/release`, { method: 'POST' });
+    }
+    expect(await earlier).toBe('started');
+    expect(await runsIn('example/overlap')).toBe(2);
+    const l = (await doc(a.id))!.github!;
+    expect(l.pending).toBeUndefined();
+    expect(await dispatchIfNeeded(a.id, Date.now() + 10 * 60 * 1000)).toBe('skipped');
+  });
+
+  it('while GitHub is being asked, the run isn’t recorded as done, and a claim left that way runs out', async () => {
+    const owner = await login('In flight');
+    const { app: a } = await readyToRun(owner, 'example/in-flight');
+    const t = Date.now();
+    await fetch(`${base}/__app/hold`, { method: 'POST', body: JSON.stringify({ hold: true }) });
+    let first!: Promise<string>;
+    try {
+      first = dispatchIfNeeded(a.id, t);
+      await expect.poll(async () => ((await (await fetch(`${base}/__app`)).json()) as { held: number }).held).toBe(1);
+      const l = (await doc(a.id))!.github!;
+      expect(l.fingerprint).toBe('old');
+      expect(l.pending).toMatchObject({ until: t + 5 * 60 * 1000 });
+      expect(await dispatchIfNeeded(a.id, t + 60 * 1000)).toBe('skipped');
+      // That process never comes back (say it was stopped): five minutes on, another starts the run.
+      await fetch(`${base}/__app/hold`, { method: 'POST', body: JSON.stringify({ hold: false }) });
+      expect(await dispatchIfNeeded(a.id, t + 6 * 60 * 1000)).toBe('started');
+      expect(await runsIn('example/in-flight')).toBe(1);
+      expect((await doc(a.id))!.github!.fingerprint).not.toBe('old');
+    } finally {
+      await fetch(`${base}/__app/hold`, { method: 'POST', body: JSON.stringify({ hold: false }) });
+      await fetch(`${base}/__app/release`, { method: 'POST' });
+    }
+    await first;
   });
 
   // The decision to start a run used to be saved as done before GitHub was asked, so a process
@@ -416,6 +497,8 @@ describe('the GitHub Action, for an app connected through the Concord GitHub App
   /** Session replies the proxy has thrown away (after Concord handled them), and how many to throw away. */
   let lost = 0;
   let toLose = 0;
+  /** How a reply is lost: thrown away whole (a 502), or cut off partway through its body. */
+  let how: 'whole' | 'cut' = 'whole';
   beforeAll(async () => {
     concord = app.listen(0);
     await new Promise((r) => concord.once('listening', r));
@@ -430,7 +513,11 @@ describe('the GitHub Action, for an app connected through the Concord GitHub App
       const body = Buffer.from(await r.arrayBuffer());
       if (req.url?.startsWith('/api/app-checks/session') && lost < toLose) {
         lost++;
-        res.writeHead(502).end('Bad gateway');
+        if (how === 'cut') {
+          res.writeHead(502, { 'content-type': 'text/html', 'content-length': '1000' });
+          res.write('<html>Bad gat');
+          setTimeout(() => res.socket?.destroy(), 50);
+        } else res.writeHead(502).end('Bad gateway');
         return;
       }
       res.writeHead(r.status, { 'content-type': r.headers.get('content-type') ?? 'text/plain' }).end(body);
@@ -463,6 +550,7 @@ describe('the GitHub Action, for an app connected through the Concord GitHub App
     const { app: a } = await linked(owner, repo);
     lost = 0;
     toLose = 1;
+    how = 'whole';
     const res = await runAction({
       CONCORD_APP: a.id,
       CONCORD_TEST_COMMAND: 'node -e ""',
@@ -478,6 +566,27 @@ describe('the GitHub Action, for an app connected through the Concord GitHub App
     expect((await doc(a.id))!.runTokens).toHaveLength(2);
     expect(res.out).toMatch(/GitHub vouched for this run/);
     expect((await doc(a.id))!.baseline).toMatchObject({ outcome: 'passed', verified: true });
+  }, 60_000);
+
+  // A reply cut off partway through its body used to end the run, instead of being tried again.
+  it('signs in after all when a reply is cut off partway through', async () => {
+    const owner = await login('Cut-off runner');
+    const repo = 'example/action-cut';
+    const { app: a } = await linked(owner, repo);
+    lost = 0;
+    toLose = 1;
+    how = 'cut';
+    const res = await runAction({
+      CONCORD_APP: a.id,
+      CONCORD_TEST_COMMAND: 'node -e ""',
+      CONCORD_MAX_CHANGES: '100',
+      CONCORD_COMMIT: 'f00dfeed',
+      ACTIONS_ID_TOKEN_REQUEST_URL: `${base}/__oidc/token?repository=${repo}`,
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'job-request-token',
+    });
+    expect(res.code, res.out).toBe(0);
+    expect(lost).toBe(1);
+    expect((await doc(a.id))!.runTokens).toHaveLength(2);
   }, 60_000);
 
   it('without a proof from GitHub, says how to give the job one', async () => {
