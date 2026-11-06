@@ -99,8 +99,12 @@ test.describe('Concord app icon', () => {
   });
 
   test('the MCP Registry listing names icons the site serves', async ({ request }) => {
-    const listing = JSON.parse(fs.readFileSync(path.join(root, 'server.json'), 'utf8')) as { icons: { src: string; mimeType: string; sizes?: string[] }[] };
+    const listing = JSON.parse(fs.readFileSync(path.join(root, 'server.json'), 'utf8')) as { icons: { src: string; mimeType: string; sizes?: string[] }[]; remotes: { url: string }[] };
     expect(listing.icons.length).toBeGreaterThan(0);
-    for (const icon of listing.icons) await expectIcon(request, new URL(icon.src).pathname, icon.mimeType, icon.sizes);
+    for (const icon of listing.icons) {
+      // Served by the same site as the connector itself; the file is then fetched from this test's server.
+      expect(new URL(icon.src).origin, icon.src).toBe(new URL(listing.remotes[0].url).origin);
+      await expectIcon(request, new URL(icon.src).pathname, icon.mimeType, icon.sizes);
+    }
   });
 });
