@@ -46,12 +46,52 @@ test.describe('feedback', () => {
         }
       }).observe(document, { subtree: true, attributes: true, attributeFilter: ['disabled'], attributeOldValue: true });
     });
+    // Force the order that showed it: the page's first loads (made before it knows who is signed in) finish,
+    // then the session arrives, and the loads for the signed-in account stay pending until we let them go.
+    const flips = () => page.evaluate(() => (window as unknown as { __flips: string[] }).__flips);
+    let sessionIn = false;
+    let earlyMe = 0;
+    let earlyMeDone!: () => void;
+    const earlyLoadsDone = new Promise<void>((r) => (earlyMeDone = r));
+    let letGo!: () => void;
+    const released = new Promise<void>((r) => (letGo = r));
+    const held: string[] = [];
+    await page.route(/\/api\/alpha\/me(\?|$)/, async (route) => {
+      if (sessionIn) {
+        held.push('me');
+        await released;
+        return route.continue();
+      }
+      earlyMe++;
+      const res = await route.fetch();
+      await route.fulfill({ response: res });
+      if (--earlyMe === 0) earlyMeDone();
+    });
+    await page.route(/\/api\/session(\?|$)/, async (route) => {
+      await earlyLoadsDone;
+      sessionIn = true;
+      await route.continue();
+    });
+    await page.route(/\/api\/ontologies(\?|$)/, async (route) => {
+      if (sessionIn) {
+        held.push('ontologies');
+        await released;
+      }
+      await route.continue();
+    });
+
     await signIn(page, { name: `Feedback tester ${uniq()}`, role: 'contributor' });
     await page.goto('/feedback');
+    await expect(page.getByText(/Feedback tester/).first()).toBeVisible();
+    await expect.poll(() => held.length).toBeGreaterThan(0);
     const guided = page.getByRole('button', { name: /Guided feedback/ });
+    await expect(guided).toBeDisabled();
+    expect(await flips()).toEqual([]);
+
+    letGo();
     await expect(guided).toBeEnabled();
     await settle(page);
-    expect(await page.evaluate(() => (window as unknown as { __flips: string[] }).__flips)).toEqual(['enabled']);
+    expect(await flips()).toEqual(['enabled']);
     await guided.click();
     await expect(page.getByRole('heading', { level: 1, name: 'Guided feedback' })).toBeVisible();
   });

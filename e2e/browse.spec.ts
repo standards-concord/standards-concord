@@ -210,23 +210,28 @@ test.describe('moving around the ontology is instant', () => {
     // Stand in for a merge: from now on the draft's view names Skill differently.
     // The app drops a view request when it moves on (here, leaving Browse for Validate data). That request's
     // response is then disposed, and reading it used to fail the test with "Response has been disposed".
-    // A dropped request has no one waiting for it, so there is nothing to rewrite.
+    // A dropped request has no one waiting for it, so there is nothing to rewrite. Any other error is kept and
+    // fails the test, so a real failure can't hide behind a heading an earlier request already put on screen.
+    const dropped = (e: unknown) => /disposed|has been closed|aborted|canceled|cancelled/i.test(String(e));
+    const failures: string[] = [];
     await page.route(/\/api\/ontologies\/[^/]+\/view(\?|$)/, async (route) => {
-      let res: Awaited<ReturnType<typeof route.fetch>>;
-      let v: { classes: { iri: string; label?: string }[] };
       try {
-        res = await route.fetch();
-        v = (await res.json()) as typeof v;
-      } catch {
-        return;
+        const res = await route.fetch();
+        const v = (await res.json()) as { classes: { iri: string; label?: string }[] };
+        for (const c of v.classes) if (c.iri === `${VOL}Skill`) c.label = 'competence';
+        await route.fulfill({ response: res, json: v });
+      } catch (e) {
+        if (dropped(e)) return;
+        failures.push(String(e));
+        await route.abort().catch(() => {});
       }
-      for (const c of v.classes) if (c.iri === `${VOL}Skill`) c.label = 'competence';
-      await route.fulfill({ response: res, json: v }).catch(() => {});
     });
     await page.getByRole('navigation', { name: 'Explore pages' }).getByRole('link', { name: 'Validate data' }).click();
     await expect(page.getByTestId('validate-status')).toBeVisible();
     await page.goBack();
     await expect(page.getByRole('heading', { level: 2, name: 'competence' })).toBeVisible();
+    await settle(page);
+    expect(failures).toEqual([]);
   });
 });
 
