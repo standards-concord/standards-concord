@@ -11,10 +11,11 @@ import { javascript, typescript } from '@codemirror/legacy-modes/mode/javascript
  * prefixed names, literals, blank nodes), so the same term looks the same in
  * every view, and SHACL compact syntax adds its keywords to the Turtle rules.
  * XML, JSON-LD and LinkML (YAML) use CodeMirror's Lezer grammars, and the
- * generated classes CodeMirror's JavaScript mode.
+ * generated classes CodeMirror's JavaScript mode. Shell covers the curl
+ * examples, with URLs in the same colour as IRIs.
  */
 
-export type CodeLanguage = 'turtle' | 'ntriples' | 'sparql' | 'manchester' | 'shaclc' | 'xml' | 'json' | 'yaml' | 'javascript' | 'typescript' | 'text';
+export type CodeLanguage = 'turtle' | 'ntriples' | 'sparql' | 'manchester' | 'shaclc' | 'xml' | 'json' | 'yaml' | 'javascript' | 'typescript' | 'shell' | 'text';
 
 /** Token names the tokenizers return, mapped to highlight tags (and so to colours). */
 const tokenTable: Record<string, Tag | readonly Tag[]> = {
@@ -35,6 +36,7 @@ const tokenTable: Record<string, Tag | readonly Tag[]> = {
   operator: t.operator,
   func: t.function(t.variableName),
   frame: t.heading,
+  flag: t.attributeName,
 };
 
 const PN_CHARS_BASE =
@@ -201,6 +203,71 @@ function rdfParser(mode: Mode): StreamParser<RdfState> {
   };
 }
 
+interface ShellState {
+  /** The previous line ended with a backslash, so this line carries on the same command. */
+  continued: boolean;
+  /** The next word is a command name. */
+  command: boolean;
+}
+
+/** Enough shell for one-line commands such as curl examples: commands, flags, strings, URLs and @files. */
+const shellParser: StreamParser<ShellState> = {
+  name: 'shell',
+  startState: () => ({ continued: false, command: true }),
+  copyState: (s) => ({ ...s }),
+  languageData: { commentTokens: { line: '#' } },
+  tokenTable,
+  token(stream, state) {
+    if (stream.sol()) {
+      state.command = !state.continued;
+      state.continued = false;
+    }
+    if (stream.eatSpace()) return null;
+    const command = state.command;
+    state.command = false;
+    const ch = stream.peek();
+    if (ch === '#') {
+      stream.skipToEnd();
+      return 'comment';
+    }
+    if (ch === '\\') {
+      stream.next();
+      if (stream.eol()) {
+        state.continued = true;
+        return 'punct';
+      }
+      stream.next();
+      return null;
+    }
+    if (ch === "'") {
+      // No escapes inside single quotes.
+      stream.next();
+      if (stream.skipTo("'")) stream.next();
+      else stream.skipToEnd();
+      return 'string';
+    }
+    if (ch === '"') {
+      stream.next();
+      readString(stream, ch);
+      return 'string';
+    }
+    if (stream.match(/^[|;&]+/)) {
+      state.command = true;
+      return 'operator';
+    }
+    if (stream.match(/^\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)/)) return 'variable';
+    if (stream.match(/^[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/i)) return 'iri';
+    if (stream.match(/^--?[A-Za-z0-9][\w-]*/)) return 'flag';
+    if (stream.match(/^@[^\s'"]+/)) return 'variable';
+    if (stream.match(/^[^\s'"|;&\\]+/)) {
+      if (command) return 'func';
+      return /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(stream.current()) ? 'keyword' : null;
+    }
+    stream.next();
+    return null;
+  },
+};
+
 const streamLanguages = {
   turtle: StreamLanguage.define(rdfParser('turtle')),
   ntriples: StreamLanguage.define(rdfParser('ntriples')),
@@ -209,6 +276,7 @@ const streamLanguages = {
   shaclc: StreamLanguage.define(rdfParser('shaclc')),
   javascript: StreamLanguage.define(javascript),
   typescript: StreamLanguage.define(typescript),
+  shell: StreamLanguage.define(shellParser),
 };
 
 export function languageSupport(lang: CodeLanguage): LanguageSupport | null {
@@ -220,6 +288,7 @@ export function languageSupport(lang: CodeLanguage): LanguageSupport | null {
     case 'shaclc':
     case 'javascript':
     case 'typescript':
+    case 'shell':
       return new LanguageSupport(streamLanguages[lang]);
     case 'xml':
       return xml();

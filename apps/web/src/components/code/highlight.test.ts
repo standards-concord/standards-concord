@@ -98,6 +98,25 @@ describe('RDF highlighting', () => {
     expect(highlightSegments('import { A } from "https://x/a.js";', 'javascript').find((s) => s.text === 'import')?.cls).toBe('tok-keyword');
   });
 
+  it('shell: the command, flags, URLs, quoted strings, @files and line continuations', () => {
+    const code = "curl -X POST https://example.org/def/vol \\\n  -H 'Content-Type: text/turtle' \\\n  --data-binary @data.ttl";
+    expect(classesOf(code, 'shell', ['curl', '-X', 'POST', 'https://example.org/def/vol', '\\', '-H', "'Content-Type: text/turtle'", '--data-binary', '@data.ttl'])).toEqual({
+      curl: 'tok-func',
+      '-X': 'tok-attr',
+      POST: 'tok-keyword',
+      'https://example.org/def/vol': 'tok-iri',
+      '\\': 'tok-punct',
+      '-H': 'tok-attr',
+      "'Content-Type: text/turtle'": 'tok-string',
+      '--data-binary': 'tok-attr',
+      '@data.ttl': 'tok-variable',
+    });
+    // A continued line carries on the command, so its first word is not a new command.
+    expect(highlightSegments('curl \\\n  example', 'shell').find((s) => s.text === 'example')?.cls).toBeUndefined();
+    // Single quotes have no escapes: a backslash inside them doesn't swallow the closing quote.
+    expect(highlightSegments("echo 'a\\' b", 'shell').find((s) => s.text === "'a\\'")?.cls).toBe('tok-string');
+  });
+
   it('plain text is left alone', () => {
     expect(highlightSegments('hello', 'text')).toEqual([{ text: 'hello' }]);
   });

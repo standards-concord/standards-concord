@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { CheckCircle2, Download, FileUp, ListChecks, LoaderCircle, RotateCcw, ShieldCheck, Terminal, TriangleAlert, WandSparkles } from 'lucide-react';
 import { DATA_FORMATS, dataFormatForFile, sniffDataFormat, type DataFormat } from '@concord/core/data-formats';
@@ -7,14 +7,13 @@ import { DataCheckError, checkDataInBrowser, resetDataCheck, warmDataCheck } fro
 import { accountToken, onAccountChange, stillCurrent } from '../../lib/session';
 import { api, type DataValidation } from '../../api';
 import { useAsync } from '../../lib/hooks';
-import { Badge, Button, Card, CardHeader, CopyButton, InlineError, Select, cx } from '../../components/ui';
+import { Badge, Button, Card, CardHeader, CodeBlock, InlineError, Select, cx } from '../../components/ui';
 import { CollapsibleCard } from '../../components/Disclosure';
 import { CodeEditor, type CodeEditorHandle } from '../../components/code/CodeEditor';
 import { Pager, ProblemItem, listLabel, usePage, useTurtleChecks } from '../../components/check/turtleChecks';
 import type { Finding, RawFinding } from '../../lib/shaclFindings';
 import { defaultSampleData, useSampleData } from '../../lib/sampleData';
 import { termCompletions } from '../../lib/termCompletions';
-import { HighlightedCode } from '../../components/code/CodeView';
 import type { CodeLanguage } from '../../components/code/languages';
 import { useOntology } from './Layout';
 
@@ -702,32 +701,58 @@ function Report({ report, prefixes, onTurtle, name, stale, located }: { report: 
   );
 }
 
+/** Inline code in the API notes: a quiet chip, so header names and values stand out from the prose. */
+function C({ children, className }: { children: ReactNode; className?: string }) {
+  return <code className={cx('rounded bg-surface-2 px-1 py-0.5 font-mono text-[0.85em]', className)}>{children}</code>;
+}
+
 function ApiHelp({ iri }: { iri: string }) {
   const examples = [
     { label: 'Validate a file (JSON report)', code: `curl -X POST ${iri} \\\n  -H 'Content-Type: text/turtle' \\\n  --data-binary @data.ttl` },
     { label: 'Get a SHACL validation report in Turtle', code: `curl -X POST ${iri} \\\n  -H 'Content-Type: application/ld+json' \\\n  -H 'Accept: text/turtle' \\\n  --data-binary @data.jsonld` },
     { label: 'Get the SHACL shapes by content negotiation', code: `curl ${iri} \\\n  -H 'Accept-Profile: <http://www.w3.org/ns/shacl#>'` },
   ];
+  const facts: [string, ReactNode][] = [
+    ['Address', <C key="a" className="break-all">{iri}</C>],
+    [
+      'Body',
+      <>
+        Turtle, JSON-LD, N-Triples, N-Quads, TriG or RDF/XML, with a matching <C>Content-Type</C>
+      </>,
+    ],
+    [
+      'Answer',
+      <>
+        JSON by default, or a standard SHACL <C>sh:ValidationReport</C> with <C>Accept: text/turtle</C>
+      </>,
+    ],
+    [
+      'Status',
+      <>
+        <C>200</C> whether or not the data conforms, so read <C>conforms</C> and <C>valid</C>
+      </>,
+    ],
+    ['Limits', 'Any site can call it, with no sign-in, up to 30 times a minute'],
+  ];
   return (
-    <div className="space-y-4 text-sm">
-      <p>
-        POST RDF to the ontology’s address (or a version’s address) to validate it. The body can be Turtle, JSON-LD, N-Triples, N-Quads, TriG or RDF/XML. The answer is JSON by default, or a standard SHACL{' '}
-        <code>sh:ValidationReport</code> with <code>Accept: text/turtle</code>. It is <code>200</code> whether or not the data conforms; check <code>conforms</code> and <code>valid</code>. Any site can call it, with no sign-in, up to 30 times a
-        minute.
-      </p>
-      {examples.map((x) => (
-        <div key={x.label} className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
-            <span className="font-medium">{x.label}</span>
-            <CopyButton text={x.code.replace(/\\\n\s*/g, '')} label="Copy" />
+    <div className="space-y-5 p-5 text-sm">
+      <p>POST RDF to the ontology’s address, or to one version’s address, to validate it.</p>
+      <dl className="grid gap-x-6 gap-y-2 sm:grid-cols-[max-content_minmax(0,1fr)]" data-testid="validate-api-facts">
+        {facts.map(([term, detail]) => (
+          <div key={term} className="contents">
+            <dt className="font-medium text-muted">{term}</dt>
+            <dd className="mb-1 sm:mb-0">{detail}</dd>
           </div>
-          <pre className="overflow-x-auto rounded-md border border-line bg-surface-2 p-3 text-xs" data-testid="validate-api-example">
-            <HighlightedCode code={x.code} language="text" />
-          </pre>
-        </div>
+        ))}
+      </dl>
+      {examples.map((x) => (
+        <section key={x.label} className="space-y-2">
+          <h4 className="text-sm font-medium">{x.label}</h4>
+          <CodeBlock code={x.code} copyText={x.code.replace(/\\\n\s*/g, '')} language="shell" ariaLabel={x.label} />
+        </section>
       ))}
       <p className="text-muted">
-        Post to the address on this site rather than the persistent w3id.org IRI: the w3id redirect turns a POST into a GET. Coding agents can run the same check with the <code>validate_data</code> tool after{' '}
+        Post to the address on this site rather than the persistent w3id.org IRI: the w3id redirect turns a POST into a GET. Coding agents can run the same check with the <C>validate_data</C> tool after{' '}
         <Link to="../connect" relative="path" className="text-accent hover:underline">
           connecting an agent
         </Link>
