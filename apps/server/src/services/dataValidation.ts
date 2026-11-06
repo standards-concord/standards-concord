@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DataError, type DataFormat, type OntologyGraph, type ShaclResult, type TermIssue } from '@concord/core';
+import { DATA_CHECK_LIMITS, DataError, DEFAULT_DATA_BASE, type DataFormat, type OntologyGraph, type ShaclResult, type TermIssue } from '@concord/core';
 import type { OntologyProject } from '@concord/shared';
 import { ontologyStore } from './ontologyStore.js';
 import { runValidation } from './validationPool.js';
@@ -10,8 +10,8 @@ import { runValidation } from './validationPool.js';
  * Used by POST to the ontology's /def URI and by the MCP validate_data tool.
  */
 
-/** Limits for one request. Time and memory are limited too, in validationPool.ts. */
-export const VALIDATION_LIMITS = { bytes: 5 * 1024 * 1024, triples: 25_000 };
+/** Limits for one request (the in-browser check uses the same). Time and memory are limited too, in validationPool.ts. */
+export const VALIDATION_LIMITS = DATA_CHECK_LIMITS;
 
 export interface DataValidation {
   /** The ontology IRI and the version validated against ('1.0.0', or 'draft' for the working draft). */
@@ -45,8 +45,7 @@ async function ontologySource(graph: OntologyGraph) {
   return hit;
 }
 
-/** Relative IRIs in data resolve against this unless the caller gives a base (a reserved domain, so it never means a real thing). */
-export const DEFAULT_DATA_BASE = 'https://data.example/';
+export { DEFAULT_DATA_BASE };
 
 export interface ValidateOptions {
   format: DataFormat;

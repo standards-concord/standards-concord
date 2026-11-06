@@ -1,6 +1,7 @@
 import type { ChangeOp, OntologyView, TermView } from '@concord/shared';
 import type { Restriction, ClassView, PropertyView } from '@concord/core/types';
 import { compactIri, localName } from './format';
+import { allTerms } from '@concord/core/terms';
 
 export type Labeler = (iri: string) => string;
 
@@ -20,9 +21,7 @@ export function makeLabeler(view?: OntologyView, extra: Record<string, string> =
   };
 }
 
-export function allTerms(view: OntologyView): TermView[] {
-  return [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals];
-}
+export { allTerms };
 
 export const KIND_LABEL: Record<TermView['kind'], string> = {
   class: 'Class',

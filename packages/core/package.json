@@ -7,7 +7,9 @@
     "./types": "./src/types.ts",
     "./sparql-guard": "./src/sparqlGuard.ts",
     "./reasoner": "./src/reasonTurtle.ts",
-    "./data-formats": "./src/dataFormats.ts"
+    "./data-formats": "./src/dataFormats.ts",
+    "./terms": "./src/termIndex.ts",
+    "./data-check": "./src/dataCheck.ts"
   },
   "scripts": {
     "test": "vitest run",

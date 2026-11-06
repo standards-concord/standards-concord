@@ -1,7 +1,9 @@
-import { useMemo, useRef, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { CheckCircle2, Download, FileUp, ListChecks, ShieldCheck, Terminal, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, Download, FileUp, ListChecks, LoaderCircle, ShieldCheck, Terminal, TriangleAlert } from 'lucide-react';
 import { DATA_FORMATS, dataFormatForFile, sniffDataFormat, type DataFormat } from '@concord/core/data-formats';
+import { DATA_CHECK_LIMITS, DEFAULT_DATA_BASE } from '@concord/core/data-check';
+import { checkDataInBrowser, warmDataCheck } from '../../lib/checkDataInBrowser';
 import { api, type DataValidation } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { Badge, Button, Card, CardHeader, CopyButton, InlineError, Select, cx } from '../../components/ui';
@@ -14,15 +16,59 @@ import { useOntology } from './Layout';
 /**
  * Validate instance data against the ontology: paste or upload RDF, pick a
  * version, and get its SHACL report plus checks on the terms it uses. The
- * check is the same POST to the ontology IRI that other tools call, so the
- * page also shows how to call it.
+ * check runs in this browser (sparq, in a Web Worker), so the data never
+ * leaves the device. It is the same check as the POST to the ontology IRI
+ * that other tools call, so the page also shows how to call that.
  */
+
+type Sources = { key: string; turtle: string; shapes: string };
+/**
+ * A version's ontology and shapes. A release never changes, so it is fetched once. The working
+ * draft can change at any time, so each check fetches it again, except that a check made soon
+ * after the page prefetched it uses that copy.
+ */
+const sources = new Map<string, { at: number; sources: Promise<Sources> }>();
+const DRAFT_FRESH_MS = 30_000;
+function versionSources(id: string, version: string, prefetch = false): Promise<Sources> {
+  const ref = version === 'draft' ? 'working' : version;
+  const key = `${id}|${ref}`;
+  const draft = ref === 'working';
+  const hit = sources.get(key);
+  if (hit && (!draft || (!prefetch && Date.now() - hit.at < DRAFT_FRESH_MS))) {
+    // A prefetched draft serves one check only.
+    if (draft) sources.delete(key);
+    return hit.sources;
+  }
+  const fetched = Promise.all([api.source(id, 'turtle', ref), api.source(id, 'shacl', ref)]).then(([turtle, shapes]) => ({
+    // The worker reuses a parsed version only for exactly the same text.
+    key: draft ? `${key}|${hash(turtle)}|${hash(shapes)}` : key,
+    turtle,
+    shapes,
+  }));
+  if (!draft || prefetch) {
+    sources.set(key, { at: Date.now(), sources: fetched });
+    fetched.catch(() => sources.get(key)?.sources === fetched && sources.delete(key));
+  }
+  return fetched;
+}
+
+/** A quick string hash (FNV-1a), to tell one draft's text from another's. */
+function hash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(36);
+}
 
 const FORMAT_IDS = Object.keys(DATA_FORMATS) as DataFormat[];
 const LANGUAGE: Record<DataFormat, CodeLanguage> = { turtle: 'turtle', trig: 'turtle', ntriples: 'ntriples', nquads: 'ntriples', jsonld: 'json', rdfxml: 'xml' };
 /** Larger files are checked but not shown in the editor, which would be slow. */
 const EDITOR_LIMIT = 512 * 1024;
 const MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * How long a pause in typing starts a check. A check takes a few milliseconds, so ordinary data is
+ * checked almost as you type; a large file waits for a longer pause, so typing in it stays smooth.
+ */
+const autoCheckDelay = (chars: number) => (chars < 100_000 ? 80 : 400);
 
 type Picked = DataFormat | 'auto';
 
@@ -102,9 +148,9 @@ export function ValidateTab() {
   const [data, setData] = useState('');
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
   const [picked, setPicked] = useState<Picked>('auto');
-  const [report, setReport] = useState<{ result: DataValidation; text: string; format: DataFormat; version: string } | null>(null);
+  const [report, setReport] = useState<{ result: DataValidation; text: string; format: DataFormat; version: string; ms?: number } | null>(null);
   const [error, setError] = useState<unknown>();
-  const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
   // Bumped whenever the inputs change: a response for an older request is dropped.
@@ -112,11 +158,26 @@ export function ValidateTab() {
   // Bumped for each file chosen: a file that finishes reading after a newer one (or after the data was edited) is dropped.
   const loads = useRef(0);
   const [reading, setReading] = useState(false);
+  // When the next automatic check runs: at once after a new version, format, file or example; after a pause in typing otherwise.
+  const nextCheck = useRef<'now' | 'soon'>('now');
+  // Bumped by Ctrl/⌘-Enter to check straight away.
+  const [checkNow, setCheckNow] = useState(0);
+  const inFlight = useRef<{ controller: AbortController; started: number }>(undefined);
 
   const text = file?.text ?? data;
   const format: DataFormat = picked === 'auto' ? (file && dataFormatForFile(file.name)) || sniffDataFormat(text) : picked;
+  // The report shown is for other inputs while a new check runs.
+  const stale = !!report && (report.text !== text || report.format !== format || report.version !== version);
   const prefixes = useMemo(() => ({ ...(view.data?.prefixes ?? {}), [ontology.prefix]: ontology.namespace }), [view.data, ontology.prefix, ontology.namespace]);
   const iri = `${window.location.origin}/def/${encodeURIComponent(ontology.slug)}/${version}`;
+  // Fetch the version's ontology and shapes as soon as it is picked, so Validate answers at once.
+  useEffect(() => {
+    versionSources(id, version, true)
+      .then((src) => warmDataCheck({ key: src.key, ontology: src.turtle, shapes: src.shapes, baseIRI: DEFAULT_DATA_BASE, maxTriples: DATA_CHECK_LIMITS.triples }))
+      .catch(() => {
+        /* reported by the check */
+      });
+  }, [id, version]);
 
   const setVersion = (v: string) => {
     const n = new URLSearchParams(params);
@@ -125,36 +186,71 @@ export function ValidateTab() {
     invalidate();
   };
 
-  /** The data, format or version changed: forget the report and any answer still on its way. */
-  const invalidate = () => {
+  /**
+   * The data, format or version changed: any answer still on its way is for the old inputs, and a file
+   * still being read is dropped. `replaced`: the data is new altogether (a file, the example), so the
+   * old report goes; otherwise it stays, marked out of date, until the new check answers.
+   */
+  const invalidate = (replaced = false, when: 'now' | 'soon' = 'now') => {
     request.current++;
     loads.current++;
     setReading(false);
-    setReport(null);
-    setBusy(false);
+    nextCheck.current = when;
+    if (replaced) setReport(null);
   };
 
+  // Check automatically, and again in the background whenever the data, format or version changes.
+  useEffect(() => {
+    if (reading) return;
+    if (!text.trim()) {
+      request.current++;
+      setReport(null);
+      setError(undefined);
+      setChecking(false);
+      return;
+    }
+    const delay = nextCheck.current === 'now' ? 0 : autoCheckDelay(text.length);
+    nextCheck.current = 'soon';
+    setChecking(true);
+    const t = setTimeout(() => void run(), delay);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run reads this render's inputs
+  }, [text, format, version, reading, checkNow]);
+
   const run = async () => {
-    if (!text.trim() || busy || reading) return;
     const id = ++request.current;
     const snapshot = { text, format, version };
-    setBusy(true);
-    setError(undefined);
+    // A long check for older inputs (a large file) is stopped; a quick one finishes and its answer is dropped.
+    const previous = inFlight.current;
+    if (previous && Date.now() - previous.started > 500) previous.controller.abort();
+    const controller = new AbortController();
+    inFlight.current = { controller, started: Date.now() };
     try {
-      const result = await api.validateData(ontology.slug, snapshot.version, snapshot.text, DATA_FORMATS[snapshot.format].mediaType);
-      if (id === request.current) setReport({ result, ...snapshot });
+      const { ms, ...result } = await checkHere(snapshot, false, controller.signal);
+      if (id !== request.current) return;
+      setReport({ result, ...snapshot, ms });
+      setError(undefined);
     } catch (e) {
       if (id !== request.current) return;
       setError(e);
       setReport(null);
     } finally {
-      if (id === request.current) setBusy(false);
+      if (inFlight.current?.controller === controller) inFlight.current = undefined;
+      if (id === request.current) setChecking(false);
     }
+  };
+
+  /** Checks data in this browser against a version's ontology and shapes (downloaded once per release). */
+  const checkHere = async (s: { text: string; format: DataFormat; version: string }, turtle = false, signal?: AbortSignal): Promise<DataValidation & { turtle?: string; ms: number }> => {
+    if (new Blob([s.text]).size > DATA_CHECK_LIMITS.bytes) throw new Error(`The data is larger than ${DATA_CHECK_LIMITS.bytes / 1024 / 1024} MB.`);
+    const src = await versionSources(id, s.version);
+    const outcome = await checkDataInBrowser({ key: src.key, ontology: src.turtle, shapes: src.shapes, text: s.text, format: s.format, baseIRI: DEFAULT_DATA_BASE, maxTriples: DATA_CHECK_LIMITS.triples, turtle }, { signal });
+    return { ontology: ontology.ontologyIRI, version: s.version, ...outcome };
   };
 
   const load = async (f: File) => {
     setError(undefined);
-    invalidate();
+    invalidate(true);
     if (f.size > MAX_BYTES) return setError(new Error(`${f.name} is larger than 5 MB, the most the validator accepts.`));
     const token = loads.current;
     setReading(true);
@@ -171,7 +267,7 @@ export function ValidateTab() {
     // Something newer happened while the file was read (another file, an edit, a new version): keep that.
     if (token !== loads.current) return;
     // The file's contents become the data now, so nothing reported or asked for before can stand.
-    invalidate();
+    invalidate(true);
     if (content.length > EDITOR_LIMIT) {
       setFile({ name: f.name, text: content });
     } else {
@@ -197,9 +293,7 @@ export function ValidateTab() {
           subtitle={`Check RDF data against ${ontology.title}: the SHACL shapes derived from it, and the terms it defines`}
           icon={ShieldCheck}
           actions={
-            <Button variant="primary" icon={ShieldCheck} onClick={run} loading={busy || reading} disabled={!text.trim() || reading}>
-              Validate
-            </Button>
+            <CheckStatus checking={reading || (checking && !!text.trim())} done={!!report && !stale} ms={report?.ms} />
           }
         />
         <div className="space-y-3 p-4">
@@ -246,7 +340,7 @@ export function ValidateTab() {
               onClick={() => {
                 setFile(null);
                 setPicked('auto');
-                invalidate();
+                invalidate(true);
                 setData(exampleData(ontology.namespace, ontology.prefix, view.data?.classes ?? []));
               }}
             >
@@ -274,7 +368,7 @@ export function ValidateTab() {
                   variant="ghost"
                   onClick={() => {
                     setFile(null);
-                    invalidate();
+                    invalidate(true);
                   }}
                 >
                   Remove
@@ -287,10 +381,13 @@ export function ValidateTab() {
                   // The editor also reports the text this page put in it: only an edit changes anything.
                   if (v === data) return;
                   setData(v);
-                  invalidate();
+                  invalidate(false, 'soon');
                 }}
                 language={LANGUAGE[format]}
-                onRun={run}
+                onRun={() => {
+                  nextCheck.current = 'now';
+                  setCheckNow((n) => n + 1);
+                }}
                 ariaLabel="Data to validate"
                 placeholder="Paste Turtle, JSON-LD, N-Triples, N-Quads, TriG or RDF/XML, or drop a file here"
                 minHeight={220}
@@ -299,12 +396,12 @@ export function ValidateTab() {
               />
             )}
           </div>
-          <p className="text-xs text-muted">Up to 5 MB (JSON-LD 2 MB) or 25,000 distinct triples. Your data is sent to Concord to check and isn’t stored. Ctrl/⌘-Enter validates.</p>
+          <p className="text-xs text-muted">Up to 5 MB (JSON-LD 2 MB) or 25,000 distinct triples. Your data is checked here in your browser as you type, and never leaves this device.</p>
           {error ? <InlineError error={error} /> : null}
         </div>
       </Card>
 
-      {report && <Report report={report.result} prefixes={{ ...dataPrefixes(report.text), ...prefixes }} onTurtle={() => api.validationReportTurtle(ontology.slug, report.version, report.text, DATA_FORMATS[report.format].mediaType)} name={`${ontology.slug}-${report.version}-report`} />}
+      {report && <Report stale={stale} report={report.result} prefixes={{ ...dataPrefixes(report.text), ...prefixes }} onTurtle={async () => (await checkHere(report, true)).turtle ?? ''} name={`${ontology.slug}-${report.version}-report`} />}
 
       <CollapsibleCard title="Validate from your own code" subtitle="The same check is an HTTP POST to the ontology’s address" icon={Terminal} id="validate-api">
         <ApiHelp iri={iri} />
@@ -313,7 +410,26 @@ export function ValidateTab() {
   );
 }
 
-function Report({ report, prefixes, onTurtle, name }: { report: DataValidation; prefixes: Record<string, string>; onTurtle: () => Promise<string>; name: string }) {
+/** "Checking…" while a check runs, "Checked" once the report matches the data. */
+function CheckStatus({ checking, done, ms }: { checking: boolean; done: boolean; ms?: number }) {
+  return (
+    <span role="status" aria-live="polite" data-testid="validate-status" className="inline-flex min-h-8 items-center gap-1.5 text-sm text-muted">
+      {checking ? (
+        <>
+          <LoaderCircle className="size-4 animate-spin" aria-hidden />
+          Checking…
+        </>
+      ) : done ? (
+        <>
+          <CheckCircle2 className="size-4 text-accent" aria-hidden />
+          {ms === undefined ? 'Checked' : `Checked in ${ms < 1 ? '<1' : Math.round(ms)} ms`}
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+function Report({ report, prefixes, onTurtle, name, stale }: { report: DataValidation; prefixes: Record<string, string>; onTurtle: () => Promise<string>; name: string; stale: boolean }) {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<unknown>();
   const byFocus = useMemo(() => {
@@ -326,20 +442,22 @@ function Report({ report, prefixes, onTurtle, name }: { report: DataValidation; 
   // The lists may be cut short (see truncated); the summary counts everything.
   const termIssues = termErrors + termWarnings;
   return (
-    <Card>
+    // While the data is checked again, the old report stays (faded) rather than flashing away, and can't be downloaded.
+    <Card className={cx('transition-opacity', stale && 'opacity-60')}>
       <CardHeader
         title="Report"
         subtitle={<span data-testid="validation-subtitle">{`${report.triples.toLocaleString()} triple${report.triples === 1 ? '' : 's'} checked against ${report.version === 'draft' ? 'the working draft' : `v${report.version}`}`}</span>}
         icon={ListChecks}
         actions={
           <div className="flex gap-2">
-            <Button size="sm" icon={Download} onClick={() => download(`${name}.json`, JSON.stringify(report, null, 2), 'application/json')}>
+            <Button size="sm" icon={Download} disabled={stale} onClick={() => download(`${name}.json`, JSON.stringify(report, null, 2), 'application/json')}>
               JSON
             </Button>
             <Button
               size="sm"
               icon={Download}
               loading={saving}
+              disabled={stale}
               onClick={async () => {
                 setSaving(true);
                 setSaveError(undefined);
@@ -357,7 +475,7 @@ function Report({ report, prefixes, onTurtle, name }: { report: DataValidation; 
           </div>
         }
       />
-      <div className="space-y-4 p-4" data-testid="validation-report">
+      <div className="space-y-4 p-4" data-testid="validation-report" aria-busy={stale}>
         {saveError ? <InlineError error={saveError} /> : null}
         <div className="flex flex-wrap items-center gap-2" data-testid="validation-verdict">
           {report.conforms ? (

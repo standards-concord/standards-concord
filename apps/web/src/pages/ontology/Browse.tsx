@@ -1,10 +1,11 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
 import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, Network, PanelLeftClose, PanelLeftOpen, PenLine, Search, X } from 'lucide-react';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
-import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
+import { KIND_LABEL, allTerms, restrictionText, type Labeler } from '../../lib/ontology';
+import { searchTerms, termDetail } from '@concord/core/terms';
 import { compactIri } from '../../lib/format';
 import { OntologyGraph } from '../../components/OntologyGraph';
 import { buildModel, type OntologyModel } from '../../lib/ontologyModel';
@@ -77,9 +78,13 @@ function TermDetailPanel({
   onClose?: () => void;
 }) {
   const { id, label, view } = useOntology();
-  // Remember which term each response is for, so the editor never opens on a
-  // previous term's data while the selected one is still loading.
-  const term = useAsync(async () => ({ for: `${id}|${iri}`, detail: await api.term(id, iri) }), [id, iri]);
+  // The page already holds the whole ontology (its view), so a term's details, and what uses it,
+  // come straight from there: following a link shows the term at once, with no request.
+  const local = useMemo(() => (view.data ? termDetail(view.data, iri) : undefined), [view.data, iri]);
+  // Only an IRI the view doesn't list is asked of the server. Each response remembers which term
+  // it is for, so the editor never opens on a previous term's data while the selected one loads.
+  const remote = useAsync(async () => (local ? undefined : { for: `${id}|${iri}`, detail: await api.term(id, iri) }), [id, iri, !local]);
+  const term = local ? { data: { for: `${id}|${iri}`, detail: local }, loading: false, error: undefined, reload: remote.reload } : remote;
   const [bugOpen, setBugOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [proposed, setProposed] = useState<ChangeRequestDetail>();
@@ -539,14 +544,13 @@ export function BrowseTab() {
   const mode: Mode = raw === 'graph' || raw === 'diagram' ? raw : 'tree';
   const canvas = mode !== 'tree';
   const [q, setQ] = useState('');
-  const [debounced, setDebounced] = useState('');
+  // Typing stays responsive on a large ontology: the results catch up with the box when React has time.
+  const debounced = useDeferredValue(q.trim());
   const [navOpen, setNavOpen] = useState<boolean>();
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(q.trim()), 250);
-    return () => clearTimeout(t);
-  }, [q]);
-  const results = useAsync(async () => (debounced ? api.search(id, debounced) : undefined), [id, debounced]);
   const model = useMemo(() => (view.data ? buildModel(view.data) : undefined), [view.data]);
+  // Search runs over the loaded ontology too: results appear as you type, with no request.
+  const terms = useMemo(() => (view.data ? allTerms(view.data) : []), [view.data]);
+  const results = useMemo(() => (debounced ? searchTerms(terms, debounced, 30) : undefined), [terms, debounced]);
 
   // Canvas scope. The drawing is anchored on ?around= (a class), independently of the term
   // being inspected (?term=), so picking something shows its details without redrawing.
@@ -631,13 +635,9 @@ export function BrowseTab() {
       {debounced ? (
         <div>
           <div className="mb-2 text-sm font-semibold">Search results</div>
-          {results.loading && !results.data ? (
-            <Loading />
-          ) : results.error ? (
-            <ErrorCard error={results.error} />
-          ) : results.data?.length ? (
+          {results?.length ? (
             <ul>
-              {results.data.map((t) => (
+              {results.map((t) => (
                 <li key={t.iri}>
                   <button onClick={() => select(t.iri)} className={cx('w-full rounded-md px-2 py-1.5 text-left hover:bg-surface-2', selected === t.iri && 'bg-accent-soft')}>
                     <div className="text-sm font-medium">{t.label ?? label(t.iri)}</div>

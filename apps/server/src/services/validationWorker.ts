@@ -5,8 +5,7 @@
  * hash of the ontology's Turtle.
  */
 import { Worker } from 'node:worker_threads';
-import { checkTerms, classHierarchy, DataError, OntologyGraph, parseData, ShapesValidator, toShacl, type DataFormat } from '@concord/core';
-import type { Quad } from 'n3';
+import { checkData, DataError, MAX_LISTED, OntologyGraph, prepareOntology, toShacl, type DataCheckOutcome, type DataFormat, type PreparedOntology } from '@concord/core';
 
 export interface ValidationJob {
   id: number;
@@ -27,22 +26,8 @@ export interface ValidationJob {
   recycleMb: number;
 }
 
-export interface ValidationOutcome {
-  conforms: boolean;
-  valid: boolean;
-  triples: number;
-  /** Counts over every result and term issue, including any left out of the lists. */
-  summary: { violations: number; warnings: number; infos: number; termErrors: number; termWarnings: number };
-  /** The first MAX_LISTED results and term issues. */
-  results: Awaited<ReturnType<ShapesValidator['validate']>>['results'];
-  terms: ReturnType<typeof checkTerms>;
-  /** Set when there were more results or term issues than the lists hold. */
-  truncated?: true;
-  turtle?: string;
-}
-
-/** The most results, and term issues, a reply lists. The summary still counts them all. */
-export const MAX_LISTED = 1000;
+export type ValidationOutcome = DataCheckOutcome;
+export { MAX_LISTED };
 
 export type WorkerReply = ({ id: number; ok: true; outcome: ValidationOutcome } | { id: number; ok: false; status?: number; message: string }) & {
   /** Replace this process: it has grown past recycleMb. */
@@ -52,13 +37,13 @@ export type WorkerReply = ({ id: number; ok: true; outcome: ValidationOutcome } 
 /** The heap ran out, or the process used more memory in all than the server allows. */
 export const OUT_OF_MEMORY = 'Checking the data needed more memory than the validator allows. Try smaller data.';
 
-const cache = new Map<string, { graph: OntologyGraph; validator: ShapesValidator; hierarchy: Quad[] }>();
+const cache = new Map<string, PreparedOntology>();
 
 async function prepared(hash: string, ontology: string) {
   let hit = cache.get(hash);
   if (!hit) {
     const graph = await OntologyGraph.fromTurtle(ontology);
-    hit = { graph, validator: ShapesValidator.fromTurtle(await toShacl(graph)), hierarchy: classHierarchy(graph) };
+    hit = await prepareOntology(graph, await toShacl(graph));
     cache.set(hash, hit);
     if (cache.size > 8) cache.delete(cache.keys().next().value!);
   }
@@ -73,55 +58,8 @@ async function prepared(hash: string, ontology: string) {
  */
 export const MAX_REPLY_CHARS = 16 * 1024 * 1024;
 
-/** The characters in every string of a JSON-like value, stopping once past `limit`. */
-function textSize(value: unknown, limit: number): number {
-  let size = 0;
-  const stack = [value];
-  while (stack.length && size <= limit) {
-    const v = stack.pop();
-    if (typeof v === 'string') size += v.length;
-    else if (v && typeof v === 'object') for (const x of Array.isArray(v) ? v : Object.values(v)) stack.push(x);
-  }
-  return size;
-}
-
 async function run(job: ValidationJob): Promise<ValidationOutcome> {
-  const data = await parseData(job.text, job.format, { baseIRI: job.baseIRI, maxTriples: job.maxTriples });
-  const { graph, validator, hierarchy } = await prepared(job.hash, job.ontology);
-  // Only the first MAX_LISTED results are kept, as they are made: the rest are only counted
-  // (the SHACL engine runs on batches of the data, so each of its reports stays small).
-  const full = await validator.validate(data, hierarchy, { limit: MAX_LISTED });
-  const allTerms = checkTerms(graph, data);
-  const total = full.counts.Violation + full.counts.Warning + full.counts.Info;
-  const summary = {
-    violations: full.counts.Violation,
-    warnings: full.counts.Warning,
-    infos: full.counts.Info,
-    termErrors: allTerms.filter((t) => t.severity === 'error').length,
-    termWarnings: allTerms.filter((t) => t.severity === 'warning').length,
-  };
-  const truncated = total > MAX_LISTED || allTerms.length > MAX_LISTED;
-  const report = full;
-  const terms = allTerms.slice(0, MAX_LISTED);
-  const tooBig = () => new DataError(413, 'The validation report is too large to send back. Check the data in smaller parts.');
-  let size = textSize([report.results, terms], MAX_REPLY_CHARS);
-  if (size > MAX_REPLY_CHARS) throw tooBig();
-  let turtle: string | undefined;
-  if (job.turtle) {
-    turtle = validator.reportTurtle(report, graph.prefixes);
-    if (total > MAX_LISTED) turtle = `# The first ${MAX_LISTED.toLocaleString('en')} of ${total.toLocaleString('en')} results.\n${turtle}`;
-    if ((size += turtle.length) > MAX_REPLY_CHARS) throw tooBig();
-  }
-  return {
-    conforms: full.conforms,
-    valid: full.conforms && summary.termErrors === 0,
-    triples: data.length,
-    summary,
-    results: report.results,
-    terms,
-    ...(truncated ? { truncated: true as const } : {}),
-    ...(turtle !== undefined ? { turtle } : {}),
-  };
+  return checkData(() => prepared(job.hash, job.ontology), job.text, job.format, { baseIRI: job.baseIRI, maxTriples: job.maxTriples, turtle: job.turtle, maxChars: MAX_REPLY_CHARS });
 }
 
 /**

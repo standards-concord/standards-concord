@@ -1,7 +1,7 @@
 import path from 'node:path';
 import express, { Router, type Request } from 'express';
-import { compactIRI, expandIRI, FORMAT_INFO, serialize, validate } from '@concord/core';
-import type { OutputFormat, TermView } from '@concord/core/types';
+import { allTerms, compactIRI, expandIRI, FORMAT_INFO, serialize, usedBy, validate } from '@concord/core';
+import type { OutputFormat } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
 import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
@@ -98,26 +98,6 @@ async function sessionInfo(user?: User): Promise<SessionInfo> {
 const demoOnly = () => {
   if (!config.demoMode) throw new HttpError(403, 'Only available in demo mode');
 };
-
-/** Terms that refer to a given IRI (superclass, restriction, domain, range, type). */
-function usedBy(all: TermView[], iri: string, c: (i: string) => string) {
-  const out: { iri: string; label?: string; via: string }[] = [];
-  for (const t of all) {
-    if (t.iri === iri) continue;
-    if (t.kind === 'class') {
-      if (t.superClasses.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'subclass of' });
-      if (t.disjointWith.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'disjoint with' });
-      for (const r of t.restrictions) if (r.property === iri || r.filler === iri) out.push({ iri: t.iri, label: t.label, via: `restriction ${c(r.property)} ${r.kind}` });
-    } else if (t.kind === 'individual') {
-      if (t.types.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'instance of' });
-    } else {
-      if (t.domain.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'domain' });
-      if (t.range.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'range' });
-      if (t.superProperties.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'subproperty of' });
-    }
-  }
-  return out;
-}
 
 const project = async (req: Request) => await mustFindProject(String(req.params.id));
 
@@ -305,9 +285,7 @@ export function apiRouter(): Router {
     const iri = expandIRI(String(req.params.iri), g.prefixes);
     const t = g.term(iri);
     if (!t) throw new HttpError(404, `No term ${req.params.iri}`);
-    const v = g.view();
-    const all: TermView[] = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.annotationProperties, ...v.individuals];
-    res.json({ ...t, usedBy: usedBy(all, iri, (i) => compactIRI(i, g.prefixes)) });
+    res.json({ ...t, usedBy: usedBy(allTerms(g.view()), iri, (i) => compactIRI(i, g.prefixes)) });
   });
 
   r.get('/ontologies/:id/search', async (req, res) => {

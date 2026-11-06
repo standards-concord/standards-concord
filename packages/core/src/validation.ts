@@ -16,7 +16,7 @@ import type { Literal, Quad, Term } from 'n3';
 import type { OntologyGraph } from './graph.js';
 import { NS, RDF_TYPE, compactIRI } from './ns.js';
 import { copyBlankSubtree, literalToNT, nn } from './rdf.js';
-import { structuralReasoner } from './reasoner.js';
+import { dataConsistency } from './reasoner.js';
 import { writeNTriples, writeTurtle } from './turtle.js';
 
 const SH = NS.sh;
@@ -26,6 +26,8 @@ const SH = NS.sh;
 /* ------------------------------------------------------------------------ */
 
 import { DATA_FORMATS, type DataFormat } from './dataFormats.js';
+import { allTerms, searchTerms } from './termIndex.js';
+import type { TermView } from './types.js';
 
 export { DATA_FORMATS, DATA_MEDIA_TYPES, dataFormatForFile, dataFormatForMediaType, sniffDataFormat } from './dataFormats.js';
 export type { DataFormat } from './dataFormats.js';
@@ -223,7 +225,8 @@ async function feed(
   for (const chunk of chunks(text)) {
     if (error !== undefined) break;
     parser.write(chunk);
-    await new Promise((r) => setImmediate(r));
+    // Yield to the event loop (setImmediate in Node; browsers, where this also runs, have only timers).
+    await new Promise((r) => (typeof setImmediate === 'function' ? setImmediate(r) : setTimeout(r, 0)));
   }
   if (error === undefined) parser.end();
   await done;
@@ -765,6 +768,27 @@ export interface TermIssue {
   term?: string;
 }
 
+/**
+ * What checkTerms needs from an ontology, worked out once per graph rather than on every check
+ * (the in-browser validator checks again on each pause in typing). Rebuilt if the store changes size.
+ */
+const termIndexes = new WeakMap<OntologyGraph, { size: number; known: Set<string>; terms: () => TermView[]; term: (iri: string) => TermView | undefined }>();
+function termIndexOf(graph: OntologyGraph) {
+  let hit = termIndexes.get(graph);
+  if (!hit || hit.size !== graph.store.size) {
+    const known = new Set<string>();
+    for (const q of graph.store.getQuads(null, null, null, null)) known.add(q.subject.value);
+    let list: TermView[] | undefined;
+    let byIri: Map<string, TermView> | undefined;
+    const terms = () => (list ??= allTerms(graph.view()));
+    // The first of each IRI, which is the kind graph.term() picks for a punned IRI.
+    const term = (iri: string) => (byIri ??= new Map([...terms()].reverse().map((t) => [t.iri, t]))).get(iri);
+    hit = { size: graph.store.size, known, terms, term };
+    termIndexes.set(graph, hit);
+  }
+  return hit;
+}
+
 const WELL_KNOWN = [NS.rdf, NS.rdfs, NS.owl, NS.xsd, NS.skos, NS.dcterms, NS.schema, NS.foaf, NS.prov];
 
 /**
@@ -773,19 +797,18 @@ const WELL_KNOWN = [NS.rdf, NS.rdfs, NS.owl, NS.xsd, NS.skos, NS.dcterms, NS.sch
  * and contradictions between the data and the ontology (structural reasoner).
  */
 export function checkTerms(graph: OntologyGraph, data: Quad[], prefixes: Record<string, string> = {}): TermIssue[] {
-  const known = new Set<string>();
-  for (const q of graph.store.getQuads(null, null, null, null)) known.add(q.subject.value);
+  const { known, terms, term: termOf } = termIndexOf(graph);
   const issues: TermIssue[] = [];
   const c = (iri: string) => compactIRI(iri, { ...graph.prefixes, ...prefixes });
   const check = (iri: string, what: string) => {
     if (known.has(iri) || WELL_KNOWN.some((ns) => iri.startsWith(ns))) return;
     if (graph.namespace && iri.startsWith(graph.namespace)) {
-      const t = graph.search(iri.slice(graph.namespace.length), 10).filter((x) => x.iri.startsWith(graph.namespace)).slice(0, 3);
+      const t = searchTerms(terms(), iri.slice(graph.namespace.length), 10).filter((x) => x.iri.startsWith(graph.namespace)).slice(0, 3);
       issues.push({ severity: 'error', term: iri, message: `${c(iri)} is used as a ${what} but is not defined in the ontology.${t.length ? ` Did you mean ${t.map((x) => c(x.iri)).join(' or ')}?` : ''}` });
     }
   };
   const deprecated = (iri: string) => {
-    const term = graph.term(iri);
+    const term = termOf(iri);
     if (term?.deprecated) issues.push({ severity: 'warning', term: iri, message: `${c(iri)} is deprecated${term.replacedBy ? `; use ${c(term.replacedBy)} instead` : ''}.` });
   };
   // Each distinct term once: data can repeat the same few terms thousands of times.
@@ -803,9 +826,7 @@ export function checkTerms(graph: OntologyGraph, data: Quad[], prefixes: Record<
     check(t, 'class');
     deprecated(t);
   }
-  const merged = graph.clone();
-  merged.store.addQuads(data);
-  const r = structuralReasoner(merged);
+  const r = dataConsistency(graph, data);
   if (!r.consistent) issues.push({ severity: 'error', message: `The data contradicts the ontology: ${r.explanation ?? 'inconsistent'}` });
   return [...new Map(issues.map((x) => [x.message, x])).values()];
 }

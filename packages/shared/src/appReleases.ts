@@ -53,6 +53,30 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.33.0',
+    date: '2026-11-06',
+    title: 'Instant term browsing, and data checked in your browser',
+    changes: [
+      {
+        id: 'validate-in-browser',
+        type: 'feat',
+        title: 'Validate data runs in your browser',
+        detail: 'Validate data now checks your data on your own device with sparq, as you type or as soon as you pick a file, in a few milliseconds. There is no Validate button, your data never leaves your device, and it keeps working if the connection drops once the page has loaded. The POST API at the ontology address still runs the same check for tools and agents.',
+        roles: ['contributor', 'member', 'agent'],
+        to: '{o}/validate',
+        ask: 'Does checking as you type feel instant, and is it clear that your data stays on your device?',
+      },
+      {
+        id: 'instant-term-browsing',
+        type: 'perf',
+        title: 'Clicking between terms is instant',
+        detail: 'Term details, what uses each term, and search now come from the ontology the page already holds, so following a link in Browse shows the term at once instead of waiting for the server.',
+        roles: [],
+        to: '{o}/browse',
+      },
+    ],
+  },
+  {
     version: '0.32.0',
     date: '2026-11-05',
     title: 'Less to read on every page',

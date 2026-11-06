@@ -162,6 +162,42 @@ test.describe('class tree and class pages', () => {
   });
 });
 
+test.describe('moving around the ontology is instant', () => {
+  // Each term click, and each search, used to ask the server and show a spinner until it
+  // answered. The page already holds the whole ontology, so these now never wait on it.
+  test('picking terms, following links and searching show results with the server cut off', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/Failed to load resource|ERR_INTERNET_DISCONNECTED/);
+    await page.goto(`${base}?term=${encodeURIComponent(`${VOL}Skill`)}`);
+    await settle(page);
+    await expect(page.getByRole('heading', { level: 2, name: 'skill' })).toBeVisible();
+    const asked: string[] = [];
+    await page.route('**/api/**', (route) => {
+      asked.push(route.request().url());
+      return route.abort('internetdisconnected');
+    });
+
+    // "Used by" is worked out here, and its links open the term.
+    await page.locator('summary', { hasText: /^Usage/ }).click();
+    const usedBy = page.locator('dt', { hasText: /^Used by$/ }).locator('xpath=following-sibling::dd[1]');
+    const first = usedBy.getByRole('button').first();
+    const name = (await first.innerText()).trim();
+    await first.click();
+    await expect(page.getByRole('heading', { level: 2, name, exact: true })).toBeVisible();
+
+    await item(page, 'time commitment').click();
+    await expect(page.getByRole('heading', { level: 2, name: 'time commitment' })).toBeVisible();
+
+    await page.getByLabel('Search terms').fill('skill');
+    await expect(page.getByText('Search results')).toBeVisible();
+    await expect(page.getByRole('button', { name: /^skill/i }).first()).toBeVisible();
+    await page.getByLabel('Search terms').fill('zzqxw');
+    await expect(page.getByText('No terms match “zzqxw”.')).toBeVisible();
+
+    expect(asked).toEqual([]);
+    await expectNoCrash(page);
+  });
+});
+
 test.describe('class diagram', () => {
   test('draws every class as a box, with attributes, relationships and subclass links', async ({ page }) => {
     await page.goto(`${base}?view=diagram`);

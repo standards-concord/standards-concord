@@ -3,8 +3,8 @@ import { expect, expectNoCrash, signIn, test, type Page } from './fixtures';
 
 /**
  * The validator: paste or upload RDF data and check it against the ontology's
- * SHACL shapes and terms, through the same POST to the ontology IRI that other
- * tools use. Also covers that API and SHACL by content negotiation, through
+ * SHACL shapes and terms. The page checks in the browser (sparq in a Web
+ * Worker), the same check as the POST to the ontology IRI that other tools use. Also covers that API and SHACL by content negotiation, through
  * the web origin (the dev and preview proxies, like Vercel's).
  */
 
@@ -27,11 +27,11 @@ test.describe('Validate data', () => {
     await page.getByRole('navigation', { name: 'Explore pages' }).getByRole('link', { name: 'Validate data' }).click();
     await expect(page).toHaveURL(/\/o\/volunteering\/validate$/);
     await expect(page.getByLabel('Version to validate against')).toHaveValue('1.0.0');
-    await expect(page.getByRole('button', { name: 'Validate', exact: true })).toBeDisabled();
+    // There is no Validate button: the data is checked as soon as there is any, and again on each change.
+    await expect(page.getByRole('button', { name: 'Validate', exact: true })).toHaveCount(0);
 
     await page.getByRole('button', { name: 'Try an example' }).click();
     await expect(page.getByLabel('Data format')).toContainText('Detect format (Turtle)');
-    await page.getByRole('button', { name: 'Validate', exact: true }).click();
 
     await expect(report(page)).toBeVisible();
     await expect(page.getByTestId('validation-verdict')).toContainText(/\d+ violations?/);
@@ -46,11 +46,10 @@ test.describe('Validate data', () => {
     await expect(results).toContainText('VolunteeringOpportunityShape');
     await expectNoCrash(page);
 
-    // Editing the data clears the stale report.
+    // Editing the data checks it again in the background; the new report replaces the old one.
     await setEditor(page, '@prefix vol: <https://w3id.org/odi/volunteering#> .\n<https://example.org/r> a vol:Role .\n');
-    await expect(report(page)).toHaveCount(0);
-    await page.keyboard.press('ControlOrMeta+Enter');
     await expect(page.getByTestId('validation-verdict')).toContainText('Conforms to the shapes');
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in (<1|\d+) ms$/);
     await expect(page.getByTestId('validation-verdict')).toContainText('Every term is defined');
     await expect(page.getByTestId('validation-subtitle')).toHaveText('1 triple checked against v1.0.0');
   });
@@ -60,7 +59,6 @@ test.describe('Validate data', () => {
     // 700 opportunities, each without a role or an organisation: 1,400 violations.
     const data = `@prefix vol: <${VOL}> .\n@prefix ex: <https://example.org/> .\n${Array.from({ length: 700 }, (_, i) => `ex:o${i} a vol:VolunteeringOpportunity ; vol:title "t" .`).join('\n')}\n`;
     await setEditor(page, data);
-    await page.getByRole('button', { name: 'Validate', exact: true }).click();
     await expect(page.getByTestId('validation-verdict')).toContainText('1,400 violations');
     await expect(page.getByTestId('validation-truncated')).toHaveText('The report lists the first 1,000 results and term issues. The counts above include them all.');
     await expectNoCrash(page);
@@ -71,7 +69,6 @@ test.describe('Validate data', () => {
     // 1,200 properties in the ontology's namespace that it doesn't define: term errors only.
     const data = `@prefix vol: <${VOL}> .\n${Array.from({ length: 1200 }, (_, i) => `<https://example.org/x> vol:undefined${i} "v" .`).join('\n')}\n`;
     await setEditor(page, data);
-    await page.getByRole('button', { name: 'Validate', exact: true }).click();
     await expect(page.getByTestId('validation-verdict')).toContainText('1,200 term issues');
     await expect(page.getByTestId('validation-truncated')).toBeVisible();
     await expect(page.getByTestId('validation-terms').getByRole('listitem')).toHaveCount(1000);
@@ -94,7 +91,6 @@ test.describe('Validate data', () => {
 
     await page.getByLabel('Version to validate against').selectOption('draft');
     await expect(page).toHaveURL(/version=draft/);
-    await page.getByRole('button', { name: 'Validate', exact: true }).click();
     await expect(page.getByTestId('validation-subtitle')).toHaveText('2 triples checked against the working draft');
     await expect(page.getByTestId('validation-results')).toContainText('vol:offeredBy');
 
@@ -114,29 +110,84 @@ test.describe('Validate data', () => {
   });
 
   test('drops an answer that arrives after the data or version changed', async ({ page }) => {
-    await page.goto('/o/volunteering/validate');
+    // Hold the release's ontology download, which the in-browser check waits for.
     let release: () => void = () => {};
     const held = new Promise<void>((r) => (release = r));
-    await page.route('**/def/volunteering/**', async (route) => {
-      if (route.request().method() !== 'POST') return route.continue();
+    const releaseSource = /\/api\/ontologies\/[^/]+\/source\?.*ref=1\.0\.0/;
+    await page.route(releaseSource, async (route) => {
       await held;
       await route.continue();
     });
+    await page.goto('/o/volunteering/validate');
     await page.getByRole('button', { name: 'Try an example' }).click();
-    await page.getByRole('button', { name: 'Validate', exact: true }).click();
-    // While that request is out, switch to the draft.
+    await expect(page.getByTestId('validate-status')).toHaveText('Checking…');
+    // While that check waits, switch to the draft: it is checked against the draft at once.
     await page.getByLabel('Version to validate against').selectOption('draft');
-    release();
-    await page.waitForResponse((r) => r.request().method() === 'POST' && r.url().includes('/def/volunteering/'));
-    await expect(report(page)).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Validate', exact: true })).toBeEnabled();
-    await page.unroute('**/def/volunteering/**');
-
-    // Validating again reports against the draft; changing the version clears that report, so downloads always match it.
-    await page.getByRole('button', { name: 'Validate', exact: true }).click();
     await expect(page.getByTestId('validation-subtitle')).toContainText('the working draft');
+    // The release's answer, arriving late, never replaces it.
+    release();
+    await page.waitForResponse((r) => releaseSource.test(r.url()));
+    await page.waitForTimeout(300);
+    await expect(page.getByTestId('validation-subtitle')).toContainText('the working draft');
+    await page.unroute(releaseSource);
+
+    // Back on the release, the draft's report stays only faded, with downloads off, until the new check answers.
     await page.getByLabel('Version to validate against').selectOption('1.0.0');
-    await expect(report(page)).toHaveCount(0);
+    await expect(page.getByTestId('validation-subtitle')).toHaveText(/checked against v1\.0\.0/);
+    await expect(page.getByRole('button', { name: 'JSON', exact: true })).toBeEnabled();
+  });
+
+  test('while data is checked again, the old report is faded and can’t be downloaded', async ({ page }) => {
+    await page.goto('/o/volunteering/validate');
+    await page.getByRole('button', { name: 'Try an example' }).click();
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    // Hold the worker's next answer by holding its ontology download for the draft.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/ontologies\/[^/]+\/source\?.*ref=working/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.getByLabel('Version to validate against').selectOption('draft');
+    await expect(report(page)).toHaveAttribute('aria-busy', 'true');
+    await expect(page.getByRole('button', { name: 'JSON', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'SHACL report (Turtle)' })).toBeDisabled();
+    await expect(page.getByTestId('validate-status')).toHaveText('Checking…');
+    release();
+    await expect(page.getByTestId('validation-subtitle')).toContainText('the working draft');
+    await expect(report(page)).not.toHaveAttribute('aria-busy', 'true');
+    await expect(page.getByRole('button', { name: 'JSON', exact: true })).toBeEnabled();
+  });
+
+  test('checks the data in this browser: nothing is sent, and it works with the server gone', async ({ page, consoleGuard }) => {
+    // The page used to POST the data to the server to check it. That also meant a version held for
+    // privacy review (whose public reads answer 503 "being reviewed") couldn't be checked even by its
+    // own working group: now only the signed-in ontology download is needed, and then nothing at all.
+    consoleGuard.allow(/Failed to load resource|ERR_FAILED|ERR_INTERNET_DISCONNECTED/);
+    await page.goto('/o/volunteering/validate');
+    await expect(page.getByText('Your data is checked here in your browser as you type, and never leaves this device.')).toBeVisible();
+    const marker = `private-${Date.now()}`;
+    await setEditor(page, `@prefix vol: <${VOL}> .\n<https://example.org/${marker}> a vol:Role .\n`);
+    // Give the version's ontology and shapes time to download, then cut the server off.
+    await page.waitForLoadState('networkidle');
+    const sent: string[] = [];
+    await page.route('**/*', async (route) => {
+      const r = route.request();
+      if (r.method() !== 'GET' || (r.postData() ?? '').includes(marker) || r.url().includes(marker)) sent.push(`${r.method()} ${r.url()}`);
+      if (r.url().includes('/api/') || r.url().includes('/def/')) return route.abort('internetdisconnected');
+      return route.continue();
+    });
+    // Typing checks it again, with the server gone.
+    await page.getByTestId('validate-editor').click();
+    await page.keyboard.press('ControlOrMeta+End');
+    await page.keyboard.insertText(`<https://example.org/${marker}-2> a vol:Role .\n`);
+    await expect(page.getByTestId('validation-subtitle')).toHaveText('2 triples checked against v1.0.0');
+    await expect(page.getByTestId('validation-verdict')).toContainText('Conforms to the shapes');
+    // The Turtle report is written here too.
+    const ttl = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'SHACL report (Turtle)' }).click();
+    expect(fs.readFileSync((await (await ttl).path())!, 'utf8')).toContain('sh:conforms true');
+    expect(sent).toEqual([]);
   });
 
   test('a file still being read never shows the report for other data', async ({ page }, info) => {
@@ -160,17 +211,19 @@ test.describe('Validate data', () => {
     let body = '@prefix vol: <https://w3id.org/odi/volunteering#> .\n';
     for (let i = 0; body.length < 600 * 1024; i++) body += `<https://example.org/r${i}> a vol:Role .\n`;
     fs.writeFileSync(big, body);
-    const validate = page.getByRole('button', { name: 'Validate', exact: true });
+    const status = page.getByTestId('validate-status');
 
-    // While a large file is read, the example already in the editor can't be validated.
+    // While a large file is read, the example's report goes, and nothing is reported until the file is in.
     await page.getByRole('button', { name: 'Try an example' }).click();
+    await expect(page.getByTestId('validation-verdict')).toContainText(/violation/);
     await page.getByTestId('validate-file').setInputFiles(big);
-    await expect(validate).toBeDisabled();
+    await expect(report(page)).toHaveCount(0);
+    await expect(status).toHaveText('Checking…');
     await page.evaluate(() => (window as unknown as { releaseFileRead: () => void }).releaseFileRead());
     await expect(page.getByTestId('validate-file-summary')).toContainText('held-big.ttl');
-    await expect(report(page)).toHaveCount(0);
-    await validate.click();
+    // The file is checked as soon as it is in: its report, never the example's.
     await expect(page.getByTestId('validation-verdict')).toContainText('Conforms to the shapes');
+    await expect(page.getByTestId('validation-subtitle')).toContainText(/^[\d,]{6,} triples checked/);
 
     // Choosing the example while a file is read keeps the example.
     const small = info.outputPath('held-small.ttl');
@@ -179,16 +232,14 @@ test.describe('Validate data', () => {
     await expect(report(page)).toHaveCount(0);
     await page.getByRole('button', { name: 'Try an example' }).click();
     await page.evaluate(() => (window as unknown as { releaseFileRead: () => void }).releaseFileRead());
-    await expect(validate).toBeEnabled();
     await expect(page.getByTestId('validate-editor')).toContainText('saturday-shift');
+    await expect(page.getByTestId('validation-results')).toContainText('ex:saturday-shift');
     await expect(page.getByTestId('validate-editor')).not.toContainText('only-in-the-file');
   });
 
-  test('explains data it cannot read', async ({ page, consoleGuard }) => {
-    consoleGuard.allow(/status of 400/);
+  test('explains data it cannot read', async ({ page }) => {
     await page.goto('/o/volunteering/validate');
     await setEditor(page, '@prefix vol: <https://w3id.org/odi/volunteering#> .\nvol:x vol:y');
-    await page.getByRole('button', { name: 'Validate', exact: true }).click();
     await expect(page.getByRole('alert').filter({ hasText: 'Could not parse the data as Turtle' })).toBeVisible();
     await expect(report(page)).toHaveCount(0);
   });
