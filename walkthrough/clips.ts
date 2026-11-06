@@ -129,7 +129,8 @@ export const clipActions: Record<string, Action> = {
   },
   async 'c-validate'(c) {
     await c.d.clearHighlight();
-    if (!(await c.d.click(c.d.page.getByRole('button', { name: 'Validate', exact: true }), 'Validate'))) return;
+    // There is no Validate button: the page checks the file as soon as it is in, and again when the release changes.
+    await c.d.claimVisible(c.d.page.getByTestId('validate-status').getByText(/^Checked in/), 'the data was checked straight away');
     const verdict = c.d.page.getByTestId('validation-verdict');
     await c.d.claimVisible(verdict.getByText('1 violation'), 'the report finds the one problem');
     await c.d.claimVisible(c.d.page.getByTestId('validation-subtitle').getByText(/checked against v\d+\.\d+\.\d+$/), 'the data was checked against a release');
