@@ -432,7 +432,10 @@ function triageOnce(cr: ChangeRequest, opts: { analyse?: boolean }, lastTry: boo
 
 async function checkAndWrite(cr: ChangeRequest, opts: { analyse?: boolean }, lastTry: boolean): Promise<{ cr: ChangeRequest; again?: boolean }> {
   // Triage works on stored requests only: one never stored (or since discarded) is never written back.
-  if (!(await get<ChangeRequest>('changeRequests', cr.id))) return { cr };
+  const stored = await get<ChangeRequest>('changeRequests', cr.id);
+  if (!stored) return { cr };
+  // Which results were stored when this check began: any written after are newer than this check's.
+  const seqAtStart = stored.triageSeq ?? 0;
   const project = await getProject(cr.ontologyId);
   const author = await getUser(cr.authorId);
   const opsKey = JSON.stringify(cr.ops);
@@ -470,8 +473,9 @@ async function checkAndWrite(cr: ChangeRequest, opts: { analyse?: boolean }, las
     if (JSON.stringify(latest.ops) !== opsKey) return latest;
     const now = await ontologyStore.head(project);
     if (checkedHead !== now) {
-      // Results a newer check stored for the draft as it is now stand (over a check that couldn't read the draft, too).
-      if (latest.triagedHead === now) return latest;
+      // Results a newer check stored for the draft as it is now stand, over a check that couldn't read the draft too.
+      // (Only newer ones: a check that fails, at merge time say, still replaces results from before it began.)
+      if (latest.triagedHead === now && (checkedHead !== undefined || (latest.triageSeq ?? 0) > seqAtStart)) return latest;
       if (checkedHead !== undefined) {
         // These results describe an older draft: check again. (On the last try the draft can't have moved, as it held
         // the lock; if it somehow did, what is stored is left as it is rather than replaced with older results.)
@@ -481,6 +485,7 @@ async function checkAndWrite(cr: ChangeRequest, opts: { analyse?: boolean }, las
     }
     for (const [k, v] of Object.entries(result)) if (v !== undefined) (latest as unknown as Record<string, unknown>)[k] = v;
     latest.triagedHead = checkedHead;
+    latest.triageSeq = (latest.triageSeq ?? 0) + 1;
     latest.timeline.push(event);
     return await save(latest);
   });
