@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.34.0',
+    version: '0.35.0',
     date: '2026-11-06',
     title: 'Tidier Browse pages and plain type names',
     pr: 93,
@@ -82,6 +82,24 @@ export const APP_RELEASES: AppRelease[] = [
           'A long property name that wraps onto two lines stays left-aligned instead of centring. The governance rules start in one column, every governance section has an icon, system events in the activity feed get a round icon, and the Concord name is no longer cut short on a phone.',
         roles: [],
         to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.34.0',
+    date: '2026-11-06',
+    title: 'See who runs an ontology at a glance',
+    pr: 91,
+    changes: [
+      {
+        id: 'role-rings',
+        type: 'feat',
+        title: 'Coloured rings for owners, stewards and ODI oversight',
+        detail:
+          'In the members list, owners, the steward (who chairs) and ODI oversight have a coloured ring round their picture, with a small key underneath. Hover over a picture to see their roles. Role chips on the Governance page use the same colours.',
+        roles: [],
+        to: '{o}',
+        ask: 'Could you tell who runs the working group from the rings? Are the colours clear in the look you use?',
       },
     ],
   },

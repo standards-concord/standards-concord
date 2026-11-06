@@ -5,10 +5,10 @@ import { askOf, odiApprovedFromTimeline } from '../../lib/asks';
 import { scrollBehavior } from '../../lib/motion';
 import { api } from '../../api';
 import { useAsync } from '../../lib/hooks';
-import { formatDate, plural, relativeTime } from '../../lib/format';
+import { formatDate, plural, relativeTime, ringRoles } from '../../lib/format';
 import { useSession } from '../../lib/session';
 import { ActivityFeed } from '../../components/ActivityFeed';
-import { LevelBadge, RoleChips, StatusPill } from '../../components/badges';
+import { LevelBadge, RoleChips, RoleRingLegend, StatusPill } from '../../components/badges';
 import { Disclosure } from '../../components/Disclosure';
 import { ValidationDetails } from '../../components/Validation';
 import { Avatar, ErrorCard, Loading } from '../../components/ui';
@@ -52,6 +52,7 @@ export function OverviewTab() {
   }, [healthKey, settled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const members = o.members ?? [];
+  const shownMembers = members.slice(0, 14);
   const inProgress = (changes.data ?? [])
     .filter((cr) => IN_PROGRESS.includes(cr.status))
     .sort((a, b) => IN_PROGRESS.indexOf(a.status) - IN_PROGRESS.indexOf(b.status) || b.updatedAt.localeCompare(a.updatedAt));
@@ -273,14 +274,16 @@ export function OverviewTab() {
           </div>
           {members.length ? (
             <>
-              <ul className="mt-3 flex flex-wrap gap-1.5" aria-label="Members">
-                {members.slice(0, 14).map((m) => (
+              {/* Room between avatars for the role rings, which sit 3px outside them. */}
+              <ul className="mt-3 flex flex-wrap gap-2" aria-label="Members">
+                {shownMembers.map((m) => (
                   <li key={m.userId}>
-                    <Avatar name={m.user?.name ?? m.userId} src={m.user?.avatarUrl} simulated={m.user?.simulated} size={32} />
+                    <Avatar name={m.user?.name ?? m.userId} src={m.user?.avatarUrl} simulated={m.user?.simulated} size={32} roles={ringRoles(m.roles, o.ownerIds.includes(m.userId))} />
                   </li>
                 ))}
               </ul>
               {members.length > 14 && <p className="mt-2 text-sm text-muted">and {members.length - 14} more</p>}
+              <RoleRingLegend className="mt-2.5" roles={shownMembers.flatMap((m) => ringRoles(m.roles, o.ownerIds.includes(m.userId)).slice(0, 1))} />
               <Disclosure className="mt-3" tone="muted" title="Who does what">
                 <ul className="divide-y divide-line">
                   {members.map((m) => (

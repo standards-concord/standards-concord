@@ -125,6 +125,25 @@ export function roleLabel(r: Role | string): string {
   return (ROLE_INFO as Record<string, { label: string }>)[r]?.label ?? r;
 }
 
+/**
+ * The roles that put a coloured ring round someone's avatar, most senior first: the people
+ * who run an ontology (its owners and its steward, who chairs) and ODI oversight. Everyone
+ * else gets no ring, so the few rings stand out. Colours are the --role-* tokens in index.css.
+ */
+export const RING_ROLES = ['owner', 'steward', 'odi'] as const;
+export type RingRole = (typeof RING_ROLES)[number];
+
+/** Which ring roles someone holds, most senior first. `isOwner` covers owners listed in ownerIds. */
+export function ringRoles(roles: readonly Role[] | undefined, isOwner = false): RingRole[] {
+  return RING_ROLES.filter((r) => (r === 'owner' && isOwner) || roles?.includes(r));
+}
+
+/** "Owner", "Owner and Steward", "Owner, Steward and ODI oversight". */
+export function listRoles(roles: readonly (Role | string)[]): string {
+  const labels = roles.map(roleLabel);
+  return labels.length < 2 ? (labels[0] ?? '') : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
+
 export const LEVEL_LABEL: Record<ChangeLevel, string> = { patch: 'Patch', minor: 'Minor', major: 'Major' };
 
 export function initials(name?: string): string {
