@@ -1,8 +1,9 @@
 import { useId } from 'react';
 import type { ChangeLevel, ChangeRequestOrigin, ChangeRequestStatus, OntologySummary, Role, UseCaseSource, CompetencyQuestion } from '@concord/shared';
+import { ROLE_INFO } from '@concord/shared';
 import { Bot, Bug, CircleCheck, CircleAlert, Combine, FileText, GitFork, GitMerge, Globe, IdCard, MessageSquareText, Pencil, Users, type LucideIcon } from 'lucide-react';
 import { Badge, cx } from './ui';
-import { pct, roleLabel } from '../lib/format';
+import { pct, RING_ROLES, roleLabel, type RingRole } from '../lib/format';
 import { PenLine } from 'lucide-react';
 
 export function LevelBadge({ level, className }: { level?: ChangeLevel; className?: string }) {
@@ -83,15 +84,34 @@ export function OriginIcon({ origin, withLabel }: { origin?: ChangeRequestOrigin
   );
 }
 
+/** Role chips in the same colours as the avatar rings: owner amber, steward accent, ODI oversight purple. */
+const ROLE_TONE: Partial<Record<Role, 'warn' | 'accent' | 'odi'>> = { owner: 'warn', steward: 'accent', odi: 'odi' };
+
 export function RoleChips({ roles, className }: { roles: Role[]; className?: string }) {
   return (
     <span className={cx('inline-flex flex-wrap gap-1', className)}>
       {roles.map((r) => (
-        <Badge key={r} tone={r === 'owner' || r === 'steward' ? 'accent' : r === 'odi' ? 'warn' : 'neutral'}>
+        <Badge key={r} tone={ROLE_TONE[r] ?? 'neutral'}>
           {roleLabel(r)}
         </Badge>
       ))}
     </span>
+  );
+}
+
+/** A one-line key to the avatar ring colours. Pass the rings on show (each avatar's most senior ring role), so it lists only those. */
+export function RoleRingLegend({ roles, className }: { roles: readonly RingRole[]; className?: string }) {
+  const shown = RING_ROLES.filter((r) => roles.includes(r));
+  if (!shown.length) return null;
+  return (
+    <ul aria-label="Ring colours" className={cx('flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted', className)}>
+      {shown.map((r) => (
+        <li key={r} className="inline-flex items-center gap-1.5" title={ROLE_INFO[r].description}>
+          <span aria-hidden="true" className="size-2.5 rounded-[var(--r-avatar)] border-2" style={{ borderColor: `var(--role-${r})` }} />
+          {roleLabel(r)}
+        </li>
+      ))}
+    </ul>
   );
 }
 

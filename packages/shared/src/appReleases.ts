@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.34.0',
+    version: '0.36.0',
     date: '2026-11-06',
     title: 'Instant term browsing, and data checked in your browser',
     pr: 92,
@@ -83,6 +83,24 @@ export const APP_RELEASES: AppRelease[] = [
         detail: 'Term details, what uses each term, and search now come from the ontology the page already holds, so following a link in Browse shows the term at once instead of waiting for the server.',
         roles: [],
         to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.34.0',
+    date: '2026-11-06',
+    title: 'See who runs an ontology at a glance',
+    pr: 91,
+    changes: [
+      {
+        id: 'role-rings',
+        type: 'feat',
+        title: 'Coloured rings for owners, stewards and ODI oversight',
+        detail:
+          'In the members list, owners, the steward (who chairs) and ODI oversight have a coloured ring round their picture, with a small key underneath. Hover over a picture to see their roles. Role chips on the Governance page use the same colours.',
+        roles: [],
+        to: '{o}',
+        ask: 'Could you tell who runs the working group from the rings? Are the colours clear in the look you use?',
       },
     ],
   },
