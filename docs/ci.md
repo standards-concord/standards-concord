@@ -29,6 +29,24 @@ Other savings:
 - A PR that only touches docs gets no checks at all. That is expected; it can be merged without waiting.
 - To run everything on any branch, use **Actions → CI → Run workflow**.
 
+## Running the checks without Actions
+
+When Actions has no minutes (every job fails within seconds, with an annotation about payments or the spending limit), run the same jobs on your own machine or in a Claude thread's sandbox:
+
+```sh
+git merge origin/main             # test what main will look like after the merge
+scripts/ci-local.sh --report      # test, e2e-dev, e2e-preview, e2e-solid, walkthrough
+scripts/ci-local.sh e2e-dev       # or just some jobs, without posting anything
+```
+
+The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. With `--report` it posts a commit status per job (`local/test`, `local/e2e-dev`, `local/e2e-preview`, `local/e2e-solid`, `local/walkthrough`) on the commit it tested, which shows on the pull request. It refuses `--report` with uncommitted changes, so a status always describes exactly that commit. A full run takes about an hour.
+
+Merge a pull request only when its head commit, after merging current `main`, has all five `local/*` statuses green (and the external review has approved). Push nothing after the run, or run again.
+
+A private repository on GitHub's free plan has no branch protection, so GitHub doesn't enforce any of this: it is the rule we follow.
+
+Deploys also come from Actions: the `image` job builds the backend image the server pulls, and [vercel-deploy.yml](../.github/workflows/vercel-deploy.yml) deploys the web app. Without minutes, deploy by hand after a merge: `vercel deploy --prod` from a checkout of `main` (signed in to the jeswr1 team), and build and push `ghcr.io/standards-concord/standards-concord:latest` (`docker buildx build --platform linux/amd64 --push`).
+
 ## Option: a self-hosted runner
 
 Jobs on a self-hosted runner use no GitHub minutes. This is an option, not something that is set up.
