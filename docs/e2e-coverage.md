@@ -109,7 +109,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Behaviour | Status | Specs |
 | --- | --- | --- |
 | Profile pictures: simulated members and demo testers show a bundled picture (members list, account menu, activity feed); initials when a picture fails to load | ✅ | avatars |
-| Sections opened before (change requests, releases, meetings, forks, use cases, apps, agent reports, the overview and the ontology itself) show their last list at once on coming back and refresh it in the background; nothing kept is shown to the next account after signing out | ✅ | instant-sections |
+| Sections opened before (change requests, releases, meetings, forks, use cases, apps, agent reports, the overview and the ontology itself) show their last list at once on coming back and refresh it in the background; the main lists (change requests, releases, forks, use cases, requirements documents, meetings) load in the background once the ontology is open, so first visits are instant too; nothing kept is shown to the next account after signing out | ✅ | instant-sections |
 | Role rings: owners, the steward and ODI oversight get a coloured ring on their avatar (Overview members, Governance members) with a key under the Overview avatars; role chips use the same colours; others get no ring; a contributor sees them but can't change roles; ring colours meet 3:1 and stay distinct in every look | ✅ | role-rings, looks, roleRings.test.tsx |
 
 ## Open pull requests that bring their own specs

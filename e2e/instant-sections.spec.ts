@@ -66,4 +66,32 @@ test.describe('Sections you have opened', () => {
     release();
     await expect(page.getByRole('main').getByRole('listitem').first()).toBeVisible();
   });
+
+  test('show their list the first time too, once the ontology has been open a moment', async ({ page }) => {
+    await signIn(page, { name: 'E2E instant first visit', role: 'reviewer' });
+    // Opening the ontology loads the main sections' lists in the background.
+    const forksLoaded = page.waitForResponse((r) => /\/api\/ontologies\/[^/]+\/forks$/.test(r.url()) && r.ok());
+    const releasesLoaded = page.waitForResponse((r) => /\/api\/ontologies\/[^/]+\/releases$/.test(r.url()) && r.ok());
+    await page.goto('/o/volunteering');
+    await Promise.all([forksLoaded, releasesLoaded]);
+    // From now on the server is slow to answer, yet neither section has been opened before.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/ontologies\/[^/]+\/(forks|releases)$/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    for (const [path, row] of [
+      ['forks', /CharityBase recurring shifts/],
+      ['releases', /1\.0\.0/],
+    ] as const) {
+      await page.evaluate((to) => {
+        history.pushState({}, '', to);
+        dispatchEvent(new PopStateEvent('popstate'));
+      }, `/o/volunteering/${path}`);
+      await expect(page.getByRole('main').getByText(row).first()).toBeVisible();
+      await expect(page.getByRole('main').getByRole('status').filter({ hasText: 'Loading…' })).toHaveCount(0);
+    }
+    release();
+  });
 });

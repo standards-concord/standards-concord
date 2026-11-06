@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation, useNavigate, useParams } from 'react-router'
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
 import { useAsync, type AsyncState } from '../../lib/hooks';
+import { prefetchKept } from '../../lib/kept';
 import { ADVANCED_TABS, useAdvancedFeatures } from '../../lib/advanced';
 import { useSession } from '../../lib/session';
 import { makeLabeler, type Labeler } from '../../lib/ontology';
@@ -179,6 +180,32 @@ export function OntologyLayout() {
       hasRole: (...roles: Role[]) => roles.some((r) => myRoles.includes(r)) || !!session?.user?.isPlatformAdmin,
     };
   }, [state.data, reloadAll, view, id, session?.user?.id, session?.user?.isPlatformAdmin]);
+
+  // Once the ontology is open, the lists its main sections show are loaded in the background while
+  // the browser is idle, so the first visit to each is instant too, not only going back. The keys
+  // and loaders are the ones those pages use. Only when signed in: those lists need an account.
+  const ready = !!ctx;
+  const uid = session?.user?.id;
+  useEffect(() => {
+    if (!ready || !uid) return;
+    const ahead: [string, () => Promise<unknown>][] = [
+      [`changeRequests|${id}|`, () => api.changeRequests(id)],
+      [`releases|${id}`, () => api.releases(id)],
+      [`forks|${id}`, () => api.forks(id)],
+      [`useCases|${id}`, () => api.useCases(id)],
+      [`requirementsDocs|${id}`, () => api.requirementsDocs(id)],
+      [`meetings|${id}`, () => api.meetings(id)],
+    ];
+    const load = () => {
+      for (const [keep, fn] of ahead) prefetchKept(keep, fn);
+    };
+    if ('requestIdleCallback' in window) {
+      const idle = window.requestIdleCallback(load, { timeout: 2000 });
+      return () => window.cancelIdleCallback(idle);
+    }
+    const timer = setTimeout(load, 300);
+    return () => clearTimeout(timer);
+  }, [id, ready, uid]);
 
   // No context for this ontology and its request has failed (even if a previous ontology's data
   // is still held): show the error with Retry rather than loading forever.

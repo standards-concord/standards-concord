@@ -192,4 +192,41 @@ describe('kept answers', () => {
     expect(k.keptKey('changes|vol')).toBeUndefined();
     expect(k.startLoad(undefined)).toBeUndefined();
   });
+
+  it('loads ahead only what is neither kept nor loading, and a page’s own load wins over it', async () => {
+    const k = await load();
+    const key = k.keptKey('forks|vol');
+    let answer: (v: string) => void = () => {};
+    let calls = 0;
+    const slow = () => (calls++, new Promise<string>((r) => (answer = r)));
+    k.prefetchKept('forks|vol', slow);
+    k.prefetchKept('forks|vol', slow); // already loading
+    expect(calls).toBe(1);
+    // The page opens before the early load answers: its own newer load is the one kept.
+    const own = k.startLoad(key);
+    answer('ahead');
+    await new Promise((r) => setTimeout(r));
+    expect(k.keptValue(key)).toBeUndefined();
+    k.finishLoad(own, { value: 'own' });
+    expect(k.keptValue(key)).toEqual({ value: 'own' });
+    k.prefetchKept('forks|vol', slow); // already kept
+    expect(calls).toBe(1);
+  });
+
+  it('a load ahead is kept when it answers, but not when it fails or the page was edited meanwhile', async () => {
+    const k = await load();
+    k.prefetchKept('releases|vol', async () => ['1.0.0']);
+    await vi.waitFor(() => expect(k.keptValue(k.keptKey('releases|vol'))).toEqual({ value: ['1.0.0'] }));
+    k.prefetchKept('meetings|vol', () => Promise.reject(new Error('offline')));
+    await new Promise((r) => setTimeout(r));
+    expect(k.keptValue(k.keptKey('meetings|vol'))).toBeUndefined();
+    expect(k.keptSizesForTests().loads).toBe(0);
+    const p = page(k);
+    let answer: (v: string) => void = () => {};
+    k.prefetchKept('changes|vol', () => new Promise<string>((r) => (answer = r)));
+    p.owner.changed('changes|vol');
+    answer('from before the edit');
+    await new Promise((r) => setTimeout(r));
+    expect(k.keptValue(k.keptKey('changes|vol'))).toBeUndefined();
+  });
 });

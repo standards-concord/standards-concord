@@ -61,8 +61,8 @@ export const APP_RELEASES: AppRelease[] = [
       {
         id: 'instant-sections',
         type: 'perf',
-        title: 'Going back to a section is instant',
-        detail: 'Change requests, releases, meetings, forks, use cases, app checks, agent reports and the overview show what they showed last time straight away when you come back to them, and quietly bring it up to date. Nothing is kept for the next person after you sign out.',
+        title: 'Moving between sections is instant',
+        detail: 'Change requests, releases, meetings, forks, use cases, app checks, agent reports and the overview show what they showed last time straight away when you come back to them, and quietly bring it up to date. The main lists are also fetched in the background once you open an ontology, so even the first visit to Change requests, Releases, Forks, Use cases or Meetings is instant. Nothing is kept for the next person after you sign out.',
         roles: [],
         to: '{o}/changes',
         ask: 'Does moving between sections feel instant now? Did you ever see out-of-date information that confused you?',

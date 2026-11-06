@@ -58,6 +58,22 @@ export function finishLoad(started: ReturnType<typeof startLoad>, answer?: { val
   if (answer && token.account && stillCurrent(token, token.account)) store(key, answer.value);
 }
 
+/**
+ * Loads what `keep` names ahead of the page that shows it, so that page is instant the first time it
+ * is opened too. Nothing happens when it is already kept or already loading; a failed load is simply
+ * not kept. Its answer goes through finishLoad like any other, so a page's newer load, an edit or an
+ * account change since it started all win over it.
+ */
+export function prefetchKept(keep: string, fn: () => Promise<unknown>) {
+  const key = keptKey(keep);
+  if (!key || kept.has(key) || loads.has(key)) return;
+  const started = startLoad(key);
+  fn().then(
+    (value) => finishLoad(started, { value }),
+    () => finishLoad(started),
+  );
+}
+
 function forget(key: string) {
   kept.delete(key);
   loads.delete(key);
