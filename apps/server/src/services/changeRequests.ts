@@ -882,13 +882,18 @@ function literalText(object: string): string | undefined {
 /** Stands in for today's date when fingerprinting, so only the dates merging generates (dcterms:created and the like) are left out. */
 const DATE_STAND_IN = '0001-01-01';
 
+/**
+ * What merging adds to the edits themselves: the date, and where they came from. No author: dcterms:contributor
+ * would publish the requester's name on every new term. Where it came from is recorded as generated provenance
+ * (dcterms:provenance), apart from sources people state. merge() and the change request's Turtle diff both use it.
+ */
+export const mergeContext = (project: Pick<OntologyProject, 'slug'>, cr: Pick<ChangeRequest, 'number'>, date: string) => ({ date, provenance: `${project.slug}#${cr.number}` });
+
 /** What merging this request now would publish, worked out exactly as merge() does it. */
 async function publicationOf(cr: ChangeRequest, given?: OntologyProject) {
   const project = given ?? (await getProject(cr.ontologyId));
   const { graph: working, head: base } = await ontologyStore.workingAt(project);
-  // No author: dcterms:contributor would publish the requester's name on every new term. Where it came
-  // from is recorded as generated provenance (dcterms:provenance), apart from sources people state.
-  const ctx = (date: string) => ({ date, provenance: `${project.slug}#${cr.number}` });
+  const ctx = (date: string) => mergeContext(project, cr, date);
   const after = applyChangeOps(working, cr.ops, ctx(clock.iso().slice(0, 10))).graph;
   const added = diffOntologies(working, after).addedNTriples;
   const kgcl = toKGCL(cr.ops, after.prefixes);

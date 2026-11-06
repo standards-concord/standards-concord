@@ -13,7 +13,7 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { mountAppChecks } from './appChecks.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
-import { reconcile as reconcileAutopilot } from '../services/appChecks.js';
+import { reconcile as reconcileAutopilot, turtleDiff } from '../services/appChecks.js';
 import * as crs from '../services/changeRequests.js';
 import { proposeTermEdit } from '../services/termEdits.js';
 import { withTriageBudget } from '../services/budget.js';
@@ -740,6 +740,20 @@ export function apiRouter(): Router {
     return round as number;
   };
   r.get('/change-requests/:id', async (req, res) => res.json(await crOut(await cr(req), req)));
+  // The edits as a Turtle diff. Withheld like the change request itself when it draws on a use case the viewer can't see.
+  r.get('/change-requests/:id/turtle-diff', async (req, res) => {
+    const c = await cr(req);
+    if (await useCases.crWithheld(c, req.user)) throw new HttpError(404, 'No such change request');
+    const diff = await turtleDiff(c);
+    // Building the diff takes a while: a source use case may have been withdrawn or made private meanwhile.
+    // So check again, and send, under the consent lock, which every withdrawal and visibility change waits
+    // for. Accepted limit: the lock is per server process (as for merges and releases), and a meeting's own
+    // visibility doesn't take it, so a meeting hidden in the instant between this check and the send isn't caught.
+    await useCases.withConsentLock(c.ontologyId, async () => {
+      if (await useCases.crWithheld(await cr(req), req.user)) throw new HttpError(404, 'No such change request');
+      res.json(diff);
+    });
+  });
   r.patch('/change-requests/:id', async (req, res) => res.json(await crOut(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}), req)));
   r.post('/change-requests/:id/submit', async (req, res) => res.json(await crOut(await crs.submit(await cr(req), requireUser(req)), req)));
   r.post('/change-requests/:id/reviews', async (req, res) => {

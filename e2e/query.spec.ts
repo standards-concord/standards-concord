@@ -1,4 +1,5 @@
 import { test, expect, signIn, demoOntology, uniq, type Page } from './fixtures';
+import { sparqlExamples } from '../apps/web/src/lib/sparql-examples';
 
 /**
  * The Query tab: sparq (WebAssembly) loads in the browser, the query assistant
@@ -344,7 +345,7 @@ test.describe('Query tab', () => {
     await run(page);
     await expect(page.getByTestId('query-running')).toBeVisible();
     // The page stays responsive while it runs.
-    await page.getByLabel('Example queries').focus();
+    await page.getByLabel('Run against').focus();
     await page.getByTestId('query-cancel').click();
     await expect(page.getByRole('alert')).toContainText('cancelled');
     await expect(page.getByTestId('query-running')).toHaveCount(0);
@@ -659,7 +660,10 @@ test.describe('Query tab', () => {
   });
 
   test('every query form: ASK, CONSTRUCT, examples and errors', async ({ page }) => {
-    await page.getByLabel('Example queries').selectOption({ label: 'Does every class have a label?' });
+    // The Examples menu is gone (the assistant's suggestions do its job), so the same queries are typed in.
+    const example = (title: string) => sparqlExamples('vol', 'https://w3id.org/odi/volunteering#').find((x) => x.title === title)!.query;
+    await expect(page.getByLabel('Example queries')).toHaveCount(0);
+    await setEditor(page, 'sparql-editor', example('Does every class have a label?'));
     await run(page);
     await expect(page.getByTestId('query-answer')).toHaveText(/Answer: (yes|no)/);
 
@@ -667,13 +671,13 @@ test.describe('Query tab', () => {
     await run(page);
     await expect(page.getByTestId('query-graph')).toContainText('3 triples');
 
-    await page.getByLabel('Example queries').selectOption({ label: 'Instances by type (sample data)' });
-    await expect(page.getByLabel('Run against')).toHaveValue('data');
+    await setEditor(page, 'sparql-editor', example('Instances by type (sample data)'));
+    await page.getByLabel('Run against').selectOption('data');
     await run(page);
     await expect(results(page)).toContainText('VolunteeringOpportunity');
 
     for (const ex of ['Class hierarchy', 'Relationships (object properties)', 'Attributes (datatype properties)', 'Terms missing a definition', 'Deprecated terms']) {
-      await page.getByLabel('Example queries').selectOption({ label: ex });
+      await setEditor(page, 'sparql-editor', example(ex));
       await run(page);
       await expect(results(page), ex).toBeVisible();
     }
