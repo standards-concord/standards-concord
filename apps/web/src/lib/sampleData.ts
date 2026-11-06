@@ -59,13 +59,16 @@ export function useSampleData(ontologyId: string, o: Pick<OntologySummary, 'demo
  * Whether sample data holds any statement, not just prefix and base declarations and comments (the starting template
  * has none), read without a full parse so Query can decide at once whether to run over it. Works whatever the layout:
  * several declarations or a declaration and a statement on one line, and names that merely start with "prefix".
+ *
+ * IRIs and comments are read in one pass, left to right, so whichever starts first wins: the "#" in an IRI such as
+ * <https://example.org/x#> is not a comment, and quotes or a link inside a comment are part of the comment.
+ * Strings need no handling: every statement starts with a subject outside any string, which no "#" in a later
+ * string can hide, and declarations hold no strings. (Removing strings first used to be wrong: quotes in two
+ * comments were read as one long string, swallowing the statement between them.)
  */
 export function hasSampleRecords(data: string): boolean {
   const rest = data
-    // IRIs and strings first, so a "#" or "@prefix" inside them is not read as a comment or a declaration.
-    .replace(/<[^>\s]*>/g, '<>')
-    .replace(/"""[\s\S]*?"""|'''[\s\S]*?'''|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, '""')
-    .replace(/#[^\n]*/g, ' ')
+    .replace(/<[^>\s]*>|#[^\n]*/g, (m) => (m[0] === '<' ? '<>' : ' '))
     // Turtle declarations end with "."; SPARQL-style ones don't. The keyword must be followed by space, so a name
     // like prefix:thing or base:x is a statement, not a declaration.
     .replace(/@prefix\s+[\w.-]*:\s*<>\s*\./gi, ' ')

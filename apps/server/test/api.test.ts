@@ -551,8 +551,9 @@ describe('query assistant (offline helper)', () => {
     const agent = await login('contributor', 'Fixed dataset');
     const me = (await agent.get('/api/session')).body.user.id as string;
     const provider = config.llm.provider;
+    const sent: { system: string; schema: unknown }[] = [];
     const spy = vi.spyOn(llm, 'json').mockImplementation(async (call) =>
-      (call.task === 'query-chat'
+      (sent.push({ system: call.system, schema: call.schema }), call.task === 'query-chat'
         ? { simulated: false, value: { reply: 'Here are the classes.', query: 'SELECT ?class WHERE { ?class a <http://www.w3.org/2002/07/owl#Class> }', target: 'data', columns: [{ variable: 'class', label: 'Class' }] } }
         : { simulated: true, value: undefined }) as never,
     );
@@ -563,6 +564,12 @@ describe('query assistant (offline helper)', () => {
       expect(r.status, JSON.stringify(r.body)).toBe(200);
       expect(r.body.simulated).toBe(false);
       expect(r.body.target).toBe('ontology');
+      // What the model is told: the page decides the dataset, in the prompt and in the schema's own description.
+      expect(sent[0].system).toContain('The page decides what the query runs over');
+      expect(sent[0].system).not.toMatch(/Set target to "data" for questions about records/);
+      const target = (sent[0].schema as { shape: { target: { description?: string } } }).shape.target;
+      expect(target.description).toMatch(/return it unchanged/);
+      expect(target.description).not.toMatch(/when it asks about records/);
     } finally {
       spy.mockRestore();
       (config.llm as { provider: string }).provider = provider;
