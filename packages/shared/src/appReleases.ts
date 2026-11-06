@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.39.1',
     date: '2026-11-06',
     title: 'Tidier “Validate from your own code”',
+    pr: 104,
     changes: [
       {
         id: 'validate-api-help-tidy',
