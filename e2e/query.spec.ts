@@ -70,7 +70,8 @@ test.describe('Query tab', () => {
     await expect(suggestions).toHaveCount(0);
     await expect(page.getByTestId('query-chat-offline')).toBeVisible();
     expect(await editorText(page)).toContain('vol:VolunteeringOpportunity');
-    await expect(page.getByLabel('Run against')).toHaveValue('data');
+    // There is no dataset to choose: it runs over the sample data, which the results say.
+    await expect(page.getByTestId('dataset-summary')).toContainText(/Runs over the ontology plus \d+ sample records/);
     // Nothing runs until the person has looked at the query and pressed Run.
     await expect(page.getByTestId('query-run-prompt')).toContainText('The assistant wrote a query');
     await expect(results(page)).toHaveCount(0);
@@ -107,11 +108,9 @@ test.describe('Query tab', () => {
     await expect(results(page).locator('tbody td')).toHaveText(['1']);
   });
 
-  test('questions about the model itself run against the ontology', async ({ page }) => {
+  test('questions about the model itself get a query about the model', async ({ page }) => {
     await page.getByTestId('query-suggestions').getByRole('button', { name: 'Which classes have no definition?' }).click();
-    // The starting query already runs against the ontology, so wait for the reply before checking.
     await expect(chat(page).getByTestId('chat-message-assistant')).toHaveCount(2);
-    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
     expect(await editorText(page)).toContain('FILTER NOT EXISTS');
     await runWritten(page);
     await expect(results(page)).toBeVisible();
@@ -126,7 +125,6 @@ test.describe('Query tab', () => {
     await expect(chat(page).getByTestId('chat-message-user')).toHaveCount(0);
     await expect(page.getByTestId('query-suggestions')).toBeVisible();
     expect(await editorText(page)).toBe(start);
-    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
     await expect(results(page)).toHaveCount(0);
   });
 
@@ -139,7 +137,6 @@ test.describe('Query tab', () => {
     await expect(chat(page).getByTestId('chat-message-user')).toContainText('List every volunteering opportunity with its minimum age');
     await expect(chat(page)).toContainText('This lists volunteering opportunity records');
     expect(await editorText(page)).toContain('vol:minimumAge');
-    await expect(page.getByLabel('Run against')).toHaveValue('data');
     await run(page);
     await expect(results(page).locator('th')).toContainText(['minimum age']);
   });
@@ -296,7 +293,6 @@ test.describe('Query tab', () => {
     await chat(page).getByLabel('Describe what you want to find…').fill('List three classes');
     await chat(page).getByRole('button', { name: 'Send' }).click();
     await expect(page.getByTestId('editor-locked')).toBeVisible();
-    await expect(page.getByLabel('Run against')).toBeDisabled();
     await page.getByTestId('sparql-editor').click();
     await page.keyboard.insertText('# typed while waiting');
     expect(await editorText(page)).not.toContain('typed while waiting');
@@ -317,13 +313,11 @@ test.describe('Query tab', () => {
     await expect(chat(page)).toContainText('can only change queries it wrote itself');
     await expect(page.getByTestId('query-chat-offline')).toContainText('members of this ontology');
     expect(await editorText(page)).toBe(before);
-    await expect(page.getByLabel('Run against')).toHaveValue('ontology');
     await expect(results(page)).toBeVisible();
   });
 
   test('results cut off by LIMIT say so, with a way to see them all', async ({ page }) => {
     await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT 1');
-    await page.getByLabel('Run against').selectOption('data');
     await run(page);
     await expect(results(page)).toContainText('1 row');
     const limited = page.getByTestId('result-limited');
@@ -345,7 +339,7 @@ test.describe('Query tab', () => {
     await run(page);
     await expect(page.getByTestId('query-running')).toBeVisible();
     // The page stays responsive while it runs.
-    await page.getByLabel('Run against').focus();
+    await page.getByRole('button', { name: 'Keyboard shortcuts' }).focus();
     await page.getByTestId('query-cancel').click();
     await expect(page.getByRole('alert')).toContainText('cancelled');
     await expect(page.getByTestId('query-running')).toHaveCount(0);
@@ -360,14 +354,12 @@ test.describe('Query tab', () => {
 
   test('a LIMIT hidden behind a comment still counts as a limit', async ({ page }) => {
     await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT # one row\n1');
-    await page.getByLabel('Run against').selectOption('data');
     await run(page);
     await expect(page.getByTestId('result-limited')).toBeVisible();
   });
 
   test('Show all rows is disabled while the assistant is answering', async ({ page }) => {
     await setEditor(page, 'sparql-editor', 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }\nLIMIT 1');
-    await page.getByLabel('Run against').selectOption('data');
     await run(page);
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
@@ -547,14 +539,12 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('result-stale')).toHaveCount(0);
   });
 
-  test('a hand-written query keeps its dataset after leaving the page', async ({ page }) => {
+  test('a hand-written query survives leaving the page and still runs over the sample data', async ({ page }) => {
     await setEditor(page, 'sparql-editor', 'SELECT ?x WHERE { ?x a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> } # mine');
-    await page.getByLabel('Run against').selectOption('data');
     const url = page.url();
     await page.getByRole('link', { name: 'Source & export', exact: true }).click();
     await page.goto(url);
     expect(await editorText(page)).toContain('# mine');
-    await expect(page.getByLabel('Run against')).toHaveValue('data');
     await run(page);
     await expect(results(page)).toContainText('2 rows');
   });
@@ -608,12 +598,47 @@ test.describe('Query tab', () => {
   });
 
   test('the query shows which data it runs over, with a shortcut to edit it', async ({ page }) => {
-    await expect(page.getByTestId('dataset-summary')).toHaveCount(0);
-    await page.getByLabel('Run against').selectOption('data');
     await expect(page.getByTestId('dataset-summary')).toContainText(/Runs over the ontology plus \d+ sample records/);
     await page.getByTestId('dataset-summary').getByRole('link', { name: 'Edit sample data' }).click();
     await expect(page).toHaveURL(/\/validate$/);
     await expect(page.getByTestId('validate-editor')).toContainText('Northvale Food Bank');
+  });
+
+  // "Run against: The ontology / The ontology + sample data" was one more decision to make: queries now run over
+  // the sample data whenever it has records, and over the ontology alone when it has none.
+  test('there is no dataset to choose: with no sample records, queries run over the ontology alone and say so', async ({ page }) => {
+    await expect(page.getByLabel('Run against')).toHaveCount(0);
+    const instances = 'SELECT ?o WHERE { ?o a <https://w3id.org/odi/volunteering#VolunteeringOpportunity> }';
+    await setEditor(page, 'sparql-editor', instances);
+    await run(page);
+    await expect(results(page)).toContainText('2 rows');
+    // Empty the sample data down to its prefixes (as Validate data would keep it), then come back.
+    const url = page.url();
+    const account = ((await (await page.request.get('/api/session')).json()) as { user: { id: string } }).user.id;
+    const ontologyId = new URL(url).pathname.split('/')[2];
+    await page.evaluate((key) => localStorage.setItem(key, JSON.stringify('@prefix ex: <https://example.org/data/> .\n# nothing yet\n')), `concord.query.${account}.${ontologyId}.data`);
+    await page.goto(url);
+    await expect(page.getByTestId('sparq-ready')).toHaveText('Ontology loaded', { timeout: 30_000 });
+    await expect(page.getByTestId('dataset-summary')).toContainText('There is no sample data yet');
+    await expect(page.getByTestId('dataset-summary').getByRole('link', { name: 'Add sample data' })).toBeVisible();
+    await setEditor(page, 'sparql-editor', instances);
+    await run(page);
+    await expect(results(page)).toContainText('0 rows');
+  });
+
+  // The editor's and chat's key hints used to sit under each box; they're in one pop-up now, apart from Tab, which
+  // keyboard users need to see to know how to leave the editor.
+  test('keyboard shortcuts are in a pop-up, and "Tab moves to the next control" stays in view', async ({ page }) => {
+    await expect(page.getByText('Tab moves to the next control.', { exact: true })).toBeVisible();
+    await expect(page.locator('main')).not.toContainText('Ctrl/⌘');
+    await expect(page.locator('main')).not.toContainText('Shift+Enter');
+    const button = page.getByRole('button', { name: 'Keyboard shortcuts' });
+    await button.click();
+    const panel = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    for (const key of ['Ctrl/⌘-Space', 'Ctrl/⌘-Enter', 'Ctrl/⌘-] and Ctrl/⌘-[', 'Tab', 'Enter', 'Shift+Enter']) await expect(panel.getByText(key, { exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(panel).toHaveCount(0);
+    await expect(button).toBeFocused();
   });
 
   test('the SPARQL editor highlights, autocompletes and runs with Ctrl/⌘-Enter', async ({ page }) => {
@@ -672,7 +697,6 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('query-graph')).toContainText('3 triples');
 
     await setEditor(page, 'sparql-editor', example('Instances by type (sample data)'));
-    await page.getByLabel('Run against').selectOption('data');
     await run(page);
     await expect(results(page)).toContainText('VolunteeringOpportunity');
 
@@ -693,7 +717,6 @@ test.describe('Query tab', () => {
   test('the sample data is edited and checked on Validate data, and queries run over it', async ({ page }) => {
     await expect(page.getByTestId('data-editor')).toHaveCount(0);
     await expect(toggle(page, 'Check data')).toHaveCount(0);
-    await page.getByLabel('Run against').selectOption('data');
     await page.getByTestId('dataset-summary').getByRole('link', { name: 'Edit sample data' }).click();
     const data = page.getByTestId('validate-editor');
     await expect(data.locator('.tok-meta', { hasText: '@prefix' }).first()).toBeVisible();
