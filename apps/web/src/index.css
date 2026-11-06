@@ -643,6 +643,12 @@
     font-family: var(--font-heading);
     letter-spacing: var(--heading-tracking);
   }
+  /* Browsers centre a button's text, so a link-style button whose label wraps (a long property
+     name in a table) looked centred beside left-aligned neighbours. Text follows its
+     surroundings instead; buttons that centre their content do it with flex. */
+  button {
+    text-align: inherit;
+  }
 }
 
 /* ------------------------------------------------------------ Look details
@@ -684,6 +690,12 @@
 }
 [data-look='odi'] .app-brand-sub {
   display: none;
+}
+/* On a phone the two logos leave no room for the word, which was cut to "C…"; the Concord mark stands alone. */
+@media (max-width: 439px) {
+  [data-look='odi'] .app-brand-name {
+    display: none;
+  }
 }
 [data-look='odi'] .app-header {
   backdrop-filter: none;

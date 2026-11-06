@@ -4,17 +4,19 @@ import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
 import { isDatatype, qualifiedText, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
 import { Badge } from '../ui';
+import { compactIri } from '../../lib/format';
 import { TriangleAlert } from 'lucide-react';
 import { ClassDiagram, DEFAULT_DIAGRAM_OPTIONS, neighbourhood } from './ClassDiagram';
 
 type Go = (iri: string) => void;
 
 function Term({ iri, label, onSelect, model }: { iri: string; label: Labeler; onSelect: Go; model: OntologyModel }) {
-  if (isDatatype(iri)) return <code className="font-mono text-[0.8rem] text-muted">{iri.replace(/^.*[#/]/, 'xsd:')}</code>;
+  // A datatype reads as its plain name ("Boolean"); the exact type is in the tooltip.
+  if (isDatatype(iri)) return <span title={compactIri(iri)}>{label(iri)}</span>;
   const known = model.classes.has(iri) || model.properties.has(iri);
   if (!known) return <span title={iri}>{label(iri)}</span>;
   return (
-    <button type="button" className="text-accent hover:underline" onClick={() => onSelect(iri)}>
+    <button type="button" className="text-left text-accent hover:underline" onClick={() => onSelect(iri)}>
       {label(iri)}
     </button>
   );
@@ -36,7 +38,7 @@ export function HierarchyPath({ iri, model, label, onSelect }: { iri: string; mo
                   {label(x)}
                 </span>
               ) : (
-                <button type="button" className="hover:text-accent hover:underline" onClick={() => onSelect(x)}>
+                <button type="button" className="text-left hover:text-accent hover:underline" onClick={() => onSelect(x)}>
                   {label(x)}
                 </button>
               )}
@@ -150,7 +152,7 @@ export function PropertyTable({ iri, model, label, onSelect, compact }: { iri: s
           <tr className="text-left text-xs text-muted">
             <th scope="col" className="pb-1.5 pr-3 font-medium">Property</th>
             <th scope="col" className="pb-1.5 pr-3 font-medium">Expected type</th>
-            <th scope="col" className="pb-1.5 pr-3 font-medium">How many</th>
+            <th scope="col" className="pb-1.5 pr-3 font-medium whitespace-nowrap">How many</th>
             {!compact && <th scope="col" className="hidden pb-1.5 font-medium md:table-cell">Description</th>}
           </tr>
         </thead>

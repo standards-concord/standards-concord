@@ -5,7 +5,7 @@ import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Ma
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
-import { compactIri } from '../../lib/format';
+import { compactIri, datatypeName } from '../../lib/format';
 import { OntologyGraph } from '../../components/OntologyGraph';
 import { buildModel, type OntologyModel } from '../../lib/ontologyModel';
 import { ClassTree } from '../../components/ontology-viz/ClassTree';
@@ -18,8 +18,10 @@ import { Badge, Button, Card, Chip, CopyButton, EmptyState, ErrorCard, Input, Lo
 import { useOntology } from './Layout';
 
 function TermLink({ iri, label, onSelect }: { iri: string; label: Labeler; onSelect: (iri: string) => void }) {
+  // Datatypes (xsd:boolean and friends) aren't terms of this ontology, so there's nothing to open.
+  if (datatypeName(iri)) return <span title={compactIri(iri)}>{label(iri)}</span>;
   return (
-    <button className="text-accent hover:underline" onClick={() => onSelect(iri)}>
+    <button type="button" className="text-left text-accent hover:underline" onClick={() => onSelect(iri)}>
       {label(iri)}
     </button>
   );
@@ -27,7 +29,7 @@ function TermLink({ iri, label, onSelect }: { iri: string; label: Labeler; onSel
 
 function Row({ k, children }: { k: string; children: ReactNode }) {
   return (
-    <div className="grid gap-1 py-2.5 sm:grid-cols-[160px_1fr] sm:gap-4">
+    <div className="grid gap-1 py-2.5 sm:grid-cols-[160px_1fr] sm:items-baseline sm:gap-4">
       <dt className="text-xs font-medium text-muted">{k}</dt>
       <dd className="text-sm">{children}</dd>
     </div>
@@ -195,7 +197,7 @@ function TermDetailPanel({
         {t.kind === 'class' && (
           <>
             <Row k="Subclass of">
-              <IriList iris={t.superClasses} label={label} onSelect={onSelect} empty="owl:Thing (top level)" />
+              <IriList iris={t.superClasses} label={label} onSelect={onSelect} empty="Thing (top level)" />
             </Row>
             {model.classes.has(t.iri) && (
               <Row k="Subclasses">
@@ -399,7 +401,7 @@ const MODES: {
 }[] = [
   {
     key: 'tree',
-    label: 'Classes',
+    label: 'List',
     icon: ListTree,
     task: 'Find a term and read its definition, properties and where it’s used.',
   },

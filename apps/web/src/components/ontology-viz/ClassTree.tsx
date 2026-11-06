@@ -26,6 +26,12 @@ interface Row {
 export function ClassTree({ model, label, selected, onSelect, filter }: { model: OntologyModel; label: Labeler; selected?: string; onSelect: (iri: string) => void; filter?: string }) {
   // Start with just the top-level classes; branches open on request or to reveal the selection.
   const [open, setOpen] = useState<Set<string>>(() => new Set());
+  // The whole section folds away like the property lists below it, and reopens to show a selected class.
+  const [shown, setShown] = useState(true);
+  const hasSelected = !!selected && model.classes.has(selected);
+  useEffect(() => {
+    if (hasSelected) setShown(true);
+  }, [hasSelected, selected]);
   const [active, setActive] = useState<string>();
   const refs = useRef(new Map<string, HTMLLIElement>());
   const typed = useRef({ text: '', at: 0 });
@@ -154,10 +160,10 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
   return (
     <div>
       <div className="mb-1 flex items-center justify-between">
-        <div id="class-tree-label" className="text-sm font-semibold">
-          Classes ({model.classes.size})
-        </div>
-        <div className="flex">
+        <button type="button" id="class-tree-label" className="flex items-center gap-1 rounded text-sm font-semibold hover:text-fg" onClick={() => setShown((o) => !o)} aria-expanded={shown}>
+          {shown ? <ChevronDown className="size-3.5" aria-hidden /> : <ChevronRight className="size-3.5" aria-hidden />} Classes ({model.classes.size})
+        </button>
+        <div className={cx('flex', !shown && 'hidden')}>
           <button type="button" className="rounded p-1 text-muted hover:bg-surface-2 hover:text-fg" onClick={expandAll} aria-label="Expand all classes" title="Expand all">
             <ChevronsUpDown className="size-3.5" />
           </button>
@@ -166,61 +172,63 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
           </button>
         </div>
       </div>
-      {!rows.length && <p className="px-2 py-3 text-sm text-muted">No classes match.</p>}
-      <ul role="tree" aria-labelledby="class-tree-label" className="text-sm">
-        {rows.map((r, i) => {
-          const c = model.classes.get(r.iri)!;
-          const isSel = r.iri === selected;
-          return (
-            <li
-              key={r.key}
-              ref={(el) => {
-                if (el) refs.current.set(r.key, el);
-                else refs.current.delete(r.key);
-              }}
-              role="treeitem"
-              aria-level={r.level}
-              aria-expanded={r.hasKids ? r.expanded : undefined}
-              aria-selected={isSel}
-              tabIndex={r.key === activeKey ? 0 : -1}
-              onKeyDown={(e) => onKeyDown(e, r, i)}
-              onFocus={() => setActive(r.key)}
-              onClick={() => {
-                setActive(r.key);
-                onSelect(r.iri);
-              }}
-              className={cx(
-                'flex cursor-pointer items-center rounded-md pr-2 outline-none focus-visible:ring-2 focus-visible:ring-accent',
-                isSel ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2',
-              )}
-              style={{ paddingLeft: (r.level - 1) * 14 }}
-            >
-              <span
-                className="flex size-6 shrink-0 items-center justify-center text-muted"
-                onClick={(e) => {
-                  if (!r.hasKids) return;
-                  e.stopPropagation();
-                  setExpanded(r.key, !r.expanded);
+      <div hidden={!shown}>
+        {!rows.length && <p className="px-2 py-3 text-sm text-muted">No classes match.</p>}
+        <ul role="tree" aria-labelledby="class-tree-label" className="text-sm">
+          {rows.map((r, i) => {
+            const c = model.classes.get(r.iri)!;
+            const isSel = r.iri === selected;
+            return (
+              <li
+                key={r.key}
+                ref={(el) => {
+                  if (el) refs.current.set(r.key, el);
+                  else refs.current.delete(r.key);
                 }}
-                aria-hidden
+                role="treeitem"
+                aria-level={r.level}
+                aria-expanded={r.hasKids ? r.expanded : undefined}
+                aria-selected={isSel}
+                tabIndex={r.key === activeKey ? 0 : -1}
+                onKeyDown={(e) => onKeyDown(e, r, i)}
+                onFocus={() => setActive(r.key)}
+                onClick={() => {
+                  setActive(r.key);
+                  onSelect(r.iri);
+                }}
+                className={cx(
+                  'flex cursor-pointer items-center rounded-md pr-2 outline-none focus-visible:ring-2 focus-visible:ring-accent',
+                  isSel ? 'bg-accent-soft font-medium text-accent' : 'hover:bg-surface-2',
+                )}
+                style={{ paddingLeft: (r.level - 1) * 14 }}
               >
-                {r.hasKids ? r.expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" /> : <span className="size-1.5 rounded-full bg-current opacity-40" />}
-              </span>
-              <span className={cx('min-w-0 flex-1 py-1 leading-snug break-words', c.deprecated && 'text-muted line-through')}>{name(r.iri)}</span>
-              {r.count > 0 && (
-                <span className="text-[0.65rem] text-subtle" aria-label={`${r.count} subclasses`}>
-                  {r.count}
+                <span
+                  className="flex size-6 shrink-0 items-center justify-center text-muted"
+                  onClick={(e) => {
+                    if (!r.hasKids) return;
+                    e.stopPropagation();
+                    setExpanded(r.key, !r.expanded);
+                  }}
+                  aria-hidden
+                >
+                  {r.hasKids ? r.expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" /> : <span className="size-1.5 rounded-full bg-current opacity-40" />}
                 </span>
-              )}
-            </li>
-          );
-        })}
-      </ul>
-      {truncated && (
-        <button type="button" className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-accent hover:bg-surface-2" onClick={() => setLimit((n) => n + ROW_LIMIT)}>
-          Show more classes (first {rows.length} rows shown)
-        </button>
-      )}
+                <span className={cx('min-w-0 flex-1 py-1 leading-snug break-words', c.deprecated && 'text-muted line-through')}>{name(r.iri)}</span>
+                {r.count > 0 && (
+                  <span className="text-[0.65rem] text-subtle" aria-label={`${r.count} subclasses`}>
+                    {r.count}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+        {truncated && (
+          <button type="button" className="mt-1 w-full rounded-md px-2 py-1 text-left text-xs text-accent hover:bg-surface-2" onClick={() => setLimit((n) => n + ROW_LIMIT)}>
+            Show more classes (first {rows.length} rows shown)
+          </button>
+        )}
+      </div>
     </div>
   );
 }

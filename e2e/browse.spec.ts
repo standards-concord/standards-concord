@@ -173,12 +173,12 @@ test.describe('class diagram', () => {
     await expect(d.locator('[data-edge="assoc"]').first()).toBeAttached();
     // Session's attributes are listed in its box with type and cardinality.
     const session = d.locator(`[data-node="${VOL}Session"]`);
-    await expect(session).toContainText('start date and time : dateTime [1]');
+    await expect(session).toContainText('start date and time : Date and time [1]');
     await expect(d).toHaveAccessibleDescription(new RegExp(`^${classes} classes`));
 
     // Options hide and show parts of the notation.
     await page.getByRole('button', { name: 'Attributes', exact: true }).click();
-    await expect(session).not.toContainText('dateTime');
+    await expect(session).not.toContainText('Date and time');
     await page.getByRole('button', { name: 'Attributes', exact: true }).click();
     await page.getByRole('button', { name: 'Relationships', exact: true }).click();
     await expect(d.locator('[data-edge="assoc"]')).toHaveCount(0);
@@ -339,7 +339,7 @@ test.describe('diagram scope, focus and contrast (review fixes)', () => {
     await settle(page);
     const d = page.getByTestId('class-diagram');
     // Class names include their attributes and relationships, not just counts.
-    await expect(d.locator(`[data-node="${VOL}Session"]`)).toHaveAttribute('aria-label', /attributes: .*start date and time : dateTime \[1\]/);
+    await expect(d.locator(`[data-node="${VOL}Session"]`)).toHaveAttribute('aria-label', /attributes: .*start date and time : Date and time \[1\]/);
     await expect(d.locator(`[data-node="${VOL}Application"]`)).toHaveAttribute('aria-label', /relationships: .*submitted by +1 person/);
     const text = page.getByTestId('diagram-text');
     await text.getByText(/^Relationships as text/).click();

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ApprovalRule, ChangeLevel, GovernancePolicy, Role } from '@concord/shared';
 import { ROLE_INFO } from '@concord/shared';
-import { Crown, EyeOff, Pencil, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
+import { Crown, EyeOff, GitPullRequest, Package, Pencil, Save, UserPlus, Users, Scale, Trash2 } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { pct, plural, roleLabel } from '../../lib/format';
@@ -530,15 +530,16 @@ export function GovernanceTab() {
         </div>
       </CollapsibleCard>
 
-      <CollapsibleCard title="Change request rules" subtitle="Rules by semantic version level. Patch = editorial, minor = backwards-compatible additions, major = breaking.">
+      <CollapsibleCard icon={GitPullRequest} title="Change request rules" subtitle="Rules by semantic version level. Patch = editorial, minor = backwards-compatible additions, major = breaking.">
         <RulesSection rules={policy.changes} policy={policy} editing={editing} onChange={(changes) => edit({ changes })} label="Change request rules by level" kind="change" />
       </CollapsibleCard>
 
-      <CollapsibleCard title="Release rules" subtitle="How a new version is approved, by release level.">
+      <CollapsibleCard icon={Package} title="Release rules" subtitle="How a new version is approved, by release level.">
         <RulesSection rules={policy.releases} policy={policy} editing={editing} onChange={(releases) => edit({ releases })} label="Release rules by level" kind="release" />
       </CollapsibleCard>
 
       <CollapsibleCard
+        icon={Crown}
         title="Ownership, ODI and automation"
         subtitle="Who owns the ontology, what the ODI can do, and which steps run automatically."
         summary={`${OWNERSHIP[policy.ownership.model]} · ${ODI[policy.odiPrivilege]} · ${automations} of 5 automations on`}

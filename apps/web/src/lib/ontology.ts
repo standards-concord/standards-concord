@@ -1,6 +1,6 @@
 import type { ChangeOp, OntologyView, TermView } from '@concord/shared';
 import type { Restriction, ClassView, PropertyView } from '@concord/core/types';
-import { compactIri, localName } from './format';
+import { compactIri, datatypeName, localName } from './format';
 
 export type Labeler = (iri: string) => string;
 
@@ -13,7 +13,7 @@ export function makeLabeler(view?: OntologyView, extra: Record<string, string> =
   for (const [k, v] of Object.entries(extra)) map.set(k, v);
   return (iri: string) => {
     if (!iri) return '';
-    const l = map.get(iri);
+    const l = map.get(iri) ?? datatypeName(iri);
     if (l) return l;
     const c = compactIri(iri, view?.prefixes);
     return c === iri ? localName(iri) : c;
