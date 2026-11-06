@@ -143,14 +143,14 @@ export function UseCaseDocument({
   live,
   highlight = [],
   collapsible,
-  showQueries = true,
+  showQueries = false,
 }: {
   uc: UseCase;
   live?: boolean;
   highlight?: string[];
   /** Open the first group only; the rest show counts. */
   collapsible?: boolean;
-  /** Show each question's SPARQL test. Off for people who only review: they need the question and whether it's answered. */
+  /** Show each question's SPARQL test (editors). Off by default: others need the question and whether it's answered. */
   showQueries?: boolean;
 }) {
   const s = uc.sections ?? {};
@@ -202,7 +202,7 @@ export function CompetencyQuestions({
   highlight,
   compact,
   bare,
-  showQueries = true,
+  showQueries = false,
 }: {
   uc: UseCase;
   highlight?: boolean;

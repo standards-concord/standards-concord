@@ -99,6 +99,35 @@ test.describe('fewer under-the-hood details', () => {
     await expect(page.getByText('SPARQL test', { exact: true })).toHaveCount(0);
   });
 
+  test('a change request’s Checks show competency question tests to editors only', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    await signInAsPersona(page, 'Tom Okafor');
+    const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string; validation?: { competencyQuestions: { question: string }[] } }[];
+    const cr = crs.find((c) => c.validation?.competencyQuestions.length);
+    expect(cr, 'a demo change request whose checks ran competency questions').toBeTruthy();
+    const first = cr!.validation!.competencyQuestions[0].question;
+    const checks = async () => {
+      await page.goto(`/o/${demo.id}/changes/${cr!.id}`);
+      await settle(page);
+      await page.getByRole('tab', { name: /^Checks/ }).click();
+      const panel = page.getByRole('tabpanel');
+      const cqs = panel.getByRole('button', { name: /Competency questions/ });
+      if ((await cqs.getAttribute('aria-expanded')) !== 'true') await cqs.click();
+      return panel;
+    };
+    // An editor can open a question to its test.
+    let panel = await checks();
+    await panel.getByRole('button', { name: first }).click();
+    await expect(panel.locator('pre, code').filter({ hasText: /SELECT|ASK/i }).first()).toBeVisible();
+    // A reviewer sees each question and whether it can be answered, and nothing to open.
+    await signInAsPersona(page, 'Mei Chen');
+    panel = await checks();
+    await expect(panel.getByText(first, { exact: true })).toBeVisible();
+    await expect(panel.getByRole('img', { name: /^(Answerable|Not answerable)$/ }).first()).toBeVisible();
+    await expect(panel.getByRole('button', { name: first })).toHaveCount(0);
+    await expect(panel.locator('pre, code').filter({ hasText: /SELECT|ASK/i })).toHaveCount(0);
+  });
+
   test('a change request says where it came from and what kind it is only when that is not the default, and its AI analysis doesn’t restate the edits', async ({ page, request }) => {
     const demo = await demoOntology(request);
     await signInAsPersona(page, 'Mei Chen');
