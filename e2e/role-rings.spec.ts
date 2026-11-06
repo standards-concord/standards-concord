@@ -117,11 +117,8 @@ test.describe('rings on an ontology', () => {
     const row = memberRow(page, 'Gareth Lewis');
     await row.getByRole('button', { name: 'Edit roles' }).click();
     await row.getByRole('button', { name: 'Steward', exact: true }).click();
-    // Here the name and role chips are written out beside the avatar, so screen readers skip it; the tooltip stays.
-    const avatar = row.locator('[data-avatar]');
-    await expect(avatar).toHaveAttribute('data-role-ring', 'steward');
-    await expect(avatar).toHaveAttribute('aria-hidden', 'true');
-    await expect(avatar).toHaveAttribute('title', 'Gareth Lewis (simulated), Steward');
+    // The avatar keeps its name here too: it carries "simulated", and ownership from ownerIds, which the chips don't.
+    await expect(row.getByRole('img', { name: 'Gareth Lewis (simulated), Steward' })).toHaveAttribute('data-role-ring', 'steward');
     await row.getByRole('button', { name: 'Done' }).click();
 
     await page.getByRole('link', { name: 'Overview' }).first().click();
@@ -146,7 +143,7 @@ test.describe('rings on an ontology', () => {
 
     await page.goto(`/o/${ontologyId}/governance#roles`);
     await settle(page);
-    await expect(memberRow(page, 'Daniel Brooks').locator('[data-avatar]')).toHaveAttribute('data-role-ring', 'odi');
+    await expect(memberRow(page, 'Daniel Brooks').getByRole('img', { name: 'Daniel Brooks (simulated), ODI oversight' })).toHaveAttribute('data-role-ring', 'odi');
     await expect(page.getByRole('button', { name: 'Edit roles' })).toHaveCount(0);
     // The role chips use the ring colours, so a ring and its chip read the same. (ODI oversight's chip
     // used to be amber, the owner ring's colour.)
@@ -178,7 +175,7 @@ test.describe('rings on an ontology', () => {
     const row = memberRow(page, 'Gareth Lewis');
     await row.getByRole('button', { name: 'Edit roles' }).click();
     await row.getByRole('button', { name: 'Steward', exact: true }).click();
-    await expect(row.locator('[data-avatar]')).not.toHaveAttribute('data-role-ring');
+    await expect(row.getByRole('img', { name: 'Gareth Lewis (simulated)', exact: true })).not.toHaveAttribute('data-role-ring');
     await row.getByRole('button', { name: 'Done' }).click();
 
     await page.getByRole('link', { name: 'Overview' }).first().click();

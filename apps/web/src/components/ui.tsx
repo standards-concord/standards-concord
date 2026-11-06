@@ -194,22 +194,7 @@ export function Badge({ tone = 'neutral', children, className, icon: Icon, title
   );
 }
 
-export function Avatar({
-  name,
-  src,
-  size = 28,
-  simulated,
-  roles,
-  decorative,
-}: {
-  name?: string;
-  src?: string;
-  size?: number;
-  simulated?: boolean;
-  roles?: readonly RingRole[];
-  /** Hidden from screen readers (the tooltip stays), for when the name and roles are written out beside it. */
-  decorative?: boolean;
-}) {
+export function Avatar({ name, src, size = 28, simulated, roles }: { name?: string; src?: string; size?: number; simulated?: boolean; roles?: readonly RingRole[] }) {
   const [broken, setBroken] = useState(false);
   const hue = [...(name ?? '?')].reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
   // Owners, stewards and ODI oversight get a ring in their most senior role's colour (see ringRoles);
@@ -221,7 +206,8 @@ export function Avatar({
   const picture = src && !broken;
   return (
     <span
-      {...(decorative ? { 'aria-hidden': true } : { role: 'img', 'aria-label': label })}
+      role="img"
+      aria-label={label}
       title={label}
       data-avatar={picture ? 'picture' : 'initials'}
       data-role-ring={ring}
