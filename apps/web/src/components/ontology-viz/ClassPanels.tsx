@@ -2,7 +2,7 @@ import { Fragment, useMemo } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
-import { isDatatype, qualifiedText, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
+import { cardWords, isDatatype, qualifiedText, type OntologyModel, type Slot } from '../../lib/ontologyModel';
 import { Badge } from '../ui';
 import { compactIri } from '../../lib/format';
 import { TriangleAlert } from 'lucide-react';
@@ -90,13 +90,13 @@ function SlotRow({ s, label, onSelect, model, compact }: { s: Slot; label: Label
           </ul>
         )}
       </td>
-      <td className="py-2 pr-3 font-mono text-[0.8rem] whitespace-nowrap" title={cardTitle(s)}>
+      <td className="py-2 pr-3 whitespace-nowrap" title={cardTitle(s)}>
         {s.conflict ? (
           <span className="inline-flex items-center gap-1 font-sans text-xs font-medium text-danger">
             <TriangleAlert className="size-3.5" aria-hidden /> Conflict
           </span>
         ) : (
-          slotCard(s)
+          cardWords(s.min, s.max)
         )}
         {s.conflict && <span className="block font-sans text-xs text-danger">{s.conflict}</span>}
       </td>
@@ -112,8 +112,8 @@ function SlotRow({ s, label, onSelect, model, compact }: { s: Slot; label: Label
 
 function cardTitle(s: Slot) {
   if (s.conflict) return `Conflicting constraints: ${s.conflict}. No instance can satisfy them.`;
-  const max = s.max === '*' ? 'any number' : `at most ${s.max}`;
-  return s.min ? `at least ${s.min}, ${max}` : `optional, ${max}`;
+  // The exact cardinality, for editors, behind the words shown.
+  return `${s.min}..${s.max}`;
 }
 
 /**
@@ -178,7 +178,6 @@ export function PropertyTable({ iri, model, label, onSelect, compact }: { iri: s
         ))}
       </table>
       {notes}
-      <p className="mt-2 text-xs text-muted">Summarised from the stated axioms. The consistency check (a full OWL reasoner) is the authority on contradictions.</p>
     </div>
   );
 }

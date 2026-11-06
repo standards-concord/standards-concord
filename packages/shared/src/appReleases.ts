@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.36.0',
+    version: '0.37.0',
     date: '2026-11-06',
     title: 'Tidier Browse pages and plain type names',
     pr: 93,
@@ -82,6 +82,40 @@ export const APP_RELEASES: AppRelease[] = [
           'A long property name that wraps onto two lines stays left-aligned instead of centring. The governance rules start in one column, every governance section has an icon, system events in the activity feed get a round icon, and the Concord name is no longer cut short on a phone.',
         roles: [],
         to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.36.0',
+    date: '2026-11-06',
+    title: 'Fewer technical details, everywhere',
+    changes: [
+      {
+        id: 'fewer-details',
+        type: 'feat',
+        title: 'Less about how Concord works, more about the standard',
+        detail:
+          'Lint is now "Quality checks", and style suggestions only show with Advanced features on. Only editors can open a competency question to its SPARQL. Change requests no longer restate their edits in the AI analysis, and say where they came from only when it isn’t the default. Fork pages lose the MCP tool names and list two formats up front. Source & export keeps Turtle, JSON-LD and SHACL up front, with the rest under More formats. "How many" on a class reads "Optional", "At least one" and so on. The ontology IRI moves into Ontology details, and meeting summaries count only what the call produced.',
+        roles: [],
+        to: '{o}',
+        ask: 'Is there anything you used to rely on that you can no longer find?',
+      },
+    ],
+  },
+  {
+    version: '0.35.1',
+    date: '2026-11-06',
+    title: 'Governance is always in the ontology nav',
+    pr: 95,
+    changes: [
+      {
+        id: 'governance-always-shown',
+        type: 'fix',
+        title: 'No more “Show all sections” toggle',
+        detail:
+          'Governance used to be hidden from the ontology nav unless you were an owner, steward or ODI oversight, with a “Show all sections (Governance)” button to bring it back. Every role now sees Governance, so anyone can read the policy and who holds which role. Only owners can still edit the policy.',
+        roles: [],
+        to: '{o}/governance',
       },
     ],
   },

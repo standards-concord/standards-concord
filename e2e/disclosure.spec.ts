@@ -49,7 +49,7 @@ test.describe('summaries, popups and disclosures', () => {
     // Move on before the report arrives: when it lands, focus stays where the reader put it.
     await page.getByRole('button', { name: /Ontology details/ }).focus();
     release();
-    await expect(health.getByRole('button', { name: /Lint findings/ })).toBeVisible();
+    await expect(health.getByRole('button', { name: /Quality checks/ })).toBeVisible();
     await expect(page.getByRole('button', { name: /Ontology details/ })).toBeFocused();
   });
 
@@ -137,7 +137,7 @@ test.describe('summaries, popups and disclosures', () => {
   test('following the health link again reopens lint findings on the overview', async ({ page }) => {
     await page.goto(`/o/${demo.id}`);
     await settle(page);
-    const lint = page.locator('#health').getByRole('button', { name: /Lint findings/ });
+    const lint = page.locator('#health').getByRole('button', { name: /Quality checks/ });
     await expect(lint).toBeVisible();
     if ((await lint.getAttribute('aria-expanded')) === 'true') await lint.click();
     await expect(lint).toHaveAttribute('aria-expanded', 'false');
@@ -178,7 +178,11 @@ test.describe('summaries, popups and disclosures', () => {
     await expect(page.getByTestId('overview-summary')).toContainText(/\d+ class/);
     const details = page.getByRole('button', { name: /Ontology details/ });
     await details.click();
-    for (const label of ['Classes', 'Properties', 'Individuals', 'Use cases', 'Releases', 'Ontology IRI', 'Governance', 'Created']) await expect(main.getByText(label, { exact: true }).first()).toBeVisible();
+    // The details hold only what the sentence doesn't say: no counts, version or policy again.
+    for (const label of ['Ontology IRI', 'Created']) await expect(main.getByText(label, { exact: true }).first()).toBeVisible();
+    for (const label of ['Classes', 'Properties', 'Use cases', 'Releases', 'Current version', 'Governance']) await expect(page.getByRole('region', { name: 'About this ontology' }).getByText(label, { exact: true })).toHaveCount(0);
+    // The IRI is only here, not under the title on every page.
+    await expect(page.locator('.ontology-header').getByText(/^https?:\/\//)).toHaveCount(0);
   });
 
   test('approval details keep their label readable in the narrow sidebar', async ({ page }) => {
