@@ -39,9 +39,14 @@ scripts/ci-local.sh --report      # test, e2e-dev, e2e-preview, e2e-solid, walkt
 scripts/ci-local.sh e2e-dev       # or just some jobs, without posting anything
 ```
 
-The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. With `--report` it posts a commit status per job (`local/test`, `local/e2e-dev`, `local/e2e-preview`, `local/e2e-solid`, `local/walkthrough`) on the commit it tested, which shows on the pull request. It refuses `--report` with uncommitted changes, so a status always describes exactly that commit. A full run takes about an hour.
+The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. A full run takes about an hour (in a Claude sandbox: `test` 14 min, `e2e-dev` 24, `e2e-preview` 15, `e2e-solid` 1, `walkthrough` 7).
 
-Merge a pull request only when its head commit, after merging current `main`, has all five `local/*` statuses green (and the external review has approved). Push nothing after the run, or run again.
+With `--report` it records the result for the commit it tested, and refuses to run with uncommitted changes, so the record always describes exactly that commit:
+
+- **Commit statuses** `local/test`, `local/e2e-dev`, `local/e2e-preview`, `local/e2e-solid` and `local/walkthrough`, shown on the pull request, wherever `gh` may post them (your own machine, the Mac).
+- **`ci-local-logs/<commit>/summary.md`**, a table of the same results. A Claude thread's GitHub access can't post statuses, so the thread posts this summary on the pull request as a comment instead.
+
+Merge a pull request only when its head commit, after merging current `main`, has all five jobs passing in one of those records (and the external review has approved). Push nothing after the run, or run again.
 
 A private repository on GitHub's free plan has no branch protection, so GitHub doesn't enforce any of this: it is the rule we follow.
 

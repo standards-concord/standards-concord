@@ -7,8 +7,10 @@
 #   scripts/ci-local.sh --report            # also post a "local/<job>" commit status per job
 #
 # Why: while the organisation has no Actions minutes, threads and people run the checks
-# themselves. --report posts the result where a reviewer (and a later required check) can
-# see it: success only when the job passed on a clean checkout of exactly that commit.
+# themselves. --report records the result where a reviewer can see it, only for a clean
+# checkout of exactly that commit: a commit status per job where gh may post one, and always
+# ci-local-logs/<commit>/summary.md, which a Claude thread (whose GitHub proxy doesn't allow
+# posting statuses) posts on the pull request as a comment instead.
 #
 # Needs Node 22 + pnpm, Python 3 (uv optional), Postgres 16 binaries (initdb/pg_ctl) for the
 # test job, Chromium for Playwright, ffmpeg for the walkthrough, Go for the MCP publisher
@@ -44,12 +46,16 @@ mkdir -p "$logdir"
 rm -f "$logdir"/*.note
 runner="${CI_LOCAL_RUNNER:-$(whoami)@$(hostname)}"
 
+statuses_posted=true
 status() { # job state description
-  $report || return 0
+  $report && $statuses_posted || return 0
   gh api -X POST "repos/$repo/statuses/$sha" \
-    -f state="$2" -f context="local/$1" -f description="$3 ($runner)" >/dev/null \
-    || echo "warning: could not post the local/$1 status" >&2
+    -f state="$2" -f context="local/$1" -f description="$3 ($runner)" >/dev/null 2>&1 \
+    || { statuses_posted=false; echo "note: gh may not post commit statuses here; use $logdir/summary.md" >&2; }
 }
+summary="$logdir/summary.md"
+printf '### Local CI run\n\nCommit `%s`, run by `%s` with `scripts/ci-local.sh`, %s.\n\n| Job | Result |\n| --- | --- |\n' \
+  "$sha" "$runner" "$(date -u +'%Y-%m-%d %H:%M UTC')" >"$summary"
 
 # A throwaway Postgres for the document store's tests, as CI's postgres:16 service.
 pg_started=false
@@ -126,15 +132,18 @@ for job in "${jobs[@]}"; do
     echo "   passed in ${took} min"
     note=""; [ -f "$logdir/$job.note" ] && note="; $(cat "$logdir/$job.note")"
     status "$job" success "passed in ${took} min$note"
+    echo "| local/$job | ✅ passed in ${took} min$note |" >>"$summary"
   else
     took=$(( ($(date +%s) - start) / 60 ))
     echo "   FAILED after ${took} min; last lines:"
     tail -25 "$logdir/$job.log" | sed 's/^/   | /'
     status "$job" failure "failed after ${took} min"
+    echo "| local/$job | ❌ failed after ${took} min |" >>"$summary"
     failed+=("$job")
   fi
 done
 
+$report && ! $statuses_posted && echo "Statuses weren't posted. Post $summary on the pull request as a comment."
 [ ${#failed[@]} -eq 0 ] && { echo "All passed at $sha"; exit 0; }
 echo "Failed at $sha: ${failed[*]}"
 exit 1
