@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { Link, Outlet, useLocation, useNavigate, useParams } from 'react-router';
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
-import { useAsync, useLocalStorage, type AsyncState } from '../../lib/hooks';
+import { useAsync, type AsyncState } from '../../lib/hooks';
 import { ADVANCED_TABS, useAdvancedFeatures } from '../../lib/advanced';
 import { useSession } from '../../lib/session';
 import { makeLabeler, type Labeler } from '../../lib/ontology';
@@ -33,12 +33,10 @@ export function useOntology() {
 /**
  * The ontology's pages, grouped into five sections so the top-level navigation stays short.
  * URLs are unchanged; `also` lists extra path segments that belong to a section.
+ * Every role sees every section: Governance used to be hidden from roles that don't run it, behind a
+ * "Show all sections" toggle, but the toggle confused testers and anyone can read the policy.
  */
-/**
- * `roles` marks a section only some roles need: others don't see it in the nav, so each role sees what is relevant to it.
- * Nothing is locked away: "All sections" shows it again, and a link or the address bar still opens it.
- */
-export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[]; roles?: Role[] }[] = [
+export const SECTIONS: { label: string; tabs: [path: string, label: string][]; also?: string[] }[] = [
   { label: 'Overview', tabs: [['', 'Overview']] },
   // Connecting an agent is how people read, query and validate against the ontology from their own tools, so it sits with Explore.
   // Query holds a scratch check of sample data; Validate data is the full validator (upload, any release, the API).
@@ -46,8 +44,8 @@ export const SECTIONS: { label: string; tabs: [path: string, label: string][]; a
   // What agents report is requirements input, next to use cases and meetings.
   { label: 'Requirements', tabs: [['use-cases', 'Use cases'], ['meetings', 'Meetings'], ['agents', 'Agent reports']], also: ['interview'] },
   { label: 'Changes', tabs: [['changes', 'Change requests'], ['forks', 'Forks'], ['releases', 'Releases'], ['apps', 'App checks']] },
-  // Policy and membership are run by owners and stewards, with ODI oversight; everyone else meets the rules on each change request.
-  { label: 'Governance', tabs: [['governance', 'Governance']], roles: ['owner', 'steward', 'odi'] },
+  // Policy and membership are run by owners and stewards, with ODI oversight; everyone can read them here.
+  { label: 'Governance', tabs: [['governance', 'Governance']] },
 ];
 
 function sectionOf(segment: string) {
@@ -67,29 +65,12 @@ function rememberedPath(id: string, section: string): string | undefined {
   }
 }
 
-const SHOW_ALL_KEY = 'concord.nav.showAll';
-
-function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boolean }) {
+function SectionNav({ id }: { id: string }) {
   const loc = useLocation();
   const nav = useNavigate();
   const segment = loc.pathname.split('/')[3] ?? '';
   const current = sectionOf(segment);
-  const [showAll, setShowAll] = useLocalStorage(SHOW_ALL_KEY, false);
   const [advanced] = useAdvancedFeatures();
-  // The section you're in always shows, even if it isn't one your role normally needs.
-  const hidden = SECTIONS.filter((s) => s.roles && !canSee(s.roles) && s !== current);
-  const shown = showAll ? SECTIONS : SECTIONS.filter((s) => !hidden.includes(s));
-  // Sections this role doesn't usually need: the toggle names them, and shows or hides them.
-  const extra = SECTIONS.filter((s) => s.roles && !canSee(s.roles));
-  const canToggle = extra.length > 0 && (showAll || hidden.length > 0);
-  const navRef = useRef<HTMLElement>(null);
-  const focusAfterReveal = useRef<string>(undefined);
-  useEffect(() => {
-    const label = focusAfterReveal.current;
-    if (!showAll || !label) return;
-    focusAfterReveal.current = undefined;
-    [...(navRef.current?.querySelectorAll<HTMLAnchorElement>('a') ?? [])].find((a) => a.textContent?.trim() === label)?.focus();
-  }, [showAll]);
   const activeTab = TAB_ALIASES[segment] ?? segment;
   const href = (path: string) => (path ? `/o/${id}/${path}` : `/o/${id}`);
   useEffect(() => {
@@ -104,8 +85,8 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
   }, [id, current, activeTab, loc.pathname, loc.search]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <>
-      <nav ref={navRef} className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
-        {shown.map((s) => {
+      <nav className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
+        {SECTIONS.map((s) => {
           const active = s === current;
           const target = () => {
             const remembered = s.tabs.length > 1 ? rememberedPath(id, s.label) : undefined;
@@ -129,24 +110,6 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
             </Link>
           );
         })}
-        {canToggle && (
-          <button
-            type="button"
-            aria-pressed={showAll}
-            aria-describedby={`${id}-more-sections`}
-            onClick={() => {
-              // Revealed links appear before this button, so take keyboard users to the first one.
-              if (!showAll) focusAfterReveal.current = extra.find((s) => hidden.includes(s))?.label;
-              setShowAll(!showAll);
-            }}
-            className="ml-auto self-center rounded-pill px-2.5 py-1 text-xs whitespace-nowrap text-muted hover:bg-surface-2 hover:text-fg aria-pressed:bg-surface-2 aria-pressed:text-fg"
-          >
-            Show all sections{' '}
-            <span id={`${id}-more-sections`} className="text-subtle">
-              ({extra.map((s) => s.label).join(', ')})
-            </span>
-          </button>
-        )}
       </nav>
       {current.tabs.length > 1 && (
         <div className="border-t border-line">
@@ -239,7 +202,6 @@ export function OntologyLayout() {
                 {o.demo && <Badge tone="warn">Demo</Badge>}
               </div>
               <p className="mt-1 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-xs text-subtle">
-                <span className="truncate font-mono">{o.ontologyIRI}</span>
                 <span>Version {o.currentVersion}</span>
                 <a href={publicPageUrl(o.slug)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-accent hover:underline" data-testid="public-page-link">
                   Public page <ExternalLink className="size-3" aria-hidden />
@@ -255,7 +217,7 @@ export function OntologyLayout() {
               <HealthBubble o={o} detailsHref={`/o/${id}#health`} />
             </div>
           </div>
-          <SectionNav id={id} canSee={(roles) => ctx.hasRole(...roles)} />
+          <SectionNav id={id} />
         </div>
       </div>
       {/* A clear gap between the ontology header and the page beneath it. */}

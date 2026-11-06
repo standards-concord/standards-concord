@@ -10,9 +10,9 @@ import { Disclosure } from './Disclosure';
 import { acceptedOnSilence } from '../lib/governanceRules';
 
 /** "Approval details" as a disclosure, or shown directly when the panel is already behind one (no toggle inside a toggle). */
-function MaybeDisclosure({ flat, title, summary, children }: { flat?: boolean; title: string; summary: string; children: ReactNode }) {
+function MaybeDisclosure({ flat, title, children }: { flat?: boolean; title: string; children: ReactNode }) {
   if (!flat) return (
-    <Disclosure title={title} summary={summary} summaryPlacement="below" tone="muted">
+    <Disclosure title={title} tone="muted">
       {children}
     </Disclosure>
   );
@@ -48,12 +48,6 @@ export function GovernancePanel({
   const decided = v ? v.yes + v.no : 0;
   const yesShare = decided ? v!.yes / decided : 0;
   const turnout = v && v.eligible ? v.cast / v.eligible : 0;
-
-  const glance = [
-    g.requiredApprovals > 0 && `${g.approvals} of ${g.requiredApprovals} approvals`,
-    rule.reviewPeriodDays > 0 && (g.reviewPeriodOver ? 'review period over' : Number.isNaN(reviewEnds) ? undefined : `review ends in ${duration(reviewEnds - t)}`),
-    v && rule.vote && (v.open ? `vote open, ${v.cast} of ${v.eligible} voted` : 'vote not open'),
-  ].filter(Boolean);
 
   const voteArithmetic =
     v && rule.vote ? (
@@ -159,7 +153,8 @@ export function GovernancePanel({
         </div>
       )}
 
-      <MaybeDisclosure flat={detailsOpen} title="Approval details" summary={glance.join(' · ')}>
+      {/* No one-line summary: it repeated "Next" and "Still needed" above. */}
+      <MaybeDisclosure flat={detailsOpen} title="Approval details">
         <div className="space-y-4">
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
             Rules for a <LevelBadge level={g.level} /> {subject}

@@ -123,6 +123,16 @@ export function cardText(min: number, max: Max) {
   return `${min}..${max}`;
 }
 
+/** How many values, in words: "Optional", "Exactly one", "At least one", "5 to 10", "Up to 5", "At least 3". */
+export function cardWords(min: number, max: Max) {
+  const n = (k: number) => (k === 1 ? 'one' : String(k));
+  if (max === 0) return 'None';
+  if (max === '*') return min === 0 ? 'Any number' : `At least ${n(min)}`;
+  if (min === max) return `Exactly ${n(min)}`;
+  if (min === 0) return max === 1 ? 'Optional' : `Up to ${max}`;
+  return `${min} to ${max}`;
+}
+
 export function slotCard(s: Pick<Slot, 'min' | 'max' | 'conflict'>) {
   return s.conflict ? 'conflict' : cardText(s.min, s.max);
 }

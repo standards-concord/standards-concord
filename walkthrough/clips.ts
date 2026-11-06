@@ -219,8 +219,9 @@ export const clipActions: Record<string, Action> = {
     await c.d.find(produced, 'what the call produced');
     // Each count is shown even when it is zero, so check the numbers, not just the labels.
     const counts = ((await produced.getByRole('listitem').allTextContents().catch(() => [])) as string[]).map((t) => t.replace(/\s+/g, ' ').trim());
-    for (const k of ['use cases', 'terms', 'competency questions', 'open questions']) {
-      const n = Number(counts.find((t) => t.endsWith(` ${k}`))?.split(' ')[0]);
+    // "1 use case", "2 use cases": the label agrees with the number.
+    for (const k of ['use case', 'term', 'competency question', 'open question']) {
+      const n = Number(counts.find((t) => new RegExp(` ${k}s?$`).test(t))?.split(' ')[0]);
       c.d.claim(n > 0, `the call produced ${k} (${counts.join(', ')})`);
     }
     const decisions = c.d.page.getByText('Decisions', { exact: true }).locator('xpath=ancestor::*[.//ul][1]').getByRole('listitem');

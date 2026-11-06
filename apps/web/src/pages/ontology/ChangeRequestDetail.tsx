@@ -379,7 +379,7 @@ function Tabs({ view, onChange, items }: { view: View; onChange: (v: View) => vo
 
 export function ChangeRequestPage() {
   const { crId = '' } = useParams();
-  const { id, ontology, view, userById } = useOntology();
+  const { id, ontology, view, userById, hasRole } = useOntology();
   const { now } = useSession();
   const state = useAsync(() => api.changeRequest(crId), [crId]);
   const [params, setParams] = useSearchParams();
@@ -421,8 +421,9 @@ export function ChangeRequestPage() {
           <span className="flex items-center gap-1.5">
             <Avatar name={author?.name} src={author?.avatarUrl} size={18} simulated={author?.simulated} /> {author?.name ?? 'Unknown'}
           </span>
-          <OriginIcon origin={cr.origin} withLabel />
-          <span>{titleCase(cr.kind)}</span>
+          {/* Where it came from and what kind it is, only when they aren't the default (proposed directly, a feature). */}
+          {cr.origin.type !== 'direct' && <OriginIcon origin={cr.origin} withLabel />}
+          {cr.kind !== 'feature' && <span>{titleCase(cr.kind)}</span>}
           <span>opened {relativeTime(cr.createdAt, now())}</span>
           {cr.origin.type === 'meeting' && (
             <Link className="text-accent hover:underline" to={`/o/${id}/meetings/${cr.origin.meetingId}`}>
@@ -479,44 +480,11 @@ export function ChangeRequestPage() {
               </Card>
             )}
 
-            {!!cr.useCases?.length && (
-              <Card>
-                <CardHeader icon={ClipboardList} title={`Addresses ${cr.useCases.length === 1 ? 'a use case' : `${cr.useCases.length} use cases`}`} subtitle="They close automatically when this change is released." />
-                <ul className="divide-y divide-line" data-testid="cr-use-cases">
-                  {cr.useCases.map((u) => (
-                    <li key={u.id} className="px-5 py-3">
-                      <UseCaseRefLink ontologyId={id} r={u} />
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-            )}
-
-            <Card>
-              <CardHeader
-                title={`Proposed changes (${cr.ops.length})`}
-              />
-              <div className="p-5">
-                <div className="space-y-4">
-                  <OpCards ops={cr.ops} label={label} />
-                  {cr.diff?.terms.length ? (
-                    <details>
-                      <summary className="cursor-pointer text-xs font-medium text-accent">Effect on terms ({cr.diff.terms.length})</summary>
-                      <div className="mt-2">
-                        <TermChanges diff={cr.diff} />
-                      </div>
-                    </details>
-                  ) : null}
-                </div>
-              </div>
-            </Card>
-
             {cr.analysis && (
               <Card>
                 <CardHeader icon={ScanSearch} title="AI analysis" actions={cr.analysis.recommendation && <Badge tone="accent">{RECOMMENDATION[cr.analysis.recommendation]}</Badge>} />
                 <div className="space-y-3 p-5 text-sm">
-                  <Markdown text={cr.analysis.summary} />
-                  {/* Decision-relevant cautions stay visible; the supporting explanation is behind the disclosure. */}
+                  {/* No summary: it restated Proposed changes. Cautions stay visible; the reasoning is behind the disclosure. */}
                   {cr.analysis.existingTerms?.length ? (
                     <p className="flex items-start gap-2 rounded-lg bg-warn-soft p-2.5 text-xs" role="note">
                       <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-warn" />
@@ -554,6 +522,39 @@ export function ChangeRequestPage() {
                 </div>
               </Card>
             )}
+
+            {!!cr.useCases?.length && (
+              <Card>
+                <CardHeader icon={ClipboardList} title={`Addresses ${cr.useCases.length === 1 ? 'a use case' : `${cr.useCases.length} use cases`}`} subtitle="They close automatically when this change is released." />
+                <ul className="divide-y divide-line" data-testid="cr-use-cases">
+                  {cr.useCases.map((u) => (
+                    <li key={u.id} className="px-5 py-3">
+                      <UseCaseRefLink ontologyId={id} r={u} />
+                    </li>
+                  ))}
+                </ul>
+              </Card>
+            )}
+
+            <Card>
+              <CardHeader
+                title={`Proposed changes (${cr.ops.length})`}
+              />
+              <div className="p-5">
+                <div className="space-y-4">
+                  <OpCards ops={cr.ops} label={label} />
+                  {cr.diff?.terms.length ? (
+                    <details>
+                      <summary className="cursor-pointer text-xs font-medium text-accent">Effect on terms ({cr.diff.terms.length})</summary>
+                      <div className="mt-2">
+                        <TermChanges diff={cr.diff} />
+                      </div>
+                    </details>
+                  ) : null}
+                </div>
+              </div>
+            </Card>
+
             </div>
           )}
           {tab === 'diff' && (
@@ -572,7 +573,7 @@ export function ChangeRequestPage() {
               <CardHeader icon={ShieldCheck} title="Validation" subtitle="Run automatically on the working draft with this change applied." />
               <div className="p-5">
                 {cr.validation ? (
-                  <ValidationDetails report={cr.validation} label={label} />
+                  <ValidationDetails report={cr.validation} label={label} showQueries={hasRole('editor', 'steward', 'owner')} />
                 ) : (
                   <p className="text-sm text-muted">Not validated yet — validation runs when the request is submitted.</p>
                 )}

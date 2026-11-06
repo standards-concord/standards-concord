@@ -13,7 +13,7 @@ import { useOntology } from './Layout';
 
 export function InterviewPage() {
   const { sessionId = '' } = useParams();
-  const { id, ontology } = useOntology();
+  const { id, ontology, hasRole } = useOntology();
   const { session: auth } = useSession();
   const nav = useNavigate();
   const state = useAsync(() => api.interview(sessionId), [sessionId]);
@@ -167,7 +167,7 @@ export function InterviewPage() {
                 <CompletenessMeter value={s.useCase.completeness} />
                 <p className="mt-1.5 text-xs text-muted">Fills in as you talk.</p>
               </div>
-              <UseCaseDocument uc={s.useCase} live highlight={lastTargets as string[]} />
+              <UseCaseDocument uc={s.useCase} live highlight={lastTargets as string[]} showQueries={hasRole('editor', 'steward', 'owner')} />
             </Card>
           </section>
         )}
