@@ -146,6 +146,9 @@ test.describe('Validate data', () => {
     await expect(page.getByRole('button', { name: 'JSON', exact: true })).toBeEnabled();
   });
 
+  // Used to go wrong (about 1 run in 10 on the production build): switching version first re-ran the old
+  // version's check, and its answer, landing before the new check had started, marked the page as
+  // checked, so the status said nothing while the draft was still being checked.
   test('while data is checked again, the old report is faded and can’t be downloaded', async ({ page }) => {
     await page.goto('/o/volunteering/validate');
     await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);

@@ -285,14 +285,16 @@ export function ValidateTab() {
     }
     const delay = nextCheck.current === 'now' ? 0 : autoCheckDelay(text.length);
     nextCheck.current = 'soon';
+    // Numbered now, not when it starts: an answer still on its way for the inputs before is dropped from
+    // this moment, so it can't land in between and mark the new inputs as checked.
+    const id = ++request.current;
     setChecking(true);
-    const t = setTimeout(() => void run(), delay);
+    const t = setTimeout(() => void run(id), delay);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run reads this render's inputs
   }, [text, format, version, reading, generation]);
 
-  const run = async () => {
-    const id = ++request.current;
+  const run = async (id: number) => {
     const snapshot = { text, format, version };
     // A check for older inputs is stopped once it has run 500 ms (a large file), now or later; a quick one
     // finishes first and its answer is dropped. Either way it never holds up this one for long.
