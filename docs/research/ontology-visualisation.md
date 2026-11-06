@@ -44,7 +44,7 @@ The Browse tab has two views that share the class tree on the left and the term 
 ## Making them modern and accessible
 
 - Pan and zoom follow current canvas tools: drag or scroll to pan, pinch or ctrl/⌘ + scroll to zoom, and +, −, 0 and the arrow keys from the keyboard.
-- Every class in the diagram is a button with a descriptive name, reached through a single tab stop. Arrow keys move to the nearest class in that direction, and Enter opens it. The graph canvas has a summary label and points to the diagram and class pages, which hold the same information as text.
+- Every class in the diagram is a button with a descriptive name, reached through a single tab stop. Arrow keys move to the nearest class in that direction, and Enter opens it. The graph canvas (removed on 6 Nov 2026) had a summary label and pointed to the diagram and class pages, which hold the same information as text.
 - The views follow the light and dark themes. The browser tests run axe on the class page and the diagram, and check that every view fits a phone screen without sideways scrolling. Running axe found the app's `--subtle` grey text failing contrast (3.2:1), so it was darkened to meet WCAG AA everywhere.
 - Everything is linked: classes, properties and types in the tables and diagrams all open their term page. The view, selection and diagram scope are in the URL, so a view can be shared.
 
