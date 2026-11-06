@@ -1,12 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
-import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, Network, PanelLeftClose, PanelLeftOpen, PenLine, Search, X } from 'lucide-react';
+import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, PanelLeftClose, PanelLeftOpen, PenLine, Search, X } from 'lucide-react';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, restrictionText, type Labeler } from '../../lib/ontology';
 import { compactIri, datatypeName } from '../../lib/format';
-import { OntologyGraph } from '../../components/OntologyGraph';
 import { buildModel, type OntologyModel } from '../../lib/ontologyModel';
 import { ClassTree } from '../../components/ontology-viz/ClassTree';
 import { ClassDiagram, DEFAULT_DIAGRAM_OPTIONS, neighbourhood, type DiagramOptions } from '../../components/ontology-viz/ClassDiagram';
@@ -392,7 +391,7 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
   );
 }
 
-type Mode = 'tree' | 'diagram' | 'graph';
+type Mode = 'tree' | 'diagram';
 const MODES: {
   key: Mode;
   label: string;
@@ -410,12 +409,6 @@ const MODES: {
     label: 'Diagram',
     icon: LayoutTemplate,
     task: 'Check what data each class has: attributes, types and how many of each.',
-  },
-  {
-    key: 'graph',
-    label: 'Graph',
-    icon: Network,
-    task: 'Explore how classes connect across the whole ontology.',
   },
 ];
 
@@ -496,8 +489,7 @@ function DiagramView({
             Where would you like to start?
           </h3>
           <p className="mt-1 max-w-prose text-sm text-muted">
-            This ontology has {model.classes.size} classes, too many to read in one diagram. Pick a class to see it and its direct links, choose one from the Terms panel, or use the Graph view for an
-            overview.
+            This ontology has {model.classes.size} classes, too many to read in one diagram. Pick a class to see it and its direct links, or choose one from the Terms panel.
           </p>
           <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Start from a class">
             {starts.map((iri) => (
@@ -538,7 +530,8 @@ export function BrowseTab() {
   const [params, setParams] = useSearchParams();
   const selected = params.get('term') ?? undefined;
   const raw = params.get('view');
-  const mode: Mode = raw === 'graph' || raw === 'diagram' ? raw : 'tree';
+  // The Graph view was removed (the Diagram shows the same model, with each class's data): old links open the Diagram.
+  const mode: Mode = raw === 'graph' || raw === 'diagram' ? 'diagram' : 'tree';
   const canvas = mode !== 'tree';
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
@@ -733,8 +726,7 @@ export function BrowseTab() {
               <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood />
             ) : (
               <EmptyState icon={ListTree} title="Pick a term">
-                Choose a class or property on the left to see its definition, properties and where it’s used. Use the Diagram to check what data each class has, or the Graph to see how everything
-                connects.
+                Choose a class or property on the left to see its definition, properties and where it’s used. Use the Diagram to see what data each class has and how the classes connect.
               </EmptyState>
             )}
           </div>
@@ -745,11 +737,7 @@ export function BrowseTab() {
           <div className={cx('grid min-w-0 gap-4', selected && 'xl:grid-cols-[1fr_380px]')}>
             <div className="min-w-0 space-y-2">
               <ScopeControl hops={hops} setHops={setHops} anchor={anchor} centreOn={centreOn} onCentre={centre} />
-              {mode === 'graph' ? (
-                <OntologyGraph view={v} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} height={620} />
-              ) : (
-                <DiagramView model={model} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} onCentre={centre} />
-              )}
+              <DiagramView model={model} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} onCentre={centre} />
             </div>
             {selected && (
               <aside

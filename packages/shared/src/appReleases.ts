@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.39.0',
+    date: '2026-11-06',
+    title: 'One picture of the ontology, and a simpler Query',
+    changes: [
+      {
+        id: 'diagram-only',
+        type: 'feat',
+        title: 'Browse has List and Diagram; the Graph view is gone',
+        detail:
+          'The Graph view drew the same classes as the Diagram, in a layout that was harder to read. Browse now has two views: List, to find a term, and Diagram, to see what data each class has and how the classes connect. Old links to the Graph open the Diagram.',
+        roles: [],
+        to: '{o}/browse?view=diagram',
+        ask: 'Did you use the Graph view for anything the Diagram doesn’t do?',
+      },
+    ],
+  },
+  {
     version: '0.38.0',
     date: '2026-11-06',
     title: 'Connect your app with GitHub, no token needed',
