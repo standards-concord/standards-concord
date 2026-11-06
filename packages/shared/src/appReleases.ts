@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.33.0',
+    version: '0.34.0',
     date: '2026-11-06',
     title: 'Advanced features, and a diff on every change',
     changes: [
@@ -85,6 +85,23 @@ export const APP_RELEASES: AppRelease[] = [
           'Reasoner details and Check again in this browser are gone. FAIR and quality check codes now appear when you hover over a tick or cross. Commit hashes on releases and forks, and the canned SPARQL examples menu, have been removed.',
         roles: [],
         to: '{o}#health',
+      },
+    ],
+  },
+  {
+    version: '0.33.0',
+    date: '2026-11-06',
+    title: 'Coloured workflow file for app checks',
+    pr: 90,
+    changes: [
+      {
+        id: 'app-checks-yaml-highlight',
+        type: 'feat',
+        title: 'The app checks workflow file is colour-coded',
+        detail:
+          'When you connect an app, the workflow file to add to its repository is now syntax-highlighted like the rest of Concord’s code, so its settings, values and comments are easier to tell apart.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
       },
     ],
   },

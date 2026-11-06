@@ -37,7 +37,7 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | `/o/:id/changes/:id` | Changes/Diff/Checks/Discussion tabs; Diff shows the Turtle before and after as unified hunks (merged changes against their base commit, open ones against the working draft; withheld and signed-out requests refused); approve, request changes, object, comment, vote, merge, revise with AI, resubmit, withdraw | ✅ | change-requests, turtle-diff, governance-flow, ia, disclosure, app-checks (Checks tab results, autopilot's say in Discussion) |
 | `/o/:id/releases` | Grouped list, draft a release | ✅ | governance-flow, ia |
 | `/o/:id/releases/:id` | Notes, included changes, publish; live approval while open; read-only approval record once published or rejected, labelled recorded or checked against today’s policy | ✅ | governance-flow, ia, public-page, release-history, roles |
-| `/o/:id/apps` | Connect an app (name, repo), copy its token and workflow, turn on autopilot, refresh results, disconnect (owners and stewards); empty state; phone layout | ✅ | app-checks |
+| `/o/:id/apps` | Connect an app (name, repo), copy its token and its highlighted workflow, turn on autopilot, refresh results, disconnect (owners and stewards); empty state; phone layout | ✅ | app-checks |
 | `/o/:id/governance` | Summary, edit and save the policy (owners only), templates, members and roles, transfer ownership, the autopilot switch | ✅ | governance-flow, ia, roles, app-checks |
 | `/o/:id/agents` | Agent reports, analysis collapsed | ✅ | agents, connect |
 | `*` | Not found | ✅ | app |
