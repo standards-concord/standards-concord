@@ -50,7 +50,9 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The two server test passes take about 12 minutes on a typical runner and over 14 on a slow one,
+    # so 15 cut passing runs short (PR #92's first run, with every test green).
+    timeout-minutes: 20
     # A real Postgres server for the document store's tests (apps/server/test/store.test.ts): the only back end
     # whose locking across separate connections matches Neon in production.
     services:

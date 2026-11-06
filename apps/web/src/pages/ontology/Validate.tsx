@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { CheckCircle2, Download, FileUp, ListChecks, LoaderCircle, ShieldCheck, Terminal, TriangleAlert } from 'lucide-react';
+import { CheckCircle2, Download, FileUp, ListChecks, LoaderCircle, RotateCcw, ShieldCheck, Terminal, TriangleAlert, WandSparkles } from 'lucide-react';
 import { DATA_FORMATS, dataFormatForFile, sniffDataFormat, type DataFormat } from '@concord/core/data-formats';
 import { DATA_CHECK_LIMITS, DEFAULT_DATA_BASE } from '@concord/core/data-check';
 import { checkDataInBrowser, warmDataCheck } from '../../lib/checkDataInBrowser';
@@ -8,17 +8,24 @@ import { api, type DataValidation } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { Badge, Button, Card, CardHeader, CopyButton, InlineError, Select, cx } from '../../components/ui';
 import { CollapsibleCard } from '../../components/Disclosure';
-import { CodeEditor } from '../../components/code/CodeEditor';
+import { CodeEditor, type CodeEditorHandle } from '../../components/code/CodeEditor';
+import { Pager, ProblemItem, listLabel, usePage, useTurtleChecks } from '../../components/check/turtleChecks';
+import type { Finding, RawFinding } from '../../lib/shaclFindings';
+import { defaultSampleData, useSampleData } from '../../lib/sampleData';
+import { termCompletions } from '../../lib/termCompletions';
 import { HighlightedCode } from '../../components/code/CodeView';
 import type { CodeLanguage } from '../../components/code/languages';
 import { useOntology } from './Layout';
 
 /**
- * Validate instance data against the ontology: paste or upload RDF, pick a
- * version, and get its SHACL report plus checks on the terms it uses. The
- * check runs in this browser (sparq, in a Web Worker), so the data never
- * leaves the device. It is the same check as the POST to the ontology IRI
- * that other tools call, so the page also shows how to call that.
+ * Validate instance data against the ontology: edit the sample data (the same
+ * records Query runs over), paste or upload RDF, pick a version, and get its
+ * SHACL report plus checks on the terms it uses, again each time the data
+ * changes. The check runs in this browser (sparq, in a Web Worker), so the
+ * data never leaves the device. Turtle gets more help: syntax errors as you
+ * type, problems underlined in the editor and listed with their line, term
+ * autocomplete and Format. It is the same check as the POST to the ontology
+ * IRI that other tools call, so the page also shows how to call that.
  */
 
 type Sources = { key: string; turtle: string; shapes: string };
@@ -107,27 +114,15 @@ const constraintName = (iri: string) =>
     .replace(/([a-z])([A-Z])/g, '$1 $2')
     .toLowerCase();
 
-/** An example with something to find: a missing required value, a value of the wrong type, and a misspelt term. */
-function exampleData(ns: string, prefix: string, classes: { iri: string; restrictions: unknown[] }[]): string {
-  const head = `@prefix ${prefix}: <${ns}> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n@prefix ex: <https://example.org/data/> .\n\n`;
-  if (classes.some((c) => c.iri === `${ns}VolunteeringOpportunity`)) {
-    return `${head}ex:foodbank a ${prefix}:VolunteerInvolvingOrganisation ;
-  rdfs:label "Northvale Food Bank" ;
-  ${prefix}:offersOpportunity ex:saturday-shift .
-
-ex:saturday-shift a ${prefix}:VolunteeringOpportunity ;
-  ${prefix}:title "Saturday food bank shift" ;
-  ${prefix}:offeredBy ex:foodbank ;
-  ${prefix}:minimumAge "sixteen" ;
-  ${prefix}:sumary "Sort and pack food parcels." .
-`;
-  }
-  const picks = classes
-    .filter((c) => c.iri.startsWith(ns))
-    .sort((a, b) => b.restrictions.length - a.restrictions.length)
-    .slice(0, 2);
-  return head + picks.map((c, i) => `ex:example-${i + 1} a ${prefix}:${c.iri.slice(ns.length)} ;\n  rdfs:label "Example ${i + 1}" .\n`).join('\n');
-}
+/** A result of the check, in the words the Turtle helpers read (the engine's own form). */
+const toRawFinding = (r: DataValidation['results'][number]): RawFinding => ({
+  focusNode: r.focusNode,
+  path: r.path ?? null,
+  value: r.value ?? null,
+  severity: `http://www.w3.org/ns/shacl#${r.severity}`,
+  sourceConstraintComponent: r.constraint,
+  message: r.message ?? null,
+});
 
 function download(name: string, text: string, type: string) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -145,10 +140,14 @@ export function ValidateTab() {
   const published = (releases.data ?? []).filter((r) => r.status === 'published');
   const latest = ontology.currentVersion !== '0.0.0' ? ontology.currentVersion : published[0]?.version;
   const version = params.get('version') ?? latest ?? 'draft';
-  const [data, setData] = useState('');
+  // The sample data, shared with Query, is there to start with.
+  const [data, setData] = useSampleData(id, ontology);
+  const editor = useRef<CodeEditorHandle>(null);
   const [file, setFile] = useState<{ name: string; text: string } | null>(null);
   const [picked, setPicked] = useState<Picked>('auto');
   const [report, setReport] = useState<{ result: DataValidation; text: string; format: DataFormat; version: string; ms?: number } | null>(null);
+  // The version's ontology and shapes, for describing problems in Turtle.
+  const [src, setSrc] = useState<Sources & { version: string }>();
   const [error, setError] = useState<unknown>();
   const [checking, setChecking] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -170,10 +169,36 @@ export function ValidateTab() {
   const stale = !!report && (report.text !== text || report.format !== format || report.version !== version);
   const prefixes = useMemo(() => ({ ...(view.data?.prefixes ?? {}), [ontology.prefix]: ontology.namespace }), [view.data, ontology.prefix, ontology.namespace]);
   const iri = `${window.location.origin}/def/${encodeURIComponent(ontology.slug)}/${version}`;
+
+  // Turtle typed or pasted here gets the editor's help; other formats, and files too large to show, get the report alone.
+  const turtleMode = !file && format === 'turtle';
+  const turtleReport = report && report.format === 'turtle' && !file ? report : null;
+  const raw = useMemo(() => (turtleReport ? { conforms: turtleReport.result.conforms, results: turtleReport.result.results.map(toRawFinding) } : null), [turtleReport]);
+  const checks = useTurtleChecks({
+    data: turtleMode ? data : '',
+    onDataChange: (v) => {
+      setData(v);
+      invalidate(false, 'now');
+    },
+    report: raw,
+    terms: turtleReport?.result.terms,
+    checkedData: turtleReport?.text,
+    ontologyTurtle: src?.version === version ? src.turtle : undefined,
+    shapes: src?.version === version ? src.shapes : undefined,
+    ontologyPrefixes: prefixes,
+  });
+  const completions = useMemo(() => termCompletions(view.data, 'turtle'), [view.data]);
+  const reveal = (from: number, to: number) => editor.current?.reveal(from, to);
+  // A syntax error is shown where it is, in the list below the editor, rather than as the check's error too.
+  const parseError = (error as { status?: number } | undefined)?.status === 400;
+  const showError = !!error && !(turtleMode && parseError && (checks.syntaxError || checks.syntaxPending));
   // Fetch the version's ontology and shapes as soon as it is picked, so Validate answers at once.
   useEffect(() => {
     versionSources(id, version, true)
-      .then((src) => warmDataCheck({ key: src.key, ontology: src.turtle, shapes: src.shapes, baseIRI: DEFAULT_DATA_BASE, maxTriples: DATA_CHECK_LIMITS.triples }))
+      .then((s) => {
+        setSrc({ ...s, version });
+        return warmDataCheck({ key: s.key, ontology: s.turtle, shapes: s.shapes, baseIRI: DEFAULT_DATA_BASE, maxTriples: DATA_CHECK_LIMITS.triples });
+      })
       .catch(() => {
         /* reported by the check */
       });
@@ -233,7 +258,8 @@ export function ValidateTab() {
     } catch (e) {
       if (id !== request.current) return;
       setError(e);
-      setReport(null);
+      // Data that can't be read yet (half typed) keeps the last report, faded, rather than losing it.
+      if ((e as { status?: number }).status !== 400) setReport(null);
     } finally {
       if (inFlight.current?.controller === controller) inFlight.current = undefined;
       if (id === request.current) setChecking(false);
@@ -293,7 +319,14 @@ export function ValidateTab() {
           subtitle={`Check RDF data against ${ontology.title}: the SHACL shapes derived from it, and the terms it defines`}
           icon={ShieldCheck}
           actions={
-            <CheckStatus checking={reading || (checking && !!text.trim())} done={!!report && !stale} ms={report?.ms} />
+            <div className="flex flex-wrap items-center gap-2">
+              <CheckStatus checking={reading || (checking && !!text.trim())} done={!!report && !stale} ms={report?.ms} />
+              {turtleMode && (
+                <Button icon={WandSparkles} onClick={() => void checks.format()} loading={checks.formatting} disabled={!checks.canFormat} title={checks.canFormat ? 'Lay the Turtle out tidily, keeping your prefixes and comments' : checks.syntaxError ? 'Fix the syntax error first' : 'Reading the Turtle…'}>
+                  Format
+                </Button>
+              )}
+            </div>
           }
         />
         <div className="space-y-3 p-4">
@@ -337,14 +370,16 @@ export function ValidateTab() {
             </Button>
             <Button
               variant="ghost"
+              icon={RotateCcw}
+              disabled={!file && data === defaultSampleData(ontology)}
               onClick={() => {
                 setFile(null);
                 setPicked('auto');
                 invalidate(true);
-                setData(exampleData(ontology.namespace, ontology.prefix, view.data?.classes ?? []));
+                setData(defaultSampleData(ontology));
               }}
             >
-              Try an example
+              Reset to the sample
             </Button>
           </div>
 
@@ -376,6 +411,7 @@ export function ValidateTab() {
               </div>
             ) : (
               <CodeEditor
+                ref={editor}
                 value={data}
                 onChange={(v) => {
                   // The editor also reports the text this page put in it: only an edit changes anything.
@@ -393,15 +429,46 @@ export function ValidateTab() {
                 minHeight={220}
                 maxHeight={420}
                 testId="validate-editor"
+                {...(turtleMode ? { completions, diagnostics: checks.diagnostics, diagnosticsFor: checks.settled } : {})}
               />
             )}
           </div>
-          <p className="text-xs text-muted">Up to 5 MB (JSON-LD 2 MB) or 25,000 distinct triples. Your data is checked here in your browser as you type, and never leaves this device.</p>
-          {error ? <InlineError error={error} /> : null}
+          {turtleMode && (
+            <p role="status" aria-live="polite" className="sr-only" data-testid="lint-announcement">
+              {checks.announced}
+            </p>
+          )}
+          <p className="flex flex-wrap items-center gap-x-3 text-xs text-muted">
+            <span>Up to 5 MB (JSON-LD 2 MB) or 25,000 distinct triples. Your data is checked here in your browser as you type, and never leaves this device. This is also the sample data Query runs over.</span>
+            {turtleMode && checks.formatNote && (
+              <span role="status" className="text-fg">
+                {checks.formatNote}
+              </span>
+            )}
+          </p>
+          {turtleMode && checks.live.length > 0 && (
+            <ol className="space-y-1" aria-label="Problems in the Turtle" data-testid="data-lint">
+              {checks.live.map((l, i) => (
+                <li key={i}>
+                  <ProblemItem finding={l} onReveal={reveal} />
+                </li>
+              ))}
+            </ol>
+          )}
+          {showError ? <InlineError error={error} /> : null}
         </div>
       </Card>
 
-      {report && <Report stale={stale} report={report.result} prefixes={{ ...dataPrefixes(report.text), ...prefixes }} onTurtle={async () => (await checkHere(report, true)).turtle ?? ''} name={`${ontology.slug}-${report.version}-report`} />}
+      {report && (
+        <Report
+          stale={stale}
+          report={report.result}
+          prefixes={{ ...dataPrefixes(report.text), ...prefixes }}
+          onTurtle={async () => (await checkHere(report, true)).turtle ?? ''}
+          name={`${ontology.slug}-${report.version}-report`}
+          located={turtleReport ? { findings: checks.findings, terms: checks.termFindings, onReveal: stale ? undefined : reveal } : undefined}
+        />
+      )}
 
       <CollapsibleCard title="Validate from your own code" subtitle="The same check is an HTTP POST to the ontology’s address" icon={Terminal} id="validate-api">
         <ApiHelp iri={iri} />
@@ -429,8 +496,12 @@ function CheckStatus({ checking, done, ms }: { checking: boolean; done: boolean;
   );
 }
 
-function Report({ report, prefixes, onTurtle, name, stale }: { report: DataValidation; prefixes: Record<string, string>; onTurtle: () => Promise<string>; name: string; stale: boolean }) {
+/** Turtle's problems, as sentences with where each one is in the data. */
+type Located = { findings: Finding[]; terms: Finding[]; onReveal?: (from: number, to: number) => void };
+
+function Report({ report, prefixes, onTurtle, name, stale, located }: { report: DataValidation; prefixes: Record<string, string>; onTurtle: () => Promise<string>; name: string; stale: boolean; located?: Located }) {
   const [saving, setSaving] = useState(false);
+  const shapesPage = usePage(located?.findings ?? []);
   const [saveError, setSaveError] = useState<unknown>();
   const byFocus = useMemo(() => {
     const groups = new Map<string, DataValidation['results']>();
@@ -506,18 +577,44 @@ function Report({ report, prefixes, onTurtle, name, stale }: { report: DataValid
             <h3 id="terms-heading" className="text-sm font-semibold">
               Terms
             </h3>
-            <ul className="space-y-1 text-sm" data-testid="validation-terms">
-              {report.terms.map((t, i) => (
-                <li key={i} className="flex items-start gap-2 rounded-md border border-line px-3 py-2">
-                  <Badge tone={t.severity === 'error' ? 'danger' : 'warn'}>{t.severity === 'error' ? 'Error' : 'Warning'}</Badge>
-                  <span>{t.message}</span>
-                </li>
-              ))}
-            </ul>
+            {located ? (
+              <ul className="space-y-1" data-testid="validation-terms">
+                {located.terms.map((t, i) => (
+                  <li key={i}>
+                    <ProblemItem finding={t} onReveal={located.onReveal} />
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <ul className="space-y-1 text-sm" data-testid="validation-terms">
+                {report.terms.map((t, i) => (
+                  <li key={i} className="flex items-start gap-2 rounded-md border border-line px-3 py-2">
+                    <Badge tone={t.severity === 'error' ? 'danger' : 'warn'}>{t.severity === 'error' ? 'Error' : 'Warning'}</Badge>
+                    <span>{t.message}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </section>
         )}
 
-        {byFocus.length > 0 && (
+        {located && located.findings.length > 0 && (
+          <section aria-labelledby="shacl-heading" className="space-y-2">
+            <h3 id="shacl-heading" className="text-sm font-semibold">
+              Shapes
+            </h3>
+            <ol ref={shapesPage.listRef} tabIndex={-1} className="space-y-1 outline-none" aria-label={listLabel('Problems found', shapesPage)} start={shapesPage.start + 1} data-testid="validation-results">
+              {shapesPage.items.map((f, i) => (
+                <li key={shapesPage.start + i}>
+                  <ProblemItem finding={f} onReveal={located.onReveal} />
+                </li>
+              ))}
+            </ol>
+            <Pager label="Pages of problems found" pager={shapesPage} />
+          </section>
+        )}
+
+        {!located && byFocus.length > 0 && (
           <section aria-labelledby="shacl-heading" className="space-y-2">
             <h3 id="shacl-heading" className="text-sm font-semibold">
               Shapes

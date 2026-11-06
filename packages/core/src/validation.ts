@@ -791,6 +791,39 @@ function termIndexOf(graph: OntologyGraph) {
 
 const WELL_KNOWN = [NS.rdf, NS.rdfs, NS.owl, NS.xsd, NS.skos, NS.dcterms, NS.schema, NS.foaf, NS.prov];
 
+/** Edit distance (case-insensitive), giving up once it passes `limit`. */
+function editDistance(a: string, b: string, limit: number): number {
+  if (Math.abs(a.length - b.length) > limit) return limit + 1;
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  let prev = Array.from({ length: y.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= x.length; i++) {
+    const row = [i];
+    let best = i;
+    for (let j = 1; j <= y.length; j++) {
+      row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1));
+      best = Math.min(best, row[j]);
+    }
+    if (best > limit) return limit + 1;
+    prev = row;
+  }
+  return prev[y.length];
+}
+
+/** Terms in the namespace whose names are spelt closest to `local` (a quarter of its letters, at least 2, may differ). */
+function closestNames(local: string, all: Iterable<TermView>, namespace: string): TermView[] {
+  const limit = Math.max(2, Math.floor(local.length / 4));
+  const scored: { t: TermView; d: number }[] = [];
+  const seen = new Set<string>();
+  for (const t of all) {
+    if (!t.iri.startsWith(namespace) || seen.has(t.iri)) continue;
+    seen.add(t.iri);
+    const d = editDistance(local, t.iri.slice(namespace.length), limit);
+    if (d <= limit) scored.push({ t, d });
+  }
+  return scored.sort((p, q) => p.d - q.d).slice(0, 3).map((x) => x.t);
+}
+
 /**
  * Checks the terms data uses against the ontology: properties and classes in
  * its namespace that it doesn't define (with suggestions), deprecated terms,
@@ -803,7 +836,10 @@ export function checkTerms(graph: OntologyGraph, data: Quad[], prefixes: Record<
   const check = (iri: string, what: string) => {
     if (known.has(iri) || WELL_KNOWN.some((ns) => iri.startsWith(ns))) return;
     if (graph.namespace && iri.startsWith(graph.namespace)) {
-      const t = searchTerms(terms(), iri.slice(graph.namespace.length), 10).filter((x) => x.iri.startsWith(graph.namespace)).slice(0, 3);
+      const local = iri.slice(graph.namespace.length);
+      const found = searchTerms(terms(), local, 10).filter((x) => x.iri.startsWith(graph.namespace)).slice(0, 3);
+      // A typo that isn't a prefix or subsequence of a name ("titel" for "title"): the closest names by spelling.
+      const t = found.length ? found : closestNames(local, terms(), graph.namespace);
       issues.push({ severity: 'error', term: iri, message: `${c(iri)} is used as a ${what} but is not defined in the ontology.${t.length ? ` Did you mean ${t.map((x) => c(x.iri)).join(' or ')}?` : ''}` });
     }
   };

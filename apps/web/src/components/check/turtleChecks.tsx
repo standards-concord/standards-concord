@@ -1,13 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router';
-import { CircleAlert, CircleX, Info, ShieldCheck, TriangleAlert, WandSparkles } from 'lucide-react';
-import type { SparqStore } from '@sparq-org/sparq';
-import type { Completion } from '@codemirror/autocomplete';
-import { Badge, Button, Card, CardHeader, InlineError, cx } from '../ui';
-import { CodeEditor, type CodeEditorHandle, type EditorDiagnostic } from '../code/CodeEditor';
+import { CircleX, Info, TriangleAlert } from 'lucide-react';
+import { Button, cx } from '../ui';
+import type { EditorDiagnostic } from '../code/CodeEditor';
 import { highlightSegments } from '../code/highlight';
-import { formatTurtle, parseTurtle, termKey } from '../../lib/turtleDoc';
-import { ShapesIndex, describeFindings, displayPrefixes, lineFinder, parseSyntaxError, unknownTerms, type Finding, type Part, type RawFinding, type Severity } from '../../lib/shaclFindings';
+import { formatTurtle, parseTurtle, termKey, type Span } from '../../lib/turtleDoc';
+import { ShapesIndex, describeFindings, displayPrefixes, lineFinder, parseSyntaxError, type Finding, type Part, type RawFinding, type Severity } from '../../lib/shaclFindings';
 
 /** How long after typing stops the Turtle is read again for underlines. */
 const ANALYSE_DELAY = 250;
@@ -21,7 +18,7 @@ const PAGE_SIZE = 50;
  * The page of a list to show. A list of a different length (an edit, a new
  * check) starts again at page 1, so an old page never comes back.
  */
-function usePage<T>(items: T[]) {
+export function usePage<T>(items: T[]) {
   const [state, setState] = useState({ page: 0, total: items.length });
   // Reset during render (React's pattern for state derived from props), so no stale page is ever drawn.
   if (state.total !== items.length) setState({ page: 0, total: items.length });
@@ -37,13 +34,13 @@ function usePage<T>(items: T[]) {
   return { start: current * PAGE_SIZE, items: items.slice(current * PAGE_SIZE, (current + 1) * PAGE_SIZE), page: current, pages, goTo, reset: () => setState({ page: 0, total: items.length }), total: items.length, listRef };
 }
 
-type Paging = ReturnType<typeof usePage>;
+export type Paging = ReturnType<typeof usePage>;
 
 /** "51–100 of 600", which a list's label carries too, so it's read out when focus moves to the new page. */
 const rangeText = ({ start, total }: Paging) => `${(start + 1).toLocaleString()}–${Math.min(start + PAGE_SIZE, total).toLocaleString()} of ${total.toLocaleString()}`;
-const listLabel = (name: string, pager: Paging) => (pager.pages > 1 ? `${name}, ${rangeText(pager)}` : name);
+export const listLabel = (name: string, pager: Paging) => (pager.pages > 1 ? `${name}, ${rangeText(pager)}` : name);
 
-function Pager({ label, pager }: { label: string; pager: Paging }) {
+export function Pager({ label, pager }: { label: string; pager: Paging }) {
   if (pager.pages < 2) return null;
   const { page, pages, goTo } = pager;
   return (
@@ -92,7 +89,7 @@ const SEVERITY: Record<Severity, { icon: typeof CircleX; className: string; labe
 };
 
 /** One problem. Clicking it (or Enter on it) selects the place in the data it's about. */
-function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' | 'focus' | 'path' | 'parts' | 'hint' | 'at' | 'unlocated'>; onReveal?: (from: number, to: number) => void }) {
+export function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' | 'focus' | 'path' | 'parts' | 'hint' | 'at' | 'unlocated'>; onReveal?: (from: number, to: number) => void }) {
   const sev = SEVERITY[finding.severity];
   // The record and property, unless the sentence already names them.
   const named = new Set(finding.parts.flatMap((p) => (typeof p !== 'string' && 'code' in p ? [p.code] : [])));
@@ -135,43 +132,32 @@ function ProblemItem({ finding, onReveal }: { finding: Pick<Finding, 'severity' 
   );
 }
 
-/** The last check: kept by the page, so it survives switching to the query workspace and back. */
-export interface CheckResult {
-  report: { conforms: boolean; results: RawFinding[] } | null;
-  checkedData?: string;
-  error?: unknown;
-}
-
-export interface CheckDataProps {
-  result: CheckResult;
-  onResult: (r: CheckResult) => void;
+export interface TurtleChecksInput {
+  /** The text in the editor now. */
   data: string;
+  /** Called when Format rewrites the text. */
   onDataChange: (data: string) => void;
-  completions: Completion[];
-  /** The ontology's Turtle: checked together with the data, so sh:class sees subclasses. */
+  /** The SHACL report for `checkedData`, as sparq words it, if there is one. */
+  report: { conforms: boolean; results: RawFinding[] } | null;
+  /** The terms check for `checkedData`: each issue about a term is underlined wherever the data uses it. */
+  terms?: { severity: 'error' | 'warning'; message: string; term?: string }[];
+  checkedData?: string;
+  /** The ontology's Turtle: records it also describes can't be pinned to the data alone. */
   ontologyTurtle?: string;
   shapes?: string;
-  /** The ontology's loaded sparq store (validation runs through it). */
-  store: () => SparqStore | null;
-  ready: boolean;
   /** Prefixes the ontology declares; the data can use them without declaring them again. */
   ontologyPrefixes: Record<string, string>;
-  namespace: string;
 }
 
 /**
- * "Check your data": an editor for Turtle instance data and a SHACL check
- * against shapes generated from the ontology. Problems read as sentences with
- * the data's own prefixes, are underlined in the editor (hover for the
- * sentence), and clicking one selects the place it's about. Syntax errors and
- * misspelt ontology terms are underlined as you type.
+ * The Turtle editor's help, for Validate data: a syntax error found as you type (sparq is the
+ * judge), the check's problems as sentences in the data's own prefixes with where each one is,
+ * the underlines for all of these, a short summary for screen readers, and Format (tidy the
+ * layout, keeping prefixes and comments).
  */
-export function CheckData({ result, onResult, data, onDataChange, completions, ontologyTurtle, shapes, store, ready, ontologyPrefixes, namespace }: CheckDataProps) {
-  const editor = useRef<CodeEditorHandle>(null);
-  const { report, checkedData, error: checkError } = result;
+export function useTurtleChecks({ data, onDataChange, report, terms, checkedData, ontologyTurtle, shapes, ontologyPrefixes }: TurtleChecksInput) {
   const [formatNote, setFormatNote] = useState<string>();
   const [formatting, setFormatting] = useState(false);
-  const reportStale = !!report && checkedData !== data;
 
   // Everything below reads a settled copy of the text, a moment after typing stops, so big files stay quick to type in.
   const [settled, setSettled] = useState(data);
@@ -180,11 +166,14 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
     const t = setTimeout(() => setSettled(data), ANALYSE_DELAY);
     return () => clearTimeout(t);
   }, [data, settled]);
+  // A new report is for the text as it is now: catch up at once, so its underlines line up.
+  useEffect(() => {
+    if (checkedData !== undefined && checkedData === data) setSettled(data);
+  }, [checkedData, data]);
   const current = settled === data;
 
   // The data is read after the ontology, so the ontology's prefixes are in scope.
   const doc = useMemo(() => parseTurtle(settled, { prefixes: ontologyPrefixes }), [settled, ontologyPrefixes]);
-  const prefixes = useMemo(() => displayPrefixes(doc, ontologyPrefixes), [doc, ontologyPrefixes]);
 
   // Syntax: sparq is the judge, reading the ontology's prefixes first.
   const header = useMemo(
@@ -221,46 +210,49 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
 
   // Findings belong to the data that was checked. Once it changes they're shown faded and no longer underlined or jumped to.
   const shapesIndex = useMemo(() => new ShapesIndex(shapes), [shapes]);
+  const checkedDoc = useMemo(() => (checkedData === undefined ? undefined : checkedData === settled ? doc : parseTurtle(checkedData, { prefixes: ontologyPrefixes })), [checkedData, settled, doc, ontologyPrefixes]);
   const findings = useMemo(() => {
-    if (!report || checkedData === undefined) return [];
-    const checkedDoc = checkedData === settled ? doc : parseTurtle(checkedData, { prefixes: ontologyPrefixes });
+    if (!report || checkedData === undefined || !checkedDoc) return [];
     return describeFindings(report.results, { doc: checkedDoc, text: checkedData, prefixes: displayPrefixes(checkedDoc, ontologyPrefixes), shapes: shapesIndex, external: ontologySubjects });
-  }, [report, checkedData, settled, doc, ontologyPrefixes, shapesIndex, ontologySubjects]);
+  }, [report, checkedData, checkedDoc, ontologyPrefixes, shapesIndex, ontologySubjects]);
 
-  // Every IRI the ontology mentions counts as defined (terms, datatypes, the ontology itself).
-  // If the ontology can't be read here, don't guess: no typo warnings.
-  const knownTerms = useMemo(() => (!ontologyDoc || ontologyDoc.error ? undefined : new Set(ontologyDoc.iris.map((p) => p.term.value))), [ontologyDoc]);
-  const termWarnings = useMemo(() => (knownTerms ? unknownTerms(doc, namespace, knownTerms, prefixes) : []), [doc, namespace, knownTerms, prefixes]);
+  // Term issues (an undefined or deprecated term) point at every place the data uses the term.
+  const termFindings = useMemo<Finding[]>(() => {
+    if (!terms || checkedData === undefined || !checkedDoc) return [];
+    const lineAt = lineFinder(checkedData);
+    const uses = new Map<string, Span[]>();
+    for (const p of checkedDoc.iris) if (p.role !== 'directive') uses.set(p.term.value, [...(uses.get(p.term.value) ?? []), { from: p.from, to: p.to }]);
+    return terms.map((t) => {
+      const ranges = (t.term && uses.get(t.term)) || [];
+      return { severity: t.severity, parts: [t.message], text: t.message, ranges, ...(ranges[0] ? { at: { ...ranges[0], line: lineAt(ranges[0].from) } } : {}) };
+    });
+  }, [terms, checkedData, checkedDoc]);
 
-  /** Live problems: the syntax error and misspelt terms, as list items too. */
+  /** Live problems: the syntax error, as a list item too. */
   const live = useMemo(() => {
     const out: (Pick<Finding, 'severity' | 'parts' | 'at'> & { text: string; to: number })[] = [];
-    const lineAt = lineFinder(settled);
     if (syntaxError) {
+      const lineAt = lineFinder(settled);
       const to = Math.min(settled.length, syntaxError.from + Math.max(1, /^\S*/.exec(settled.slice(syntaxError.from, syntaxError.from + 200))![0].length));
       out.push({ severity: 'error', parts: [`Syntax error: ${syntaxError.message}`], text: `Syntax error: ${syntaxError.message}`, at: { from: syntaxError.from, to, line: lineAt(syntaxError.from) }, to });
     }
-    for (const w of termWarnings) out.push({ severity: 'warning', parts: [w.message], text: w.message, at: { from: w.from, to: w.to, line: lineAt(w.from) }, to: w.to });
     return out;
-  }, [syntaxError, termWarnings, settled]);
-
-  const livePage = usePage(live);
+  }, [syntaxError, settled]);
 
   const diagnostics = useMemo<EditorDiagnostic[]>(() => {
     const out: EditorDiagnostic[] = [];
-    for (const l of live) out.push({ from: l.at!.from, to: l.to, severity: l.severity, message: l.text, source: l.severity === 'error' ? 'Turtle syntax' : 'Ontology terms' });
-    if (checkedData === settled) for (const f of findings) for (const r of f.ranges) out.push({ from: r.from, to: r.to, severity: f.severity, message: f.text, source: 'Check against the ontology' });
+    for (const l of live) out.push({ from: l.at!.from, to: l.to, severity: l.severity, message: l.text, source: 'Turtle syntax' });
+    if (checkedData === settled) {
+      for (const f of termFindings) for (const r of f.ranges) out.push({ from: r.from, to: r.to, severity: f.severity, message: f.text, source: 'Ontology terms' });
+      for (const f of findings) for (const r of f.ranges) out.push({ from: r.from, to: r.to, severity: f.severity, message: f.text, source: 'Shapes' });
+    }
     return out;
-  }, [live, findings, checkedData, settled]);
+  }, [live, findings, termFindings, checkedData, settled]);
 
-  // For screen readers: a short, settled summary of what's underlined, announced when it changes.
+  // For screen readers: a short, settled summary of the syntax check, announced when it changes.
   const announcement = useMemo(() => {
     if (!current || !syntaxChecked) return undefined;
-    if (!live.length) return 'No syntax or term problems in the Turtle.';
-    const errors = live.filter((l) => l.severity === 'error').length;
-    const warnings = live.length - errors;
-    const bits = [errors ? `${errors} syntax error${errors === 1 ? '' : 's'}` : '', warnings ? `${warnings} term warning${warnings === 1 ? '' : 's'}` : ''].filter(Boolean);
-    return `${bits.join(' and ')} in the Turtle, listed below the editor.`;
+    return live.length ? 'A syntax error in the Turtle, shown below the editor.' : 'No syntax errors in the Turtle.';
   }, [current, syntaxChecked, live]);
   const [announced, setAnnounced] = useState<string>();
   useEffect(() => {
@@ -269,23 +261,10 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
     return () => clearTimeout(t);
   }, [announcement]);
 
-  const check = () => {
-    const s = store();
-    if (!s || !shapes) return;
-    reportPage.reset();
-    // The analysis catches up at once, so the new underlines line up with what was checked.
-    setSettled(data);
-    try {
-      // The ontology goes in the data graph too, so sh:class sees subclass relationships.
-      const r = s.validate(`${ontologyTurtle ?? ''}\n${data}`, shapes, 'turtle');
-      onResult({ report: { conforms: r.conforms, results: r.results as RawFinding[] }, checkedData: data });
-    } catch (e) {
-      onResult({ report: null, checkedData: data, error: e });
-    }
-  };
-
   // Format only once sparq has read this exact text without a syntax error.
   const canFormat = current && syntaxChecked && !syntaxError;
+  const latestData = useRef(data);
+  latestData.current = data;
   const format = async () => {
     if (!canFormat || formatting) return;
     const original = data;
@@ -322,115 +301,11 @@ export function CheckData({ result, onResult, data, onDataChange, completions, o
       setFormatting(false);
     }
   };
-  const latestData = useRef(data);
-  latestData.current = data;
   useEffect(() => {
     if (!formatNote) return;
     const t = setTimeout(() => setFormatNote(undefined), 4000);
     return () => clearTimeout(t);
   }, [formatNote]);
 
-  const reveal = (from: number, to: number) => editor.current?.reveal(from, to);
-  const reportPage = usePage(findings);
-  const errors = findings.filter((f) => f.severity === 'error').length;
-
-  return (
-    <Card>
-      <CardHeader
-        title="Check your data"
-        subtitle="Validates Turtle instance data against SHACL shapes generated from the ontology. Problems are underlined in the editor: hover to read one, or click it in the list to jump there."
-        icon={ShieldCheck}
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <Button icon={WandSparkles} onClick={() => void format()} loading={formatting} disabled={!canFormat} title={canFormat ? 'Lay the Turtle out tidily, keeping your prefixes and comments' : syntaxError ? 'Fix the syntax error first' : 'Reading the Turtle…'}>
-              Format
-            </Button>
-            <Button variant="primary" icon={ShieldCheck} onClick={check} disabled={!ready || !shapes}>
-              Check
-            </Button>
-          </div>
-        }
-      />
-      <div className="space-y-3 p-4">
-        <CodeEditor
-          ref={editor}
-          value={data}
-          onChange={onDataChange}
-          language="turtle"
-          completions={completions}
-          ariaLabel="Instance data (Turtle)"
-          minHeight={220}
-          maxHeight={420}
-          testId="data-editor"
-          diagnostics={diagnostics}
-          diagnosticsFor={settled}
-        />
-        <p role="status" aria-live="polite" className="sr-only" data-testid="lint-announcement">
-          {announced}
-        </p>
-        <p className="flex flex-wrap items-center gap-x-3 text-xs text-muted">
-          <span>Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent.</span>
-          {formatNote && (
-            <span role="status" className="text-fg">
-              {formatNote}
-            </span>
-          )}
-        </p>
-        <p className="text-sm text-muted" data-testid="validate-link">
-          To upload a file in any RDF format, check against a release, or get a full report (with the terms check and a SHACL report to download), use{' '}
-          <Link to="../validate" relative="path" className="text-accent hover:underline">
-            Validate data
-          </Link>
-          .
-        </p>
-        {live.length > 0 && (
-          <div className="space-y-1" data-testid="data-lint">
-            <ol ref={livePage.listRef} tabIndex={-1} className="space-y-1 outline-none" aria-label={listLabel('Problems in the Turtle', livePage)} start={livePage.start + 1}>
-              {livePage.items.map((l, i) => (
-                <li key={livePage.start + i}>
-                  <ProblemItem finding={l} onReveal={reveal} />
-                </li>
-              ))}
-            </ol>
-            <Pager label="Pages of problems in the Turtle" pager={livePage} />
-          </div>
-        )}
-        {checkError && !syntaxError ? <InlineError error={checkError} /> : null}
-        {reportStale && (
-          <p role="status" className="flex items-center gap-2 rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" data-testid="report-stale">
-            The data changed since this check.
-            <Button size="sm" icon={ShieldCheck} onClick={check}>
-              Check again
-            </Button>
-          </p>
-        )}
-        {report && (
-          <div className={cx('space-y-2', reportStale && 'opacity-60')} data-testid="shacl-report">
-            <p className="flex flex-wrap items-center gap-2 text-sm">
-              {report.conforms ? (
-                <Badge tone="ok">Conforms</Badge>
-              ) : (
-                <>
-                  <Badge tone="danger" icon={CircleAlert}>
-                    {findings.length} problem{findings.length === 1 ? '' : 's'}
-                  </Badge>
-                  {errors < findings.length && <span className="text-xs text-muted">{errors} must be fixed, the rest are warnings or notes.</span>}
-                </>
-              )}
-            </p>
-            {findings.length > 0 && (
-              <ol ref={reportPage.listRef} tabIndex={-1} className="space-y-1 outline-none" aria-label={listLabel('Problems found', reportPage)} start={reportPage.start + 1}>
-                {reportPage.items.map((f, i) => (
-                  <li key={reportPage.start + i}>
-                    <ProblemItem finding={f} onReveal={reportStale ? undefined : reveal} />
-                  </li>
-                ))}
-              </ol>
-            )}
-            <Pager label="Pages of problems found" pager={reportPage} />
-          </div>
-        )}
-      </div>
-    </Card>
-  );
+  return { settled, live, findings, termFindings, diagnostics, announced, syntaxError, syntaxPending: !current || !syntaxChecked, canFormat, format, formatting, formatNote };
 }

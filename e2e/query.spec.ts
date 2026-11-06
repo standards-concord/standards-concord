@@ -544,15 +544,6 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('result-stale')).toBeVisible();
     await page.getByTestId('result-stale').getByRole('button', { name: 'Run again' }).click();
     await expect(page.getByTestId('result-stale')).toHaveCount(0);
-
-    // The SHACL report goes stale when the data changes.
-    await toggle(page, 'Check data').click();
-    await page.getByRole('button', { name: 'Check', exact: true }).click();
-    await expect(page.getByTestId('shacl-report')).toBeVisible();
-    await page.getByTestId('data-editor').click();
-    await page.keyboard.press('ControlOrMeta+End');
-    await page.keyboard.insertText('\n# edited\n');
-    await expect(page.getByTestId('report-stale')).toBeVisible();
   });
 
   test('a hand-written query keeps its dataset after leaving the page', async ({ page }) => {
@@ -585,9 +576,6 @@ test.describe('Query tab', () => {
     // B's first draft starts from B's own defaults, not A's prefix or A's volunteering sample data.
     await expect(editor).toContainText('sec:');
     await expect(editor).not.toContainText('vol:');
-    await toggle(page, 'Check data').click();
-    await expect(page.getByTestId('data-editor')).not.toContainText('Northvale');
-    await toggle(page, 'Query ontology').click();
     await setEditor(page, 'sparql-editor', 'SELECT ?b WHERE { ?b ?p ?o } # draft B');
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`${a}`));
@@ -600,6 +588,10 @@ test.describe('Query tab', () => {
     expect(stored[0]).toHaveLength(1);
     expect(stored[0][0]).toContain('draft A');
     expect(stored[1][0]).toContain('draft B');
+    // B's sample data (edited on Validate data) is its own too, not A's volunteering records.
+    await page.goto(`/o/${b.id}/validate`);
+    await expect(page.getByTestId('validate-editor')).toContainText('sec:');
+    await expect(page.getByTestId('validate-editor')).not.toContainText('Northvale');
   });
 
   test('switching to an ontology that fails to load shows the error, not endless loading', async ({ page, consoleGuard }) => {
@@ -618,9 +610,9 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('dataset-summary')).toHaveCount(0);
     await page.getByLabel('Run against').selectOption('data');
     await expect(page.getByTestId('dataset-summary')).toContainText(/Runs over the ontology plus \d+ sample records/);
-    await page.getByTestId('dataset-summary').getByRole('button', { name: 'Edit sample data' }).click();
-    await expect(toggle(page, 'Check data')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByTestId('data-editor')).toBeVisible();
+    await page.getByTestId('dataset-summary').getByRole('link', { name: 'Edit sample data' }).click();
+    await expect(page).toHaveURL(/\/validate$/);
+    await expect(page.getByTestId('validate-editor')).toContainText('Northvale Food Bank');
   });
 
   test('the SPARQL editor highlights, autocompletes and runs with Ctrl/⌘-Enter', async ({ page }) => {
@@ -692,29 +684,25 @@ test.describe('Query tab', () => {
     await expect(results(page)).toHaveCount(0);
   });
 
-  test('the sample data is highlighted and checked against SHACL', async ({ page }) => {
-    // One workspace at a time: the data checker is behind "Check data".
+  // Query used to have its own "Check data" workspace beside "Query ontology". Checking moved to
+  // Validate data, which edits the same sample data, so Query has one workspace and no data editor.
+  test('the sample data is edited and checked on Validate data, and queries run over it', async ({ page }) => {
     await expect(page.getByTestId('data-editor')).toHaveCount(0);
-    await toggle(page, 'Check data').click();
-    await expect(page).toHaveURL(/view=check/);
-    await expect(page.getByTestId('query-chat')).toHaveCount(0);
-    const data = page.getByTestId('data-editor');
+    await expect(toggle(page, 'Check data')).toHaveCount(0);
+    await page.getByLabel('Run against').selectOption('data');
+    await page.getByTestId('dataset-summary').getByRole('link', { name: 'Edit sample data' }).click();
+    const data = page.getByTestId('validate-editor');
     await expect(data.locator('.tok-meta', { hasText: '@prefix' }).first()).toBeVisible();
-    await page.getByRole('button', { name: 'Check', exact: true }).click();
-    const report = page.getByTestId('shacl-report');
-    await expect(report).toContainText(/\d+ problems?/);
-    await expect(report).toContainText('saturday-shift');
-
-    // Switching away and back keeps the report.
-    await toggle(page, 'Query ontology').click();
-    await toggle(page, 'Check data').click();
-    await expect(report).toContainText('saturday-shift');
+    // It is checked straight away.
+    await expect(page.getByTestId('validation-verdict')).toContainText(/violation/);
+    await expect(page.getByRole('list', { name: 'Problems found' })).toContainText('ex:saturday-shift');
 
     // Editing the data changes what queries find.
     await data.click();
     await page.keyboard.press('ControlOrMeta+End');
     await page.keyboard.insertText('\nex:extra a vol:VolunteeringOpportunity ; vol:title "Library reading buddy" .\n');
-    await toggle(page, 'Query ontology').click();
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    await page.goBack();
     await askAndRun(page, 'List every volunteering opportunity');
     await expect(results(page)).toContainText('3 rows');
     await expect(results(page)).toContainText('Library reading buddy');

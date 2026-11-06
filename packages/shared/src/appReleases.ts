@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.33.0',
     date: '2026-11-06',
     title: 'Instant term browsing, and data checked in your browser',
+    pr: 92,
     changes: [
       {
         id: 'validate-in-browser',
@@ -65,6 +66,15 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['contributor', 'member', 'agent'],
         to: '{o}/validate',
         ask: 'Does checking as you type feel instant, and is it clear that your data stays on your device?',
+      },
+      {
+        id: 'check-data-merged',
+        type: 'feat',
+        title: 'Check data is now part of Validate data',
+        detail: 'Query no longer has a Check data tab. Validate data starts with the sample records Query runs over, and in Turtle it underlines problems in the editor, lists them with their line (click one to jump there), autocompletes the ontology’s terms and can tidy the layout with Format. Query’s Edit sample data link opens it.',
+        roles: ['contributor', 'member'],
+        to: '{o}/validate',
+        ask: 'Is it clear where to check your data now, and do you miss anything from the old Check data tab?',
       },
       {
         id: 'instant-term-browsing',
@@ -545,7 +555,7 @@ export const APP_RELEASES: AppRelease[] = [
         detail:
           'Problems read as plain sentences using your own prefixes, are underlined in the editor (hover to read), and clicking one jumps to it. Typos and syntax errors are underlined as you type, and Format tidies the Turtle.',
         roles: [],
-        to: '{o}/query?view=check',
+        to: '{o}/validate',
         ask: 'When Check data finds a problem, can you tell what’s wrong and where to fix it?',
       },
     ],

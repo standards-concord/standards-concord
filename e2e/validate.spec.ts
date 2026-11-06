@@ -22,7 +22,7 @@ test.describe('Validate data', () => {
     await signIn(page, { name: 'E2E validator', role: 'editor' });
   });
 
-  test('is under Explore, and the example finds a missing value, a wrong type and a misspelt term', async ({ page }) => {
+  test('is under Explore, and starts with the sample data, checked: a missing value, a wrong type and a misspelt term', async ({ page }) => {
     await page.goto('/o/volunteering/browse');
     await page.getByRole('navigation', { name: 'Explore pages' }).getByRole('link', { name: 'Validate data' }).click();
     await expect(page).toHaveURL(/\/o\/volunteering\/validate$/);
@@ -30,21 +30,23 @@ test.describe('Validate data', () => {
     // There is no Validate button: the data is checked as soon as there is any, and again on each change.
     await expect(page.getByRole('button', { name: 'Validate', exact: true })).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'Try an example' }).click();
+    // The sample data (the records Query runs over; it used to be under Query → Check data) is there, and checked at once.
+    await expect(page.getByTestId('validate-editor')).toContainText('Northvale Food Bank');
     await expect(page.getByLabel('Data format')).toContainText('Detect format (Turtle)');
-
     await expect(report(page)).toBeVisible();
     await expect(page.getByTestId('validation-verdict')).toContainText(/\d+ violations?/);
     await expect(page.getByTestId('validation-verdict')).toContainText('1 term issue');
-    const results = page.getByTestId('validation-results');
-    await expect(results).toContainText('ex:saturday-shift');
-    await expect(results).toContainText('vol:hasRole');
-    await expect(results).toContainText('min count');
-    await expect(results).toContainText('vol:minimumAge');
-    await expect(results).toContainText('value "sixteen"');
-    await expect(page.getByTestId('validation-terms')).toContainText('vol:sumary is used as a property but is not defined in the ontology. Did you mean vol:summary?');
-    await expect(results).toContainText('VolunteeringOpportunityShape');
+    const results = page.getByRole('list', { name: 'Problems found' });
+    await expect(results.getByRole('button', { name: /ex:saturday-shift requires at least 1 vol:hasRole, 0 found/ })).toBeVisible();
+    const age = results.getByRole('button', { name: /Value "sixteen" is of type xsd:string but must be of type xsd:nonNegativeInteger/ });
+    await expect(age).toContainText('Line 17');
+    const typo = page.getByTestId('validation-terms').getByRole('button', { name: /vol:sumary is used as a property but is not defined in the ontology\. Did you mean vol:summary\?/ });
+    await expect(typo).toContainText('Line 18');
+    // Problems are underlined in the editor.
+    await expect(page.getByTestId('validate-editor').locator('.cm-lintRange-error', { hasText: 'vol:sumary' })).toHaveCount(1);
     await expectNoCrash(page);
+    // Reset to the sample is off until the data differs from it.
+    await expect(page.getByRole('button', { name: 'Reset to the sample' })).toBeDisabled();
 
     // Editing the data checks it again in the background; the new report replaces the old one.
     await setEditor(page, '@prefix vol: <https://w3id.org/odi/volunteering#> .\n<https://example.org/r> a vol:Role .\n');
@@ -52,6 +54,13 @@ test.describe('Validate data', () => {
     await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in (<1|\d+) ms$/);
     await expect(page.getByTestId('validation-verdict')).toContainText('Every term is defined');
     await expect(page.getByTestId('validation-subtitle')).toHaveText('1 triple checked against v1.0.0');
+
+    // The edit is kept, as the sample data Query runs over, until it's reset.
+    await page.reload();
+    await expect(page.getByTestId('validate-editor')).toContainText('<https://example.org/r> a vol:Role');
+    await page.getByRole('button', { name: 'Reset to the sample' }).click();
+    await expect(page.getByTestId('validate-editor')).toContainText('Northvale Food Bank');
+    await expect(page.getByTestId('validation-verdict')).toContainText('1 term issue');
   });
 
   test('says when the report lists only the first 1,000 results, and counts them all', async ({ page }) => {
@@ -118,8 +127,8 @@ test.describe('Validate data', () => {
       await held;
       await route.continue();
     });
+    // The sample data is checked as soon as the page opens, and that check waits for the download.
     await page.goto('/o/volunteering/validate');
-    await page.getByRole('button', { name: 'Try an example' }).click();
     await expect(page.getByTestId('validate-status')).toHaveText('Checking…');
     // While that check waits, switch to the draft: it is checked against the draft at once.
     await page.getByLabel('Version to validate against').selectOption('draft');
@@ -139,7 +148,6 @@ test.describe('Validate data', () => {
 
   test('while data is checked again, the old report is faded and can’t be downloaded', async ({ page }) => {
     await page.goto('/o/volunteering/validate');
-    await page.getByRole('button', { name: 'Try an example' }).click();
     await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
     // Hold the worker's next answer by holding its ontology download for the draft.
     let release: () => void = () => {};
@@ -213,24 +221,23 @@ test.describe('Validate data', () => {
     fs.writeFileSync(big, body);
     const status = page.getByTestId('validate-status');
 
-    // While a large file is read, the example's report goes, and nothing is reported until the file is in.
-    await page.getByRole('button', { name: 'Try an example' }).click();
+    // While a large file is read, the sample data's report goes, and nothing is reported until the file is in.
     await expect(page.getByTestId('validation-verdict')).toContainText(/violation/);
     await page.getByTestId('validate-file').setInputFiles(big);
     await expect(report(page)).toHaveCount(0);
     await expect(status).toHaveText('Checking…');
     await page.evaluate(() => (window as unknown as { releaseFileRead: () => void }).releaseFileRead());
     await expect(page.getByTestId('validate-file-summary')).toContainText('held-big.ttl');
-    // The file is checked as soon as it is in: its report, never the example's.
+    // The file is checked as soon as it is in: its report, never the sample's.
     await expect(page.getByTestId('validation-verdict')).toContainText('Conforms to the shapes');
     await expect(page.getByTestId('validation-subtitle')).toContainText(/^[\d,]{6,} triples checked/);
 
-    // Choosing the example while a file is read keeps the example.
+    // Going back to the sample while a file is read keeps the sample.
     const small = info.outputPath('held-small.ttl');
     fs.writeFileSync(small, '<https://example.org/only-in-the-file> a <https://w3id.org/odi/volunteering#Role> .\n');
     await page.getByTestId('validate-file').setInputFiles(small);
     await expect(report(page)).toHaveCount(0);
-    await page.getByRole('button', { name: 'Try an example' }).click();
+    await page.getByRole('button', { name: 'Reset to the sample' }).click();
     await page.evaluate(() => (window as unknown as { releaseFileRead: () => void }).releaseFileRead());
     await expect(page.getByTestId('validate-editor')).toContainText('saturday-shift');
     await expect(page.getByTestId('validation-results')).toContainText('ex:saturday-shift');
@@ -239,16 +246,21 @@ test.describe('Validate data', () => {
 
   test('explains data it cannot read', async ({ page }) => {
     await page.goto('/o/volunteering/validate');
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    // Half-typed Turtle: the syntax error is shown where it is, and the last report stays, faded, rather than vanishing.
     await setEditor(page, '@prefix vol: <https://w3id.org/odi/volunteering#> .\nvol:x vol:y');
-    await expect(page.getByRole('alert').filter({ hasText: 'Could not parse the data as Turtle' })).toBeVisible();
-    await expect(report(page)).toHaveCount(0);
+    await expect(page.getByRole('list', { name: 'Problems in the Turtle' }).getByRole('button', { name: /Syntax error/ })).toContainText('Line 2');
+    await expect(report(page)).toHaveAttribute('aria-busy', 'true');
+    // Other formats say what's wrong as the check's error.
+    await page.getByLabel('Data format').selectOption('jsonld');
+    await expect(page.getByRole('alert')).toBeVisible();
   });
 
-  test('Check data points to the validator for files, releases and full reports', async ({ page }) => {
+  // Query used to have a "Check data" workspace beside Validate data. It's gone: Query links here to edit its sample data.
+  test('Query has no Check data any more, and the old address opens the query workspace', async ({ page }) => {
     await page.goto('/o/volunteering/query?view=check');
-    await page.getByTestId('validate-link').getByRole('link', { name: 'Validate data' }).click();
-    await expect(page).toHaveURL(/\/o\/volunteering\/validate$/);
-    await expect(page.getByLabel('Version to validate against')).toBeVisible();
+    await expect(page.getByTestId('sparql-editor')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Check data', exact: true })).toHaveCount(0);
   });
 
   test('shows how to call the API at the ontology address', async ({ page, baseURL }) => {

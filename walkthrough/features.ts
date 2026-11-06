@@ -322,13 +322,13 @@ export const featureActions: Record<string, Action> = {
 
   /* ----------------------------- check data ----------------------------- */
   async 'f-open-check'(c) {
-    await c.d.goto(o(c, '/query?view=check'));
-    await c.d.page.getByTestId('sparq-ready').waitFor({ state: 'visible', timeout: 30_000 }).catch(() => c.d.warn('The in-browser engine never became ready'));
-    await ringAround(c, 'Check your data');
+    await c.d.goto(o(c, '/validate'));
+    await c.d.page.getByTestId('validate-status').getByText(/^Checked in/).waitFor({ state: 'visible', timeout: 30_000 }).catch(() => c.d.warn('The sample data was never checked'));
+    await ringAround(c, /^Check RDF data against/);
   },
   async 'f-paste-data'(c) {
     await c.d.clearHighlight();
-    const editor = c.d.page.getByTestId('data-editor');
+    const editor = c.d.page.getByTestId('validate-editor');
     if (!(await c.d.click(editor, 'the data editor', { settle: false }))) return;
     await c.d.page.keyboard.press('ControlOrMeta+a');
     await c.d.page.keyboard.insertText(SAMPLE);
@@ -336,14 +336,14 @@ export const featureActions: Record<string, Action> = {
   },
   async 'f-check'(c) {
     await c.d.clearHighlight();
-    if (!(await c.d.click(c.d.page.getByRole('button', { name: 'Check', exact: true }), 'Check'))) return;
+    // Checked as it was typed: no button to press.
     const list = c.d.page.getByRole('list', { name: /Problems found/ });
     await c.d.claimVisible(list.getByRole('button', { name: /"sixteen" is of type xsd:string but must be of type xsd:nonNegativeInteger/ }), 'the problem reads as a sentence');
     await c.d.highlight(list, 'the problems found');
   },
   async 'f-hover'(c) {
     await c.d.clearHighlight();
-    const squiggle = c.d.page.getByTestId('data-editor').locator('.cm-lintRange-error', { hasText: '"sixteen"' });
+    const squiggle = c.d.page.getByTestId('validate-editor').locator('.cm-lintRange-error', { hasText: '"sixteen"' });
     if (!(await c.d.pointAt(squiggle, 'the underlined value'))) return;
     await c.d.claimVisible(c.d.page.locator('.cm-tooltip-lint'), 'hovering shows the problem');
   },
@@ -359,15 +359,12 @@ export const featureActions: Record<string, Action> = {
     await sleep(300);
     await c.d.page.keyboard.insertText('"16"^^xsd:nonNegativeInteger');
     await sleep(600);
-    const again = c.d.page.getByTestId('report-stale').getByRole('button', { name: 'Check again' });
-    const btn = (await again.isVisible().catch(() => false)) ? again : c.d.page.getByRole('button', { name: 'Check', exact: true });
-    if (!(await c.d.click(btn, 'Check again', { settle: false }))) return;
-    const ok = c.d.page.getByTestId('shacl-report').getByText('Conforms', { exact: true });
+    // Checked again as it's typed.
+    const ok = c.d.page.getByTestId('validation-verdict').getByText('Conforms to the shapes', { exact: true });
     if (await c.d.claimVisible(ok, 'the fixed data conforms', 20_000)) await c.d.highlight(ok, 'Conforms');
   },
   async 'f-open-validate'(c) {
     await c.d.clearHighlight();
-    await c.d.goto(o(c, '/validate'));
     await sleep(500);
     await c.d.scroll(500, 1600);
   },

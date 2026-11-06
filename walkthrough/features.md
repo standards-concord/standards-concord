@@ -106,13 +106,13 @@ And the same address serves machines. Ask for Turtle, and Turtle is what you get
 ## Checking data {#check-data}
 
 [do: f-open-check]
-Finally, data. Check data validates your own data against SHACL shapes generated from the standard. It runs in your browser too, so the data never leaves the page.
+Finally, data. Validate data checks your own data against SHACL shapes generated from the standard. It runs in your browser too, so the data never leaves the page.
 
 [do: f-paste-data]
 Here's some data about a food bank shift, with one mistake in it.
 
 [do: f-check]
-Press Check, and each problem reads as a plain sentence, written with your data's own prefixes.
+It's checked as you type, and each problem reads as a plain sentence, written with your data's own prefixes.
 
 [do: f-hover]
 It's underlined in the editor, and hovering shows the same explanation.
@@ -121,10 +121,10 @@ It's underlined in the editor, and hovering shows the same explanation.
 Click the problem to jump straight to it. The minimum age is written as text, but it should be a whole number, and the report even says how to write it.
 
 [do: f-fix]
-Write it that way, check again, and the data conforms.
+Write it that way, and the data conforms.
 
 [do: f-open-validate]
-For files in other formats, or a check against a particular release, Validate data gives a full report to download. And the same check is one API call to the standard's own address.
+The same page takes files in other formats, checks against any release, and gives a full report to download. And the same check is one API call to the standard's own address.
 
 ## Wrapping up {#outro}
 
