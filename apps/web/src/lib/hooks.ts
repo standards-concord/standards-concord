@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { accountToken, onAccountChange, stillCurrent } from './session';
+import { finishLoad, keepChange, keptKey, keptValue, startLoad, supersedeLoads } from './kept';
 
 export interface AsyncState<T> {
   data: T | undefined;
@@ -10,35 +10,12 @@ export interface AsyncState<T> {
 }
 
 /**
- * The last answer for each `keep` key, so a page opened again shows it at once while it loads the
- * current one (stale while revalidate). Kept per account: dropped whenever the account changes, and
- * an answer that arrives after the change is not kept. The oldest go once there are too many.
- */
-const kept = new Map<string, unknown>();
-// The newest request for each key, so a slower, older answer never replaces a newer one.
-const keptRequests = new Map<string, number>();
-const KEEP_MAX = 100;
-onAccountChange(() => kept.clear());
-const keptKey = (keep: string | undefined) => {
-  const account = accountToken().account;
-  return keep && account ? `${account}|${keep}` : undefined;
-};
-function keep(key: string, value: unknown) {
-  kept.delete(key);
-  kept.set(key, value);
-  if (kept.size > KEEP_MAX) kept.delete(kept.keys().next().value!);
-}
-
-/**
  * Run an async loader whenever deps change; keeps previous data while reloading. With `keep`, a key
  * naming what is loaded (with every dep in it), the last answer for that key is shown at once when the
  * page is opened again, and replaced when the new one arrives.
  */
 export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep?: string }): AsyncState<T> {
-  const [data, setDataState] = useState<T | undefined>(() => {
-    const key = keptKey(opts?.keep);
-    return key ? (kept.get(key) as T | undefined) : undefined;
-  });
+  const [data, setDataState] = useState<T | undefined>(() => keptValue<T>(keptKey(opts?.keep))?.value);
   const [error, setError] = useState<unknown>();
   const [loading, setLoading] = useState(true);
   const seq = useRef(0);
@@ -46,21 +23,25 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
   fnRef.current = fn;
   const keepRef = useRef(opts?.keep);
   keepRef.current = opts?.keep;
+  // The key (account included) the data shown was loaded under, so a change made through setData after
+  // the account changed isn't kept for the new account.
+  const loadedKey = useRef(keptKey(opts?.keep));
 
   const run = useCallback(async () => {
     const id = ++seq.current;
     setLoading(true);
     const key = keptKey(keepRef.current);
-    const token = accountToken();
-    const request = key ? (keptRequests.get(key) ?? 0) + 1 : 0;
-    if (key) keptRequests.set(key, request);
-    if (key && kept.has(key)) {
-      setDataState(kept.get(key) as T);
+    const started = startLoad(key);
+    loadedKey.current = key;
+    const shown = keptValue<T>(key);
+    if (shown) {
+      setDataState(shown.value);
       setError(undefined);
     }
+    let answer: { value: T } | undefined;
     try {
       const d = await fnRef.current();
-      if (key && keptRequests.get(key) === request && token.account && stillCurrent(token, token.account)) keep(key, d);
+      answer = { value: d };
       if (id === seq.current) {
         setDataState(d);
         setError(undefined);
@@ -68,6 +49,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
     } catch (e) {
       if (id === seq.current) setError(e);
     } finally {
+      finishLoad(started, answer);
       if (id === seq.current) setLoading(false);
     }
   }, []);
@@ -78,10 +60,18 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
   }, deps);
 
   const setData = useCallback((d: T | ((prev: T | undefined) => T)) => {
+    // With `keep`, a change made here is newer than any load still on its way, so their answers are
+    // dropped, both here and in what is kept. (Without it, loads behave as they always have.)
+    if (keepRef.current) {
+      seq.current++;
+      setLoading(false);
+    }
+    const keep = keepRef.current;
+    const loaded = loadedKey.current;
+    supersedeLoads(keep);
     setDataState((prev) => {
       const next = typeof d === 'function' ? (d as (p: T | undefined) => T)(prev) : d;
-      const key = keptKey(keepRef.current);
-      if (key) keep(key, next);
+      keepChange(keep, loaded, next);
       return next;
     });
   }, []);
