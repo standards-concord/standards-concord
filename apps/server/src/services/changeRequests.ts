@@ -374,7 +374,7 @@ function validationPassed(v: ValidationReport | undefined) {
  * if the edits themselves changed meanwhile, its now-stale results are dropped.
  */
 export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}): Promise<ChangeRequest> {
-  // The draft can keep moving while a check runs: the request is checked again, a few times at most (see triageOnce).
+  // The draft can keep moving while a check runs: the request is checked again, and the last time holding the lock (see triageOnce).
   for (let attempt = 1; ; attempt++) {
     const out = await triageOnce(cr, opts, attempt >= TRIAGE_TRIES);
     if (!out.again) return out.cr;
@@ -419,16 +419,18 @@ async function readDraft(project: OntologyProject): Promise<{ graph: OntologyGra
   }
 }
 
-const DRAFT_KEPT_MOVING =
-  'The working draft kept changing while this request was being checked, so it has not been checked against the latest draft yet. It is checked again after the next merge, or re-check it now.';
-
 /**
  * One check. Results are written only if they describe the draft as it is when they are written. If the draft moved
  * meanwhile, results a newer check stored for the current draft stand; otherwise the request is checked again
- * (`again`), and on the last try the stored results are kept but marked as not yet checked against the latest draft,
- * so governance never acts on results from an older draft.
+ * (`again`). The last try holds the ontology's lock throughout, so the draft (which only changes under that lock:
+ * merges and releases) can't move while it runs; it skips the AI analysis, so the lock is never held for an LLM call.
+ * Merges and edits wait for it (up to the lock's wait time), which only happens when two tries in a row saw the draft move.
  */
-async function triageOnce(cr: ChangeRequest, opts: { analyse?: boolean }, lastTry: boolean): Promise<{ cr: ChangeRequest; again?: boolean }> {
+function triageOnce(cr: ChangeRequest, opts: { analyse?: boolean }, lastTry: boolean): Promise<{ cr: ChangeRequest; again?: boolean }> {
+  return lastTry ? withOntologyLocks(cr.ontologyId, () => checkAndWrite(cr, { ...opts, analyse: false }, true)) : checkAndWrite(cr, opts, false);
+}
+
+async function checkAndWrite(cr: ChangeRequest, opts: { analyse?: boolean }, lastTry: boolean): Promise<{ cr: ChangeRequest; again?: boolean }> {
   // Triage works on stored requests only: one never stored (or since discarded) is never written back.
   if (!(await get<ChangeRequest>('changeRequests', cr.id))) return { cr };
   const project = await getProject(cr.ontologyId);
@@ -437,7 +439,7 @@ async function triageOnce(cr: ChangeRequest, opts: { analyse?: boolean }, lastTr
   const result: Pick<ChangeRequest, 'diff' | 'classification' | 'validation' | 'warnings' | 'kgcl' | 'analysis'> = {};
   let event: TimelineEvent;
   // The draft this check ran against, read together with it, so a check that then fails still says which draft it
-  // failed on. Unknown only if the draft couldn't be read at all; that failure claims nothing about any draft.
+  // failed on. Unknown only if the draft couldn't be read at all.
   let checkedHead: string | undefined;
   try {
     const base = await readDraft(project);
@@ -467,19 +469,15 @@ async function triageOnce(cr: ChangeRequest, opts: { analyse?: boolean }, lastTr
   const out = await locked(cr, async (latest) => {
     if (JSON.stringify(latest.ops) !== opsKey) return latest;
     const now = await ontologyStore.head(project);
-    if (checkedHead !== undefined && checkedHead !== now) {
-      // Results a newer check stored for the draft as it is now stand.
+    if (checkedHead !== now) {
+      // Results a newer check stored for the draft as it is now stand (over a check that couldn't read the draft, too).
       if (latest.triagedHead === now) return latest;
-      if (!lastTry) {
-        again = true;
+      if (checkedHead !== undefined) {
+        // These results describe an older draft: check again. (On the last try the draft can't have moved, as it held
+        // the lock; if it somehow did, what is stored is left as it is rather than replaced with older results.)
+        again = !lastTry;
         return latest;
       }
-      // Out of tries: these results describe an older draft, and so may whatever is stored. Keep what is stored,
-      // but don't let it count as validated until a check against the latest draft has been made.
-      latest.validation = uncheckedValidation('draft-kept-moving', DRAFT_KEPT_MOVING);
-      latest.triagedHead = undefined;
-      latest.timeline.push(ev('validated', DRAFT_KEPT_MOVING));
-      return await save(latest);
     }
     for (const [k, v] of Object.entries(result)) if (v !== undefined) (latest as unknown as Record<string, unknown>)[k] = v;
     latest.triagedHead = checkedHead;

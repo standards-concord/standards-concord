@@ -9,7 +9,9 @@ import { createApp } from '../src/app.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
-import { addReview, changeCR, createChangeRequest, getCR, governanceFor, MAX_EDITS, triage, updateOps } from '../src/services/changeRequests.js';
+import { addReview, changeCR, createChangeRequest, getCR, governanceFor, MAX_EDITS, triage, updateOps, withOntologyLocks } from '../src/services/changeRequests.js';
+import { holdsWorkingDraftLock } from '../src/services/repoLock.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { llm } from '../src/llm/provider.js';
 import { triageBudget } from '../src/services/budget.js';
 import { getUser } from '../src/services/users.js';
@@ -1082,23 +1084,29 @@ describe('saves that race a slow step', () => {
     expect(cr.validation?.lint.some((l) => l.code === 'change-not-applicable')).toBe(true);
   });
 
-  it('a draft that moves during every re-check leaves the request not validated, rather than validated against an old draft', async () => {
+  it('when the draft moves during every re-check, the last one holds the lock, so its results are for the current draft', async () => {
     // Review of #73: the last try used to save its results even though the draft had moved again, so governance
-    // could act on a verdict from an older draft.
+    // could act on a verdict from an older draft. Now the last try holds the lock that every change to the draft takes.
     const { crId } = await proposeFork('Draft keeps moving', 'DraftKeepsMoving');
-    const stored = await getCR(crId);
-    expect(stored.validation?.passed).toBe(true);
+    // Changes to the draft made elsewhere: outside this test's (and the check's) locks, and taking the lock, as merges do.
+    const outside = AsyncLocalStorage.snapshot();
+    let moves = 0;
+    const elsewhere = () => outside(() => withOntologyLocks(vol.id, () => upstream([addClass(`KeepsMoving${++moves}`, `keeps moving ${moves}`)])));
     const original = ontologyStore.workingAt;
-    let reads = 0;
     let inside = false;
-    // Each time a check reads the draft, an unrelated change lands upstream straight after.
+    let lockedHead: string | undefined;
+    let waiting: Promise<unknown> | undefined;
+    // Each time a check reads the draft, a change lands straight after, or (while the check holds the lock) waits for it.
     ontologyStore.workingAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
       const g = await original.apply(this, args);
       if (!inside) {
         inside = true;
         try {
-          reads++;
-          await upstream([addClass(`KeepsMoving${reads}`, `keeps moving ${reads}`)]);
+          if (!holdsWorkingDraftLock(vol)) await elsewhere();
+          else if (!waiting) {
+            lockedHead = g.head;
+            waiting = elsewhere();
+          }
         } finally {
           inside = false;
         }
@@ -1110,20 +1118,47 @@ describe('saves that race a slow step', () => {
     } finally {
       ontologyStore.workingAt = original;
     }
-    // Every check, and every read within one, saw the draft move.
-    expect(reads).toBeGreaterThanOrEqual(3);
+    // The last try held the lock: the change that came then waited for it, and landed after.
+    expect(lockedHead).toBeDefined();
+    await waiting;
+    expect(moves).toBeGreaterThanOrEqual(3);
     const cr = await getCR(crId);
-    expect(cr.validation?.passed).toBe(false);
-    expect(cr.validation?.lint.map((l) => l.code)).toEqual(['draft-kept-moving']);
-    expect(cr.triagedHead).toBeUndefined();
-    // What was stored before is kept, apart from the verdict.
-    expect(cr.classification).toEqual(stored.classification);
-    expect(cr.kgcl).toEqual(stored.kgcl);
-    expect((await governanceFor(cr)).validationOk).toBe(false);
-    // Once the draft holds still, a re-check validates it against the latest draft.
-    const rechecked = await triage(cr);
-    expect(rechecked.validation?.passed).toBe(true);
-    expect(rechecked.triagedHead).toBe(await ontologyStore.head(p()));
+    expect(cr.triagedHead).toBe(lockedHead);
+    expect(await ontologyStore.head(p())).not.toBe(lockedHead);
+    expect(cr.validation?.passed).toBe(true);
+    expect(cr.kgcl!.join('\n')).toContain('DraftKeepsMoving');
+  });
+
+  it('a check that could not read the draft never replaces results a newer check stored', async () => {
+    // Review of #73 (r2): a check whose read failed named no draft, so it skipped the "newer results stand" test and
+    // wrote its failure over a newer check's results.
+    const { crId } = await proposeFork('Read failed', 'ReadFailed');
+    const original = ontologyStore.workingAt;
+    let first = true;
+    let inside = false;
+    // The first read: a whole re-check runs (and is stored), then the read fails.
+    ontologyStore.workingAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
+      if (first && !inside) {
+        first = false;
+        inside = true;
+        try {
+          await triage(await getCR(crId));
+        } finally {
+          inside = false;
+        }
+        throw new Error('The draft could not be read just now');
+      }
+      return original.apply(this, args);
+    };
+    try {
+      await triage(await getCR(crId));
+    } finally {
+      ontologyStore.workingAt = original;
+    }
+    const cr = await getCR(crId);
+    expect(cr.validation?.passed).toBe(true);
+    expect(cr.triagedHead).toBe(await ontologyStore.head(p()));
+    expect(cr.timeline.some((e) => e.message.includes('could not be read'))).toBe(false);
   });
 
   it('a check that fails records the draft it failed on', async () => {
