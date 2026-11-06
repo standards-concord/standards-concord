@@ -6,7 +6,7 @@ Code: `apps/server/src/services/githubApp.ts` (talking to GitHub), `apps/server/
 
 ## Registering the App
 
-Owned by the standards-concord organisation: <https://github.com/organizations/standards-concord/settings/apps/new>.
+Owned by the standards-concord organisation: in its Settings on GitHub, Developer settings → GitHub Apps → **New GitHub App**.
 
 | Setting | Value |
 | --- | --- |
