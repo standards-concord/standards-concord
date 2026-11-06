@@ -1330,6 +1330,27 @@ export interface ConnectedApp {
   lastSeenAt?: string;
   createdAt: string;
   owner?: Pick<User, 'id' | 'name' | 'avatarUrl' | 'simulated'>;
+  /** Set while the app is connected through the Concord GitHub App: no token, and Concord starts its runs. */
+  github?: ConnectedAppGithub;
+}
+
+export interface ConnectedAppGithub {
+  /** The repository the app was installed on, as owner/name (kept up to date if it is renamed). */
+  repo: string;
+  linkedAt: string;
+  /** The installation was suspended on GitHub: Concord can't start runs until it is unsuspended. */
+  suspended?: boolean;
+  /** When Concord last started the app's workflow, and how that went. */
+  lastDispatch?: { at: string; ok: boolean; message?: string };
+  /** The pull request Concord opened to add the workflow file. */
+  workflowPr?: { number: number; url: string };
+}
+
+/** Whether this Concord can connect apps through its GitHub App (GET /api/github-app). */
+export interface GithubAppStatus {
+  enabled: boolean;
+  /** The app's page on GitHub, for people who want to see what it asks for. */
+  url?: string;
 }
 
 export interface AppCheck {
@@ -1729,3 +1750,4 @@ export interface QueryChatResponse {
   /** The offline helper's record of the query it wrote, to send back with the next message. */
   offlineState?: unknown;
 }
+export * from './workflowYaml.js';

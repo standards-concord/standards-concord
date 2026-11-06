@@ -1,13 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router';
-import type { AutopilotSettings, ChangeLevel, ConnectedApp, GovernancePolicy, Role } from '@concord/shared';
-import { AppWindow, CheckCircle2, CircleAlert, ExternalLink, KeyRound, Plus, RefreshCw, Trash2, Workflow } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router';
+import { workflowYaml, type AutopilotSettings, type ChangeLevel, type ConnectedApp, type GithubAppStatus, type GovernancePolicy, type Role } from '@concord/shared';
+import { AppWindow, CheckCircle2, CircleAlert, ExternalLink, GitPullRequest, KeyRound, Play, Plus, RefreshCw, Trash2, Unlink, Workflow, X } from 'lucide-react';
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { LEVEL_LABEL, relativeTime, roleLabel } from '../../lib/format';
 import { Avatar, Badge, Button, Card, CardHeader, CodeBlock, CopyButton, EmptyState, ErrorCard, Field, InlineError, Input, Loading, Select, Toggle } from '../../components/ui';
-import { workflowYaml } from '../../lib/workflowYaml';
 import { useOntology } from './Layout';
 
 const LEVELS: ChangeLevel[] = ['patch', 'minor', 'major'];
@@ -47,7 +46,7 @@ function BaselineBadge({ app }: { app: ConnectedApp }) {
   );
 }
 
-function SetupSteps({ app, token }: { app: ConnectedApp; token?: string }) {
+function TokenSteps({ app, token }: { app: ConnectedApp; token?: string }) {
   const origin = typeof location !== 'undefined' ? location.origin : '';
   const yaml = workflowYaml(origin);
   const repoUrl = app.repo ? `https://github.com/${app.repo}` : undefined;
@@ -101,6 +100,104 @@ function SetupSteps({ app, token }: { app: ConnectedApp; token?: string }) {
   );
 }
 
+/** Connected through the Concord GitHub App: add the workflow (Concord can open the pull request), and Concord starts it. */
+function GithubSteps({ app, onChange }: { app: ConnectedApp; onChange: (a: ConnectedApp) => void }) {
+  const { now } = useSession();
+  const gh = app.github!;
+  const origin = typeof location !== 'undefined' ? location.origin : '';
+  const yaml = workflowYaml(origin, { app: app.id });
+  const [already, setAlready] = useState(false);
+  const pr = useAction(async () => {
+    const out = await api.openWorkflowPr(app.id);
+    setAlready(!!out.alreadyThere);
+    onChange(out.app);
+  });
+  const run = useAction(async () => onChange(await api.runGithubNow(app.id)));
+  const unlink = useAction(async () => {
+    if (!confirm(`Stop connecting ${app.name} through GitHub? Concord stops starting its runs, and runs without the app token can’t sign in. To remove the Concord app’s access to ${gh.repo}, uninstall it on GitHub too.`)) return;
+    onChange(await api.unlinkGithub(app.id));
+  });
+  const last = gh.lastDispatch;
+  return (
+    <ol className="space-y-4 text-sm">
+      <li>
+        <div className="mb-1 font-medium">1. Add the workflow to {gh.repo}</div>
+        <p className="mb-2 text-muted">
+          It has no secret: the run signs in with GitHub’s proof that it runs in {gh.repo}. Change <code className="font-mono">npm ci</code> and <code className="font-mono">npm test</code> to however your app installs and tests itself.
+        </p>
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          {gh.workflowPr ? (
+            <a className="inline-flex items-center gap-1 font-medium text-accent hover:underline" href={gh.workflowPr.url} target="_blank" rel="noreferrer">
+              <GitPullRequest className="size-4" /> Pull request #{gh.workflowPr.number} adds it <ExternalLink className="size-3" />
+            </a>
+          ) : null}
+          <Button size="sm" variant={gh.workflowPr ? 'ghost' : 'primary'} icon={GitPullRequest} loading={pr.pending} disabled={gh.suspended} onClick={() => void pr.run()}>
+            {gh.workflowPr ? 'Update the pull request' : 'Open a pull request that adds it'}
+          </Button>
+        </div>
+        {already && <p className="mb-2 text-ok">{gh.repo} already has this workflow. Nothing to add.</p>}
+        <InlineError error={pr.error} />
+        <CodeBlock code={yaml} language="yaml" ariaLabel="Workflow file" maxHeight={360} />
+      </li>
+      <li>
+        <div className="mb-1 font-medium">2. Concord starts it</div>
+        <p className="text-muted">Whenever a change is proposed or edited, or the working draft moves on, Concord starts the workflow (at most every two minutes). It also starts once when the pull request is merged.</p>
+        {gh.suspended ? (
+          <p className="mt-1 text-warn">The Concord app is suspended on {gh.repo}, so Concord can’t start runs. Unsuspend it on GitHub.</p>
+        ) : last ? (
+          <p className={last.ok ? 'mt-1 text-muted' : 'mt-1 text-warn'} data-testid="last-dispatch">
+            {last.ok ? `Last started ${relativeTime(last.at, now())}.` : `Couldn’t start a run ${relativeTime(last.at, now())}: ${last.message ?? 'GitHub refused'}`}
+          </p>
+        ) : null}
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button size="sm" icon={Play} loading={run.pending} disabled={gh.suspended} onClick={() => void run.run()}>
+            Start a run now
+          </Button>
+          <Button size="sm" variant="ghost" icon={Unlink} loading={unlink.pending} onClick={() => void unlink.run()}>
+            Stop using GitHub
+          </Button>
+        </div>
+        <InlineError error={run.error ?? unlink.error} />
+      </li>
+    </ol>
+  );
+}
+
+/** How to set up the app's CI: through the Concord GitHub App if this Concord has one, with the token route alongside. */
+function SetupSteps({ app, token, githubApp, onChange }: { app: ConnectedApp; token?: string; githubApp?: GithubAppStatus; onChange: (a: ConnectedApp) => void }) {
+  const connect = useAction(async () => {
+    const { url } = await api.startGithubInstall(app.id);
+    location.assign(url);
+  });
+  if (!githubApp?.enabled) return <TokenSteps app={app} token={token} />;
+  if (app.github) return <GithubSteps app={app} onChange={onChange} />;
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg border border-accent/40 bg-accent-soft/40 p-3 text-sm">
+        <p className="mb-2 font-medium">Recommended: connect with GitHub</p>
+        <p className="mb-3 text-muted">
+          Install the Concord app on {app.repo ?? 'your app’s repository'}. There’s no token to store, Concord can open the pull request that adds the workflow, and it starts a run as soon as there is something new to test.{' '}
+          {githubApp.url && (
+            <a className="text-accent hover:underline" href={githubApp.url} target="_blank" rel="noreferrer">
+              What it can access
+            </a>
+          )}
+        </p>
+        <Button size="sm" variant="primary" loading={connect.pending} onClick={() => void connect.run()}>
+          Connect with GitHub
+        </Button>
+        <InlineError error={connect.error} />
+      </div>
+      <details open={!!token} className="text-sm">
+        <summary className="cursor-pointer font-medium">Or use a token and add the workflow yourself</summary>
+        <div className="mt-3">
+          <TokenSteps app={app} token={token} />
+        </div>
+      </details>
+    </div>
+  );
+}
+
 function AutopilotEditor({ app, onSaved, policyOff }: { app: ConnectedApp; onSaved: (a: ConnectedApp) => void; policyOff: boolean }) {
   const { ontology, myRoles } = useOntology();
   const save = useAction(async (autopilot: Partial<AutopilotSettings>) => onSaved(await api.updateApp(app.id, { autopilot })));
@@ -147,9 +244,25 @@ function AutopilotEditor({ app, onSaved, policyOff }: { app: ConnectedApp; onSav
   );
 }
 
-function MyApp({ app, token, onChange, onRemoved, policyOff }: { app: ConnectedApp; token?: string; onChange: (a: ConnectedApp, token?: string) => void; onRemoved: () => void; policyOff: boolean }) {
+function MyApp({
+  app,
+  token,
+  onChange,
+  onRemoved,
+  policyOff,
+  githubApp,
+  justConnected,
+}: {
+  app: ConnectedApp;
+  token?: string;
+  onChange: (a: ConnectedApp, token?: string) => void;
+  onRemoved: () => void;
+  policyOff: boolean;
+  githubApp?: GithubAppStatus;
+  justConnected?: boolean;
+}) {
   const { now } = useSession();
-  const [setup, setSetup] = useState(!!token);
+  const [setup, setSetup] = useState(!!token || !!justConnected);
   const rotate = useAction(async () => {
     if (!confirm('Replace the token? The old one stops working, so update the CONCORD_APP_TOKEN secret afterwards.')) return;
     const a = await api.rotateAppToken(app.id);
@@ -175,7 +288,7 @@ function MyApp({ app, token, onChange, onRemoved, policyOff }: { app: ConnectedA
             ) : (
               'No repository set'
             )}{' '}
-            · {app.lastSeenAt ? `CI last checked in ${relativeTime(app.lastSeenAt, now())}` : 'CI hasn’t checked in yet'}
+            {app.github && '· connected through GitHub '}· {app.lastSeenAt ? `CI last checked in ${relativeTime(app.lastSeenAt, now())}` : 'CI hasn’t checked in yet'}
           </>
         }
         actions={<BaselineBadge app={app} />}
@@ -188,7 +301,7 @@ function MyApp({ app, token, onChange, onRemoved, policyOff }: { app: ConnectedA
           </button>
           {setup && (
             <div className="mt-3">
-              <SetupSteps app={app} token={token} />
+              <SetupSteps app={app} token={token} githubApp={githubApp} onChange={(a) => onChange(a)} />
             </div>
           )}
         </div>
@@ -245,6 +358,17 @@ export function AppsTab() {
   const { session } = useSession();
   const uid = session?.user?.id;
   const state = useAsync(() => api.apps(id), [id]);
+  const githubApp = useAsync(() => api.githubApp(), []);
+  // Back from installing the Concord app on GitHub: say how it went.
+  const [params, setParams] = useSearchParams();
+  const connectedId = params.get('github') === 'connected' ? (params.get('app') ?? undefined) : undefined;
+  const githubError = params.get('github_error');
+  const dismiss = () => setParams((p) => {
+    p.delete('github');
+    p.delete('app');
+    p.delete('github_error');
+    return p;
+  }, { replace: true });
   const [tokens, setTokens] = useState<Record<string, string>>({});
   const policyOff = ontology.governance.automation.appAutopilot === false;
   // Results come in from CI at any time; keep the page current while it's open.
@@ -283,10 +407,21 @@ export function AppsTab() {
         </p>
       </div>
 
+      {(connectedId || githubError) && (
+        <div role="status" className={`flex items-start gap-3 rounded-lg border p-3 text-sm ${githubError ? 'border-warn/40 bg-warn-soft' : 'border-ok/40 bg-ok-soft'}`}>
+          <p className="flex-1">
+            {githubError
+              ? `Couldn’t connect through GitHub: ${githubError}`
+              : `Connected ${state.data.find((a) => a.id === connectedId)?.name ?? 'your app'} through GitHub. Next, add the workflow: Concord can open the pull request for you.`}
+          </p>
+          <Button size="sm" variant="ghost" icon={X} aria-label="Dismiss" onClick={dismiss} />
+        </div>
+      )}
+
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="space-y-6">
           <Card>
-            <CardHeader icon={Plus} title="Connect an app" subtitle="You get a token for its CI and a workflow file to add." />
+            <CardHeader icon={Plus} title="Connect an app" subtitle={githubApp.data?.enabled ? 'Then connect it with GitHub, or use a token and add a workflow file.' : 'You get a token for its CI and a workflow file to add.'} />
             <div className="p-5">
               <ConnectForm
                 ontologyId={id}
@@ -302,12 +437,21 @@ export function AppsTab() {
             <div className="space-y-4">
               <h3 className="text-sm font-semibold">Your apps</h3>
               {mine.map((a) => (
-                <MyApp key={a.id} app={a} token={tokens[a.id]} policyOff={policyOff} onChange={replace} onRemoved={() => state.setData((prev) => (prev ?? []).filter((x) => x.id !== a.id))} />
+                <MyApp
+                  key={a.id}
+                  app={a}
+                  token={tokens[a.id]}
+                  policyOff={policyOff}
+                  githubApp={githubApp.data}
+                  justConnected={a.id === connectedId}
+                  onChange={replace}
+                  onRemoved={() => state.setData((prev) => (prev ?? []).filter((x) => x.id !== a.id))}
+                />
               ))}
             </div>
           ) : (
             <EmptyState icon={AppWindow} title="You haven’t connected an app yet">
-              Connect one above. It takes a token, a repository secret and one workflow file.
+              Connect one above. {githubApp.data?.enabled ? 'Then install the Concord app on its repository and merge the pull request it opens.' : 'It takes a token, a repository secret and one workflow file.'}
             </EmptyState>
           )}
         </div>
@@ -316,7 +460,7 @@ export function AppsTab() {
           <Card className="h-fit">
             <CardHeader icon={Workflow} title="How it works" />
             <ol className="list-decimal space-y-2 py-4 pr-5 pl-9 text-sm text-muted">
-              <li>Your CI runs the Concord GitHub Action on a schedule.</li>
+              <li>Your CI runs the Concord GitHub Action: Concord starts it when there is something new to test (if connected with GitHub), or it runs on a schedule.</li>
               <li>It downloads the working draft and runs your tests. If they fail there, it stops, because the changes can’t be judged.</li>
               <li>For each open change request, it downloads the ontology as it would be after that change and runs your tests again.</li>
               <li>Each result goes to the change request. If the change or the draft moves on, it is tested again.</li>
@@ -344,6 +488,7 @@ export function AppsTab() {
                       <div className="mt-1 flex flex-wrap gap-1">
                         <BaselineBadge app={a} />
                         {a.autopilot.enabled && <Badge tone="accent">Autopilot on</Badge>}
+                        {a.github && <Badge tone="outline">Connected with GitHub</Badge>}
                       </div>
                     </div>
                     {canDisconnect && (

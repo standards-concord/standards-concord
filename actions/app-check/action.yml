@@ -10,8 +10,18 @@ branding:
 
 inputs:
   token:
-    description: The app token from the App checks page in Concord (starts with cna_). Store it as a repository secret.
-    required: true
+    description: >-
+      The app token from the App checks page in Concord (starts with cna_). Store it as a repository secret.
+      Not needed for an app connected through the Concord GitHub App: set app instead.
+    required: false
+    default: ''
+  app:
+    description: >-
+      For an app connected through the Concord GitHub App: the app's id, from the App checks page. The run signs in
+      with GitHub's proof that it runs in the app's repository (the job needs permissions id-token write), so there
+      is no token to store.
+    required: false
+    default: ''
   test-command:
     description: >-
       The command that tests your app, e.g. "npm test". It runs once against the current working draft and once
@@ -75,6 +85,7 @@ runs:
       run: node "$GITHUB_ACTION_PATH/run.mjs"
       env:
         CONCORD_APP_TOKEN: ${{ inputs.token }}
+        CONCORD_APP: ${{ inputs.app }}
         CONCORD_URL: ${{ inputs.concord-url }}
         CONCORD_TEST_COMMAND: ${{ inputs.test-command }}
         CONCORD_ONTOLOGY_PATH: ${{ inputs.ontology-file }}

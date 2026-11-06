@@ -10,6 +10,7 @@ import type {
   ChangeLevel,
   ChangeRequest,
   ConnectedApp,
+  ConnectedAppGithub,
   OntologyProject,
   PendingAppChecks,
   Review,
@@ -38,7 +39,7 @@ import { getUser, logActivity, publicUser } from './users.js';
  * withdrawn and, if they asked for it, autopilot votes no.
  */
 
-interface AppDoc extends ConnectedApp {
+export interface AppDoc extends ConnectedApp {
   tokenHash: string;
   /** Runs started so far (see pending()). */
   attempts?: number;
@@ -70,6 +71,23 @@ interface AppDoc extends ConnectedApp {
   passingSince?: number;
   /** The GitHub repository's id, pinned by the first verified run (a re-created repository has a new one). */
   repoId?: string;
+  /** Connected through the Concord GitHub App (services/appGithub.ts). */
+  github?: GithubLink;
+  /**
+   * Short-lived tokens (their hashes) that runs of an app connected through GitHub got in exchange
+   * for GitHub's proof that they run in its repository. They work like the app token until `until` (ms).
+   */
+  runTokens?: { hash: string; until: number }[];
+}
+
+export interface GithubLink extends ConnectedAppGithub {
+  installationId: string;
+  repoId: string;
+  /** What the last run Concord started was for (the draft and every open change's revision). */
+  fingerprint?: string;
+  /** When Concord last asked GitHub to start a run, and the earliest it tries again after a failure (ms). */
+  dispatchAt?: number;
+  retryAt?: number;
 }
 
 const RUNS_KEPT = 20;
@@ -93,14 +111,17 @@ const newAppToken = () => `cna_${randomBytes(24).toString('base64url')}`;
 const checkId = (appId: string, crId: string) => `${appId}:${crId}`;
 
 async function publicApp(doc: AppDoc): Promise<ConnectedApp> {
-  const { tokenHash: _h, attempts: _a, runs: _r, passingSince: _p, repoId: _i, ...rest } = doc;
+  const { tokenHash: _h, attempts: _a, runs: _r, passingSince: _p, repoId: _i, github, runTokens: _t, ...rest } = doc;
   const baseline = rest.baseline && { ...rest.baseline, current: rest.baseline.revision === (await baselineRevision(await getProject(doc.ontologyId))) };
-  return { ...rest, baseline, owner: publicUser(await getUser(doc.ownerId)) };
+  return { ...rest, baseline, owner: publicUser(await getUser(doc.ownerId)), ...(github && { github: publicGithub(github) }) };
 }
 
+const publicGithub = ({ installationId: _i, repoId: _r, fingerprint: _f, dispatchAt: _d, retryAt: _a, ...rest }: GithubLink): ConnectedAppGithub => rest;
+
 export const listApps = async (ontologyId: string) => Promise.all((await list<AppDoc>('apps', ontologyId)).map(publicApp));
-const getAppDoc = (id: string) => mustGet<AppDoc>('apps', id);
-const saveApp = (doc: AppDoc) => put('apps', doc, doc.ontologyId);
+export const getAppDoc = (id: string) => mustGet<AppDoc>('apps', id);
+export const saveApp = (doc: AppDoc) => put('apps', doc, doc.ontologyId);
+export const publicAppById = async (id: string) => publicApp(await getAppDoc(id));
 
 function cleanAutopilot(input: unknown, base: AutopilotSettings = DEFAULT_AUTOPILOT): AutopilotSettings {
   const a = (input && typeof input === 'object' ? input : {}) as Partial<AutopilotSettings>;
@@ -147,7 +168,7 @@ export async function createApp(project: OntologyProject, owner: User, input: { 
   return { ...(await publicApp(await getAppDoc(doc.id))), token };
 }
 
-async function ownApp(id: string, actor: User): Promise<AppDoc> {
+export async function ownApp(id: string, actor: User): Promise<AppDoc> {
   const doc = await getAppDoc(id);
   if (doc.ownerId !== actor.id && !actor.isPlatformAdmin) throw new HttpError(403, 'Only the person who connected this app can change it');
   return doc;
@@ -206,12 +227,20 @@ export async function deleteApp(id: string, actor: User) {
   await reconcile(doc.ontologyId, [doc.ownerId]);
 }
 
-/** The app a CI request is for, from its `Authorization: Bearer cna_…` header. */
-export async function appForToken(authorization: string | undefined): Promise<AppDoc> {
-  const token = authorization?.match(/^Bearer\s+(cna_\S+)$/i)?.[1];
+/** The hash of the app token (cna_…) or run token (cnr_…) in an `Authorization: Bearer` header. */
+export function bearerHash(authorization: string | undefined): string {
+  const token = authorization?.match(/^Bearer\s+(cn[ar]_\S+)$/i)?.[1];
   if (!token) throw new HttpError(401, 'Send the app token as Authorization: Bearer cna_…');
-  const h = hash(token);
-  const doc = (await list<AppDoc>('apps')).find((a) => a.tokenHash === h);
+  return hash(token);
+}
+
+/** Is `h` the app's token, or a run token of its that hasn't run out? */
+const tokenFits = (app: AppDoc, h: string) => app.tokenHash === h || !!app.runTokens?.some((t) => t.hash === h && t.until > Date.now());
+
+/** The app a CI request is for, from its `Authorization: Bearer cna_…` (or run token `cnr_…`) header. */
+export async function appForToken(authorization: string | undefined): Promise<AppDoc> {
+  const h = bearerHash(authorization);
+  const doc = (await list<AppDoc>('apps')).find((a) => tokenFits(a, h));
   if (!doc) throw new HttpError(401, 'Unknown or replaced app token');
   await stillConnected(doc);
   await touchSeen(doc);
@@ -239,14 +268,14 @@ export async function touchSeen(doc: AppDoc) {
 async function currentApp(appId: string, by: ReportedBy): Promise<AppDoc> {
   const app = await get<AppDoc>('apps', appId);
   if (!app) throw new HttpError(401, 'This app was disconnected');
-  if (by.tokenHash !== undefined && app.tokenHash !== by.tokenHash) throw new HttpError(401, 'This app token was replaced');
+  if (by.tokenHash !== undefined && !tokenFits(app, by.tokenHash)) throw new HttpError(401, 'This app token was replaced');
   if (by.ownerId !== undefined && app.ownerId !== by.ownerId) throw new HttpError(403, 'Only the person who connected this app can report for it without its token');
   await stillConnected(app);
   return app;
 }
 
 /** An app works only while the person who connected it is still a member of the ontology. */
-async function stillConnected(doc: AppDoc) {
+export async function stillConnected(doc: AppDoc) {
   if (!(await rolesFor(doc.ontologyId, doc.ownerId)).length) throw new HttpError(401, 'This app’s owner is no longer a member of the ontology, so the app is disconnected');
 }
 
@@ -736,7 +765,35 @@ export async function reportAs(appId: string, input: ReportInput) {
 }
 
 /** Who a token-authenticated report comes from: the app, as long as that token is still its token. */
-export const byToken = (app: AppDoc): ReportedBy => ({ tokenHash: app.tokenHash });
+export const byToken = (authorization: string | undefined): ReportedBy => ({ tokenHash: bearerHash(authorization) });
+
+/** How long a run token from GitHub's proof works: GitHub-hosted jobs stop after six hours. */
+const RUN_TOKEN_MS = RUN_KEY_HOURS * 60 * 60 * 1000;
+
+/**
+ * A run of an app connected through the GitHub App signs in with GitHub's proof that it runs in
+ * the app's repository (pinned by its numeric id when the App was installed), and gets a run
+ * token that works like the app token for the rest of the run. The proof is used up here; the
+ * run asks GitHub for a fresh one to report its working-draft result, as runs with a token do.
+ */
+export async function exchangeRunProof(appId: unknown, oidc: unknown): Promise<{ token: string; expiresAt: string }> {
+  if (typeof appId !== 'string' || !appId) throw new HttpError(400, 'Send app: the app’s id, from the workflow file');
+  const before = await get<AppDoc>('apps', appId);
+  if (!before?.github) throw new HttpError(401, 'This app isn’t connected through GitHub; use its app token');
+  const proof = await verifyGithubRun(oidc, runAudience(appId));
+  return transaction(async () => {
+    const app = await get<AppDoc>('apps', appId);
+    if (!app?.github) throw new HttpError(401, 'This app isn’t connected through GitHub any more; use its app token');
+    if (proof.repositoryId !== app.github.repoId) throw new HttpError(403, `This run is in ${proof.repository}, not the repository this app was connected through (${app.github.repo})`);
+    await stillConnected(app);
+    await consumeRunProof(proof, false);
+    const token = `cnr_${randomBytes(24).toString('base64url')}`;
+    const until = Date.now() + RUN_TOKEN_MS;
+    app.runTokens = [...(app.runTokens ?? []).filter((t) => t.until > Date.now()), { hash: hash(token), until }].slice(-10);
+    await saveApp(app);
+    return { token, expiresAt: new Date(until).toISOString() };
+  });
+}
 
 /** Start a run as an app, without its token (the demo's simulated CI). */
 export const startRunAs = async (appId: string) => (await pending(await getAppDoc(appId), true)).attempt;

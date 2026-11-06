@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { generateKeyPairSync } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
 
@@ -25,6 +26,14 @@ const root = path.resolve(import.meta.dirname, '..');
 const botCalendar = (process.env.E2E_BOT_ICS ??= path.join(dataDir, 'bot-calendar.ics'));
 fs.mkdirSync(path.dirname(botCalendar), { recursive: true });
 fs.writeFileSync(botCalendar, 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Concord e2e//EN\r\nEND:VCALENDAR\r\n');
+/**
+ * The Concord GitHub App, against the stand-in: a key pair made for this run (the server signs
+ * with the private key, the stand-in checks with the public one), and fixed test-only secrets.
+ * app-checks-github.spec.ts signs webhook deliveries with the same secret.
+ */
+export const GITHUB_APP_WEBHOOK_SECRET = 'e2e-only-github-app-webhook-secret';
+const githubAppKeys = generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+const githubApp = { id: '424242', clientId: 'Iv1.e2e-concord', clientSecret: 'e2e-only-github-app-client-secret' };
 const live = process.env.LIVE_URL ?? 'https://standards-concord.vercel.app';
 const runningLive = process.argv.some((a) => a === '--project=live' || a === 'live');
 
@@ -71,7 +80,14 @@ export default defineConfig({
           cwd: root,
           url: `http://localhost:${GITHUB_STUB_PORT}/healthz`,
           reuseExistingServer: !process.env.CI,
-          env: { PORT: String(GITHUB_STUB_PORT) },
+          env: {
+            PORT: String(GITHUB_STUB_PORT),
+            GITHUB_APP_ID: githubApp.id,
+            GITHUB_APP_PUBLIC_KEY: githubAppKeys.publicKey,
+            GITHUB_APP_CLIENT_ID: githubApp.clientId,
+            GITHUB_APP_CLIENT_SECRET: githubApp.clientSecret,
+            CALLBACK_URL: `http://localhost:${WEB_PORT}/api/github-app/setup`,
+          },
           stdout: 'ignore',
           stderr: 'pipe',
         },
@@ -107,6 +123,16 @@ export default defineConfig({
             FEEDBACK_GITHUB_TOKEN: 'e2e-feedback-token',
             FEEDBACK_GITHUB_API: `http://localhost:${GITHUB_STUB_PORT}`,
             FEEDBACK_GITHUB_REPO: 'standards-concord/standards-concord',
+            // The Concord GitHub App and GitHub Actions' run tokens, both from the stand-in.
+            GITHUB_APP_ID: githubApp.id,
+            GITHUB_APP_SLUG: 'concord-e2e',
+            GITHUB_APP_PRIVATE_KEY: githubAppKeys.privateKey,
+            GITHUB_APP_WEBHOOK_SECRET,
+            GITHUB_APP_CLIENT_ID: githubApp.clientId,
+            GITHUB_APP_CLIENT_SECRET: githubApp.clientSecret,
+            GITHUB_APP_API_URL: `http://localhost:${GITHUB_STUB_PORT}`,
+            GITHUB_APP_WEB_URL: `http://localhost:${GITHUB_STUB_PORT}`,
+            GITHUB_OIDC_ISSUER: `http://localhost:${GITHUB_STUB_PORT}`,
             // The welcome page's videos come from this folder, not a GitHub release.
             MEDIA_DIR: path.join(root, 'e2e', 'fixtures', 'media'),
           },

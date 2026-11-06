@@ -1,6 +1,6 @@
 import { test, expect, expectNoCrash, settle, signIn, signInAsPersona, demoOntology, uniq } from './fixtures';
 import type { APIRequestContext } from '@playwright/test';
-import { workflowYaml } from '../apps/web/src/lib/workflowYaml';
+import { workflowYaml } from '../packages/shared/src/workflowYaml';
 
 /**
  * App checks and autopilot: a member connects their app, its CI reports results against
