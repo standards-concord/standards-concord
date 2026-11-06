@@ -9,7 +9,7 @@ import { createApp } from '../src/app.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
-import { addReview, createChangeRequest, getCR, updateOps } from '../src/services/changeRequests.js';
+import { addReview, createChangeRequest, getCR, triage, updateOps } from '../src/services/changeRequests.js';
 import { llm } from '../src/llm/provider.js';
 import { triageBudget } from '../src/services/budget.js';
 import { getUser } from '../src/services/users.js';
@@ -994,6 +994,67 @@ describe('saves that race a slow step', () => {
     const timeline = (await getCR(crId)).timeline.map((e) => e.message).join('\n');
     expect(timeline).toContain('Saved first');
     expect(timeline).toContain('Given on an old copy');
+  });
+
+  it('two overlapping simulation steps record each member reaction once', async () => {
+    // Used to (#72): whether a member had already reacted was checked before the slow LLM call, so a
+    // second step that ran meanwhile recorded the same member's reaction a second time.
+    const { crId } = await proposeFork('Overlapping steps', 'OverlappingSteps');
+    expect((await getCR(crId)).status).toBe('review');
+    const original = llm.json;
+    let nested = false;
+    llm.json = (async (...args: Parameters<typeof original>) => {
+      // Only on this test's own request: an earlier request a nested step merges is refused anyway.
+      if (!nested && args[0].task === 'persona' && JSON.stringify(args[0].messages).includes('OverlappingSteps')) {
+        nested = true;
+        await step(p().id, undefined, 50);
+      }
+      return original(...args);
+    }) as typeof original;
+    try {
+      await step(p().id, undefined, 50);
+    } finally {
+      llm.json = original;
+    }
+    expect(nested).toBe(true);
+    for (const cr of await list<ChangeRequest>('changeRequests', p().id)) {
+      const since = cr.opsUpdatedAt ?? '';
+      for (const kind of ['reviews', 'votes'] as const) {
+        const by = new Map<string, number>();
+        for (const r of await list<{ userId: string; at: string }>(kind, cr.id))
+          if (r.at >= since && r.userId !== cr.authorId) by.set(r.userId, (by.get(r.userId) ?? 0) + 1);
+        expect([...by.values()].filter((n) => n > 1), `${kind} on #${cr.number}`).toEqual([]);
+      }
+    }
+  });
+
+  it('an older re-check never replaces the results of a newer one made against a later draft', async () => {
+    // Used to (#73): a re-check that finished after a newer one put its own results back because the
+    // edits were the same, though it had checked them against an older draft.
+    const { crId } = await proposeFork('Older re-check', 'OlderRecheck');
+    const original = ontologyStore.workingAt;
+    let moved = false;
+    // After the first re-check has read the draft: the draft moves (the class now exists upstream,
+    // so the edit can no longer be applied) and a second re-check runs to completion.
+    ontologyStore.workingAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
+      const g = await original.apply(this, args);
+      if (!moved) {
+        moved = true;
+        await upstream([addClass('OlderRecheck', 'older recheck added upstream')]);
+        await triage(await getCR(crId));
+      }
+      return g;
+    };
+    try {
+      await triage(await getCR(crId));
+    } finally {
+      ontologyStore.workingAt = original;
+    }
+    expect(moved).toBe(true);
+    const cr = await getCR(crId);
+    // The newer check's result stands: against the current draft the edit can't be applied.
+    expect(cr.validation?.passed).toBe(false);
+    expect(cr.validation?.lint.some((l) => l.code === 'change-not-applicable')).toBe(true);
   });
 });
 

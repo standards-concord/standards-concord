@@ -964,6 +964,8 @@ export interface ChangeRequest {
   warnings?: string[];
   /** KGCL-style change lines, for people used to ontology change languages. */
   kgcl?: string[];
+  /** The working-draft commit the stored triage results were checked against. */
+  triagedHead?: string;
   /** Use cases this change addresses (traceability). */
   useCaseIds?: string[];
   /**

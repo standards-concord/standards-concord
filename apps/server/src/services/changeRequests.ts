@@ -337,14 +337,14 @@ export function heuristicProposal(graph: OntologyGraph, text: string): Proposal 
 /* ------------------------------------------------------------------------ */
 
 export async function preview(project: OntologyProject, ops: ChangeOp[], tests: ChangeRequest['tests'], author?: User) {
-  const before = await ontologyStore.working(project);
+  const { graph: before, head } = await ontologyStore.workingAt(project);
   const { graph: after, warnings } = applyChangeOps(before, ops, { author: author?.name, date: clock.iso().slice(0, 10) });
   const diff = diffOntologies(before, after);
   const classification = classifyChange(diff, before, after);
   // The request's own tests are marked as such, so readers can tell them from use cases' questions.
   const cqs = [...await competencyTests(project.id), ...(tests ?? []).map((t) => ({ ...t, source: OWN_TEST }))];
   const validation = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI) });
-  return { before, after, diff, classification, validation, warnings };
+  return { before, after, diff, classification, validation, warnings, head };
 }
 
 function validationPassed(v: ValidationReport | undefined) {
@@ -358,15 +358,31 @@ function validationPassed(v: ValidationReport | undefined) {
  * if the edits themselves changed meanwhile, its now-stale results are dropped.
  */
 export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}): Promise<ChangeRequest> {
+  // The draft can keep moving while a check runs; after a few tries the last check's results are kept, and the next re-check catches up.
+  for (let attempt = 1; ; attempt++) {
+    const out = await triageOnce(cr, opts, attempt >= TRIAGE_TRIES);
+    if (!out.again) return out.cr;
+    cr = out.cr;
+  }
+}
+
+/** How many times triage checks a request again because the draft moved while it was checking. */
+const TRIAGE_TRIES = 3;
+
+async function triageOnce(cr: ChangeRequest, opts: { analyse?: boolean }, lastTry: boolean): Promise<{ cr: ChangeRequest; again?: boolean }> {
   // Triage works on stored requests only: one never stored (or since discarded) is never written back.
-  if (!(await get<ChangeRequest>('changeRequests', cr.id))) return cr;
+  if (!(await get<ChangeRequest>('changeRequests', cr.id))) return { cr };
   const project = await getProject(cr.ontologyId);
   const author = await getUser(cr.authorId);
   const opsKey = JSON.stringify(cr.ops);
   const result: Pick<ChangeRequest, 'diff' | 'classification' | 'validation' | 'warnings' | 'kgcl' | 'analysis'> = {};
   let event: TimelineEvent;
+  // The draft this check ran against. If the check fails before it says, the draft as it was when the check began:
+  // the check ran against that draft or a later one, so at worst the request is checked again needlessly.
+  let checkedHead = await ontologyStore.head(project);
   try {
     const p = await preview(project, cr.ops, cr.tests, author);
+    checkedHead = p.head;
     result.diff = trimDiff(p.diff);
     result.classification = withDeclaredLevel(p.classification, cr.declaredLevel);
     result.validation = p.validation;
@@ -403,12 +419,25 @@ export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}
     };
     event = ev('validated', message);
   }
-  return locked(cr, async (latest) => {
+  let again = false;
+  const out = await locked(cr, async (latest) => {
     if (JSON.stringify(latest.ops) !== opsKey) return latest;
+    const now = await ontologyStore.head(project);
+    if (checkedHead !== now) {
+      // The draft moved while this check ran. Results a newer check stored for the draft as it is now stand;
+      // otherwise these results describe an older draft, so the request is checked again.
+      if (latest.triagedHead === now) return latest;
+      if (!lastTry) {
+        again = true;
+        return latest;
+      }
+    }
     for (const [k, v] of Object.entries(result)) if (v !== undefined) (latest as unknown as Record<string, unknown>)[k] = v;
+    latest.triagedHead = checkedHead;
     latest.timeline.push(event);
     return await save(latest);
   });
+  return { cr: out, again };
 }
 
 function trimDiff(d: ChangeRequest['diff']) {
