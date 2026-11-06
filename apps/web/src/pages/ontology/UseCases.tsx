@@ -6,12 +6,10 @@ import { ClipboardList, FileText, MessageSquarePlus, GitPullRequestDraft } from 
 import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
-import { pct, plural, relativeTime } from '../../lib/format';
+import { relativeTime } from '../../lib/format';
 import { UseCaseStatusBadge, VisibilityBadge } from '../../components/UseCaseSharing';
 import { Badge, Button, Card, Chip, EmptyState, ErrorCard, InlineError, Loading, cx } from '../../components/ui';
 import { useOntology } from './Layout';
-
-const SOURCE_LABEL: Record<string, string> = { chat: 'From an interview', meeting: 'From a meeting', agent: 'From an agent', form: 'From a form' };
 
 export function useStartInterview(ontologyId: string) {
   const nav = useNavigate();
@@ -146,7 +144,6 @@ export function UseCasesTab() {
           {shown.map((uc) => {
             const author = uc.anonymous ? undefined : userById(uc.authorId);
             const isPrivate = uc.visibility === 'private';
-            const cqs = uc.competencyQuestions.length;
             return (
               <Card key={uc.id} className={cx('flex items-start gap-3 p-4', selected.has(uc.id) && 'border-accent')}>
                 {selecting &&
@@ -167,7 +164,8 @@ export function UseCasesTab() {
                   </div>
                   {uc.sections.goal && <p className="mt-1 line-clamp-1 text-sm text-muted">{uc.sections.goal}</p>}
                   <p className="mt-1 text-xs text-subtle">
-                    {SOURCE_LABEL[uc.source] ?? uc.source} · {pct(uc.completeness)} complete · {plural(cqs, 'competency question')} · {plural(uc.terms.length, 'term')} · {uc.anonymous ? 'Anonymous' : (author?.name ?? 'Someone')} · updated {relativeTime(uc.updatedAt, now())}
+                    {/* Who and when. Where it came from, how complete it is and its questions and terms are on its page. */}
+                    {uc.anonymous ? 'Anonymous' : (author?.name ?? 'Someone')} · updated {relativeTime(uc.updatedAt, now())}
                   </p>
                 </div>
                 {uc.status === 'draft' && uc.source === 'chat' && uc.authorId === session?.user?.id && (

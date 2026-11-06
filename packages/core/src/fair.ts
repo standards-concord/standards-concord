@@ -17,6 +17,9 @@ const PERSISTENT_HOSTS = [
   'w3id.org', 'purl.org', 'purl.obolibrary.org', 'doi.org', 'dx.doi.org', 'n2t.net', 'identifiers.org',
   'purl.archive.org', 'data.europa.eu', 'www.w3.org', 'schema.org',
 ];
+/** "1 keyword", "4 keywords": these messages used to say "4 keyword(s)". */
+const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
+
 const KNOWN_LICENSES = /creativecommons\.org|opensource\.org|spdx\.org|opendatacommons\.org|nationalarchives\.gov\.uk\/doc\/open-government-licence/i;
 
 export function fairCheck(graph: OntologyGraph, ctx: FairContext = {}): FairReport {
@@ -44,7 +47,7 @@ export function fairCheck(graph: OntologyGraph, ctx: FairContext = {}): FairRepo
 
   const keywords = [NS.dcat + 'keyword', NS.schema + 'keywords', NS.dcterms + 'subject', NS.dc + 'subject']
     .flatMap((p) => (iri ? objects(s, iri, p) : []));
-  add('F2-keywords', 'F', 'Keywords', keywords.length > 0, keywords.length ? `${keywords.length} keyword(s)` : 'no dcat:keyword / schema:keywords / dcterms:subject',
+  add('F2-keywords', 'F', 'Keywords', keywords.length > 0, keywords.length ? count(keywords.length, 'keyword') : 'no dcat:keyword / schema:keywords / dcterms:subject',
     'FOOPS! OM2; FAIR F2');
 
   const prefixOk = !!m.preferredPrefix && !!m.preferredNamespace;
@@ -72,7 +75,7 @@ export function fairCheck(graph: OntologyGraph, ctx: FairContext = {}): FairRepo
 
   const badImports = m.imports.filter((i) => !/^https?:\/\//.test(i));
   add('I2-imports', 'I', 'Imports use resolvable HTTP(S) IRIs', m.imports.length ? badImports.length === 0 : undefined,
-    m.imports.length ? (badImports.length ? `non-HTTP imports: ${badImports.join(', ')}` : `${m.imports.length} import(s), all HTTP(S) (resolution not checked)`) : 'not applicable: no imports',
+    m.imports.length ? (badImports.length ? `non-HTTP imports: ${badImports.join(', ')}` : `${count(m.imports.length, 'import')}, all HTTP(S) (resolution not checked)`) : 'not applicable: no imports',
     'FOOPS! VOC2; FAIR I2');
 
   const licenseOk = !!m.license;
@@ -81,7 +84,7 @@ export function fairCheck(graph: OntologyGraph, ctx: FairContext = {}): FairRepo
     'FOOPS! OM4.1/OM4.2; FAIR R1.1; OOPS! P41');
 
   add('R1.2-provenance-agents', 'R', 'Creators (and contributors) declared', m.creators.length > 0,
-    m.creators.length ? `${m.creators.length} creator(s), ${m.contributors.length} contributor(s)${m.publisher ? ', publisher ' + m.publisher : ''}` : 'no dcterms:creator',
+    m.creators.length ? `${count(m.creators.length, 'creator')}, ${count(m.contributors.length, 'contributor')}${m.publisher ? ', publisher ' + m.publisher : ''}` : 'no dcterms:creator',
     'FOOPS! OM5.1; FAIR R1.2');
 
   const dates = !!m.created && !!(m.modified || m.issued);

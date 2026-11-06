@@ -72,44 +72,33 @@ export function OverviewTab() {
         <section aria-label="About this ontology">
           <p className="max-w-[68ch] text-lg leading-relaxed">{o.description || <span className="text-muted">No description yet.</span>}</p>
           <p className="mt-3 max-w-[68ch] text-sm leading-relaxed text-muted" data-testid="overview-summary">
+            {/* Just the counts: the version is in the header, and the policy and releases are a click away in the section nav. */}
             {o.stats.classes === undefined || o.stats.properties === undefined ? (
               // The server withholds counts while the working draft is reviewed before publishing.
-              <>The working draft is being reviewed before it is published. </>
+              <>The working draft is being reviewed before it is published.</>
             ) : (
               <>
                 <Link to={`/o/${id}/browse`} className={proseLink}>
-                  {plural(o.stats.classes, 'class', 'classes')} and {plural(o.stats.properties, 'property', 'properties')}
+                  {plural(o.stats.classes, 'class', 'classes')}
+                </Link>
+                {' · '}
+                <Link to={`/o/${id}/browse`} className={proseLink}>
+                  {plural(o.stats.properties, 'property', 'properties')}
                 </Link>
                 {o.stats.useCases !== undefined && (
                   <>
-                    , drawn from{' '}
+                    {' · '}
                     <Link to={`/o/${id}/use-cases`} className={proseLink}>
                       {plural(o.stats.useCases, 'use case')}
                     </Link>
                   </>
                 )}
-                .{' '}
               </>
             )}
-            Version {o.currentVersion}
-            {o.stats.releases > 0 && (
-              <>
-                {' '}
-                after{' '}
-                <Link to={`/o/${id}/releases`} className={proseLink}>
-                  {plural(o.stats.releases, 'release')}
-                </Link>
-              </>
-            )}
-            , run as{' '}
-            <Link to={`/o/${id}/governance`} className={proseLink}>
-              {o.governance.name}
-            </Link>
-            .
           </p>
           <Disclosure className="mt-4 max-w-[68ch] border-t border-line pt-3" tone="muted" title="Ontology details">
             <dl className="grid gap-x-4 gap-y-1.5 text-sm sm:grid-cols-[9rem_1fr]">
-              {/* Only what the sentence above doesn't already say (counts, version and policy are there). */}
+              {/* Only what isn't said already: the counts are in the line above, the version in the header. */}
               <Row term="Ontology IRI">
                 <span className="font-mono text-xs break-all">{o.ontologyIRI}</span>
               </Row>

@@ -21,6 +21,23 @@ import { Badge, Button, Card, InlineError, Select, buttonClasses, cx } from './u
  */
 export function TesterStatus({ className, returnTo = '/alpha', compact }: { className?: string; returnTo?: string; compact?: boolean }) {
   const t = useTester();
+  // A first-time tester needs neither the version picker nor the sign-in prompt, so both fold into one link.
+  if (!t.since)
+    return (
+      <Card className={cx('divide-y divide-line', className)}>
+        <div className={compact ? 'p-4' : 'p-4 sm:p-5'}>
+          <VersionLine />
+        </div>
+        <div className={compact ? 'px-4 py-3' : 'px-4 py-3 sm:px-5'}>
+          <Disclosure title="What’s new since you last tested?">
+            <div className="space-y-4 pt-1">
+              <WhatsChanged showTitle={false} />
+              <SavePrompt returnTo={returnTo} />
+            </div>
+          </Disclosure>
+        </div>
+      </Card>
+    );
   if (compact)
     // Once the walkthrough is under way, keep this out of the way: the changes fold up.
     return (
@@ -30,7 +47,7 @@ export function TesterStatus({ className, returnTo = '/alpha', compact }: { clas
           <SavePrompt returnTo={returnTo} />
         </div>
         <div className="px-4 py-3">
-          <Disclosure title={t.since ? `What’s changed since ${t.since}` : 'Tested Concord before?'} summary={t.since ? `${t.changes.length} change${t.changes.length === 1 ? '' : 's'}` : undefined}>
+          <Disclosure title={`What’s changed since ${t.since}`} summary={`${t.changes.length} change${t.changes.length === 1 ? '' : 's'}`}>
             <WhatsChanged />
           </Disclosure>
         </div>
@@ -71,7 +88,7 @@ export function VersionLine() {
           )}
         </span>
       </p>
-      <Disclosure tone="muted" title={<span className="text-xs">Release notes for every version</span>} summary={`${APP_RELEASES.length} versions`}>
+      <Disclosure tone="muted" title={<span className="text-xs">Release notes for every version</span>}>
         <ol className="max-h-80 space-y-3 overflow-y-auto pr-1 text-sm">
           {APP_RELEASES.map((r) => (
             <li key={r.version}>
@@ -228,7 +245,7 @@ const SOURCE_LABEL = { picked: 'you picked it', pod: 'from your pod', browser: '
  * picker stays open while they try versions, until they press Done, which
  * returns focus to the button that opened it; a status line announces the result.
  */
-export function WhatsChanged() {
+export function WhatsChanged({ showTitle = true }: { showTitle?: boolean } = {}) {
   const t = useTester();
   const demo = useDemoOntology();
   const role = TESTER_ROLES.find((r) => r.key === t.roleKey);
@@ -249,9 +266,11 @@ export function WhatsChanged() {
   return (
     <div className="space-y-3" role="region" aria-label="What’s changed">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="flex items-center gap-2 text-sm font-semibold">
-          <History className="size-4 text-accent" aria-hidden /> {t.since ? `What’s changed since ${t.since}` : 'Tested Concord before?'}
-        </h2>
+        {showTitle && (
+          <h2 className="flex items-center gap-2 text-sm font-semibold">
+            <History className="size-4 text-accent" aria-hidden /> {t.since ? `What’s changed since ${t.since}` : 'Tested Concord before?'}
+          </h2>
+        )}
         {!undecided && (
           <span className="flex flex-wrap items-center gap-x-2 text-xs text-muted">
             {t.since && (

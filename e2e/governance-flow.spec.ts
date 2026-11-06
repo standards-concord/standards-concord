@@ -63,9 +63,11 @@ test('the steward changes a rule, saves the policy, and it sticks', async ({ pag
   await asSteward(page);
   await page.goto(`/o/${ontologyId}/governance`);
   await settle(page);
-  // The summary sits outside the button and describes it.
-  await expect(page.getByRole('button', { name: /Policy template/ })).toHaveAccessibleDescription(/Steward-led/);
+  // "In short" names the policy; the template picker is only shown while editing, with the current one selected.
+  await expect(page.getByRole('main').getByText('Steward-led.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Policy template/ })).toHaveCount(0);
   await page.getByRole('button', { name: 'Edit policy' }).click();
+  await expect(page.getByRole('button', { name: /^Steward-led/, pressed: true })).toBeVisible();
   await page.getByRole('button', { name: /Change request rules/ }).click();
   const levels = page.getByRole('group', { name: 'Level to edit' }).first();
   await levels.getByRole('button', { name: 'Edit minor' }).click();
@@ -87,13 +89,13 @@ test('the steward changes a rule, saves the policy, and it sticks', async ({ pag
   await expect(page.getByText('Saved', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edit policy' })).toBeVisible();
 
-  // After a reload the summary reflects the saved rule, and the template shows it was customised.
+  // After a reload the summary reflects the saved rule, and the policy's name shows it was customised.
   await page.reload();
   await settle(page);
   const minor = page.getByRole('list', { name: 'What each kind of change needs' }).getByRole('listitem').nth(1);
   await expect(minor).toContainText('1 sign-off');
   await expect(minor).not.toContainText('merged automatically');
-  await expect(page.getByRole('button', { name: /Policy template/ })).toHaveAccessibleDescription(/customised/);
+  await expect(page.getByRole('main').getByText(/^Steward-led \(customised\)\.$/)).toBeVisible();
   await expect(page.getByRole('button', { name: /Ownership, ODI and automation/ })).toHaveAccessibleDescription(/4 of 5 automations on/);
 });
 

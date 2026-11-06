@@ -5,6 +5,17 @@ import { APP_RELEASES, APP_VERSION, changesFor, changesSince, type AppChange } f
 const questionAbout = (c: AppChange) => (c.ask ?? `how well does this work for you: ${c.title}`).slice(0, 30);
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+/** Until we know which version a tester last tried, the version picker and the sign-in prompt are folded behind one link. */
+const whatsNew = (page: import('@playwright/test').Page) => page.getByRole('button', { name: 'What’s new since you last tested?' });
+async function openWhatsNew(page: import('@playwright/test').Page) {
+  // Right after a sign-in or sign-out the card can still be settling on who is testing, and a fold opened in that
+  // moment is replaced by a closed one. Open it until what it holds stays visible.
+  await expect(async () => {
+    if ((await whatsNew(page).getAttribute('aria-expanded')) !== 'true') await whatsNew(page).click();
+    await expect(page.getByRole('region', { name: 'What’s changed' })).toBeVisible({ timeout: 1000 });
+  }).toPass();
+}
+
 /**
  * App versions for alpha testers: the alpha page says which version you're
  * testing, encourages sign-in so the version and your feedback go to your pod,
@@ -18,10 +29,14 @@ test('the alpha page says which version you are testing, with release notes', as
   await expect(page.getByText(`Alpha testing · version ${APP_VERSION}`)).toBeVisible();
   await page.getByRole('button', { name: /Release notes for every version/ }).click();
   for (const r of APP_RELEASES) await expect(page.getByText(r.title, { exact: true }).first()).toBeVisible();
-  // Signed out, it asks you to sign in and offers to say which version you tested before.
+  // The number of versions used to sit beside the link; it said nothing a first-time tester needed.
+  await expect(page.getByText(`${APP_RELEASES.length} versions`)).toHaveCount(0);
+  // Signed out, the sign-in prompt and the question of which version you tested before are one link, folded.
+  await expect(page.getByRole('group', { name: 'Your testing record' })).toHaveCount(0);
+  await expect(page.getByLabel('Last version you tested')).toHaveCount(0);
+  await openWhatsNew(page);
   await expect(page.getByRole('group', { name: 'Your testing record' })).toContainText('Sign in so we can remember what you tested');
   const changed = page.getByRole('region', { name: 'What’s changed' });
-  await expect(changed.getByRole('heading', { name: 'Tested Concord before?' })).toBeVisible();
   await expect(changed.getByLabel('Last version you tested')).toBeVisible();
   await expectNoCrash(page);
 });
@@ -30,6 +45,7 @@ test('a signed-out tester picks the version they last tested and gets questions 
   const since = '0.6.0';
   const changes = changesSince(since);
   await page.goto('/alpha');
+  await openWhatsNew(page);
   const changed = page.getByRole('region', { name: 'What’s changed' });
   await changed.getByLabel('Last version you tested').selectOption(since);
   await expect(changed.getByRole('heading', { name: `What’s changed since ${since}` })).toBeVisible();
@@ -63,6 +79,7 @@ test('a signed-out tester picks the version they last tested and gets questions 
 
 test('a returning tester’s versions and feedback are saved to their pod and steer the walkthrough', async ({ page }) => {
   await page.goto('/alpha');
+  await openWhatsNew(page);
   const record = page.getByRole('group', { name: 'Your testing record' });
   await record.getByRole('button', { name: /Keep a tester account in this browser/ }).click();
   await expect(record).toContainText('You’re using a tester account kept in this browser');
@@ -120,6 +137,7 @@ test('a returning tester’s versions and feedback are saved to their pod and st
 
 test('a tester with history can compare with another version and come back, by keyboard', async ({ page }) => {
   await page.goto('/alpha');
+  await openWhatsNew(page);
   await page.getByRole('group', { name: 'Your testing record' }).getByRole('button', { name: /Keep a tester account in this browser/ }).click();
   await expect(page.getByRole('group', { name: 'Your testing record' })).toContainText('tester account kept in this browser');
   expect((await page.request.post('/api/alpha/visit', { data: { version: '0.7.0' } })).ok()).toBeTruthy();
@@ -160,6 +178,7 @@ test('a tester with history can compare with another version and come back, by k
 
 test('a comparison one tester picked doesn’t carry over to the next tester in the same browser', async ({ page }) => {
   await page.goto('/alpha');
+  await openWhatsNew(page);
   const record = page.getByRole('group', { name: 'Your testing record' });
   await record.getByRole('button', { name: /Keep a tester account in this browser/ }).click();
   await expect(record).toContainText('tester account kept in this browser');
@@ -172,10 +191,12 @@ test('a comparison one tester picked doesn’t carry over to the next tester in 
 
   // Sign out and start again as someone else, without reloading the page.
   await signOutInPlace(page);
+  await openWhatsNew(page);
   await page.getByRole('group', { name: 'Your testing record' }).getByRole('button', { name: /Keep a tester account in this browser/ }).click();
   await expect(page.getByRole('group', { name: 'Your testing record' })).toContainText('tester account kept in this browser');
   // The new tester has no history of their own, so they're asked, not shown the last tester's comparison.
-  await expect(changed.getByRole('heading', { name: 'Tested Concord before?' })).toBeVisible();
+  await expect(whatsNew(page)).toBeVisible();
+  await expect(changed.getByLabel('Last version you tested')).toBeVisible();
   await expect(changed.getByRole('heading', { name: 'What’s changed since 0.5.0' })).toHaveCount(0);
   await expectNoCrash(page);
 });
@@ -215,21 +236,24 @@ test('a slow save for the previous tester doesn’t replace the next tester’s 
     done();
   });
   await page.goto('/alpha');
+  await openWhatsNew(page);
   await page.getByRole('group', { name: 'Your testing record' }).getByRole('button', { name: /Keep a tester account in this browser/ }).click();
   await aFetched;
 
   // Tester B takes over the browser before A's save comes back.
   await signOutInPlace(page);
+  await openWhatsNew(page);
   const record = page.getByRole('group', { name: 'Your testing record' });
   await record.getByRole('button', { name: /Keep a tester account in this browser/ }).click();
   await expect(record).toContainText('tester account kept in this browser');
   const changed = page.getByRole('region', { name: 'What’s changed' });
-  await expect(changed.getByRole('heading', { name: 'Tested Concord before?' })).toBeVisible();
+  await expect(changed.getByLabel('Last version you tested')).toBeVisible();
   release();
   await Promise.all(held);
   await page.waitForTimeout(500);
   // A's history (0.7.0) never shows up as B's.
-  await expect(changed.getByRole('heading', { name: 'Tested Concord before?' })).toBeVisible();
+  await expect(whatsNew(page)).toBeVisible();
+  await expect(changed.getByLabel('Last version you tested')).toBeVisible();
   await expect(changed.getByRole('heading', { name: 'What’s changed since 0.7.0' })).toHaveCount(0);
   await expectNoCrash(page);
 });

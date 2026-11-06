@@ -176,7 +176,8 @@ test.describe('Validate data', () => {
     // own working group: now only the signed-in ontology download is needed, and then nothing at all.
     consoleGuard.allow(/Failed to load resource|ERR_FAILED|ERR_INTERNET_DISCONNECTED/);
     await page.goto('/o/volunteering/validate');
-    await expect(page.getByText('Your data is checked here in your browser as you type, and never leaves this device.')).toBeVisible();
+    // The page used to say so in a standing line under the editor (with the size limits); that line was cut as noise.
+    await expect(page.getByText(/never leaves this device|Up to 5 MB/)).toHaveCount(0);
     const marker = `private-${Date.now()}`;
     await setEditor(page, `@prefix vol: <${VOL}> .\n<https://example.org/${marker}> a vol:Role .\n`);
     // Give the version's ontology and shapes time to download, then cut the server off.

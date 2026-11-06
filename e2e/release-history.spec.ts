@@ -40,6 +40,18 @@ test.describe('release approval history', () => {
     await expect(page.getByRole('group', { name: 'Your actions' })).toHaveCount(0);
   };
 
+  // A release the policy's automation drafted (createdBy "system") used to say "Drafted by someone".
+  test('a release drafted by the policy’s automation says it was drafted automatically', async ({ page }) => {
+    await serve(page, { ...base, createdBy: 'system' });
+    await expect(page.getByText(/^Drafted automatically on /)).toBeVisible();
+    await expect(page.getByText(/Drafted by/)).toHaveCount(0);
+  });
+
+  test('a release a person drafted names them', async ({ page }) => {
+    await serve(page, { ...base, createdBy: memberId });
+    await expect(page.getByText(new RegExp(`^Drafted by ${memberName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} on `))).toBeVisible();
+  });
+
   test('a published release without a vote shows the recorded rules, not a next step', async ({ page }) => {
     await serve(page, {
       ...base,
