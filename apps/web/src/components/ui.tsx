@@ -3,6 +3,8 @@ import { Link, type LinkProps } from 'react-router';
 import { CircleAlert, Check, Copy, LoaderCircle, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { errorMessage, ApiError } from '../api';
 import { initials } from '../lib/format';
+import { HighlightedSpans } from './code/HighlightedSpans';
+import type { CodeLanguage } from './code/languages';
 
 export function cx(...xs: (string | false | null | undefined)[]) {
   return xs.filter(Boolean).join(' ');
@@ -338,14 +340,41 @@ export function CopyButton({ text, label, size = 'sm', variant = 'secondary' }: 
   );
 }
 
-export function CodeBlock({ code, className, maxHeight = 520 }: { code: string; className?: string; maxHeight?: number }) {
+/**
+ * A block of code with a copy button. Pass `language` to syntax-highlight it with the
+ * same colours as the code views (static spans, no editor).
+ */
+export function CodeBlock({
+  code,
+  className,
+  maxHeight = 520,
+  language,
+  ariaLabel,
+}: {
+  code: string;
+  className?: string;
+  maxHeight?: number;
+  language?: CodeLanguage;
+  ariaLabel?: string;
+}) {
   return (
     <div className={cx('relative rounded-lg border border-line bg-surface-2', className)}>
       <div className="absolute top-2 right-2">
         <CopyButton text={code} />
       </div>
-      <pre className="overflow-auto p-4 pr-14 font-mono text-[0.8rem] leading-relaxed" style={{ maxHeight }}>
-        <code>{code}</code>
+      <pre
+        className="overflow-auto p-4 pr-14 font-mono text-[0.8rem] leading-relaxed"
+        style={{ maxHeight }}
+        data-language={language}
+        // A <pre> can't carry a name; as a labelled region screen readers announce it.
+        role={ariaLabel ? 'region' : undefined}
+        aria-label={ariaLabel}
+        // Scrollable, so keyboard users need to be able to reach it.
+        tabIndex={0}
+      >
+        <code>
+          <HighlightedSpans code={code} language={language} />
+        </code>
       </pre>
     </div>
   );
