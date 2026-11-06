@@ -543,6 +543,44 @@ describe('query assistant (offline helper)', () => {
     }
   });
 
+  // Query has no "Run against" choice any more: the page decides the dataset (its sample data whenever there are
+  // records). An answer naming another dataset used to come back with it, and the page applied it.
+  it('keeps the dataset the page asked for, whatever the model or the offline helper names', async () => {
+    const { config } = await import('../src/config.js');
+    const { llm } = await import('../src/llm/provider.js');
+    const agent = await login('contributor', 'Fixed dataset');
+    const me = (await agent.get('/api/session')).body.user.id as string;
+    const provider = config.llm.provider;
+    const sent: { system: string; schema: unknown }[] = [];
+    const spy = vi.spyOn(llm, 'json').mockImplementation(async (call) =>
+      (sent.push({ system: call.system, schema: call.schema }), call.task === 'query-chat'
+        ? { simulated: false, value: { reply: 'Here are the classes.', query: 'SELECT ?class WHERE { ?class a <http://www.w3.org/2002/07/owl#Class> }', target: 'data', columns: [{ variable: 'class', label: 'Class' }] } }
+        : { simulated: true, value: undefined }) as never,
+    );
+    const send = (target: string, content: string) => agent.post(`/api/ontologies/${demoId}/query-chat`).send({ messages: [{ role: 'user', content }], query: '', target, account: me });
+    try {
+      (config.llm as { provider: string }).provider = 'anthropic';
+      const r = await send('ontology', 'Which classes are there?');
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect(r.body.simulated).toBe(false);
+      expect(r.body.target).toBe('ontology');
+      // What the model is told: the page decides the dataset, in the prompt and in the schema's own description.
+      expect(sent[0].system).toContain('The page decides what the query runs over');
+      expect(sent[0].system).not.toMatch(/Set target to "data" for questions about records/);
+      const target = (sent[0].schema as { shape: { target: { description?: string } } }).shape.target;
+      expect(target.description).toMatch(/return it unchanged/);
+      expect(target.description).not.toMatch(/when it asks about records/);
+    } finally {
+      spy.mockRestore();
+      (config.llm as { provider: string }).provider = provider;
+    }
+    // The offline helper writes records queries as "data"; with no sample records the page still says "ontology".
+    const offline = await send('ontology', 'List every organisation');
+    expect(offline.body.simulated).toBe(true);
+    expect(offline.body.query).toContain('Organisation');
+    expect(offline.body.target).toBe('ontology');
+  });
+
   it('gives allowances back when Claude was never called, and never leaves anyone stuck as busy', async () => {
     const { admitQueryChat } = await import('../src/services/queryChat.js');
     const { config } = await import('../src/config.js');
@@ -601,7 +639,8 @@ describe('query assistant (offline helper)', () => {
       'Also show the title',
       'How many are there?',
     );
-    expect(first).toMatchObject({ simulated: true, target: 'data' });
+    // The answer keeps the dataset the page sent ("ontology" here); the page decides it, not the helper.
+    expect(first).toMatchObject({ simulated: true, target: 'ontology' });
     expect(first.query).toContain('vol:VolunteeringOpportunity');
     expect(first.columns.map((c) => c.label)).toContain('title');
     expect(first.query).toContain('LIMIT 100');

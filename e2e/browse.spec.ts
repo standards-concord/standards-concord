@@ -208,16 +208,30 @@ test.describe('moving around the ontology is instant', () => {
     await settle(page);
     await expect(page.getByRole('heading', { level: 2, name: 'skill' })).toBeVisible();
     // Stand in for a merge: from now on the draft's view names Skill differently.
+    // The app drops a view request when it moves on (here, leaving Browse for Validate data). That request's
+    // response is then disposed, and reading it used to fail the test with "Response has been disposed".
+    // A dropped request has no one waiting for it, so there is nothing to rewrite. Any other error is kept and
+    // fails the test, so a real failure can't hide behind a heading an earlier request already put on screen.
+    const dropped = (e: unknown) => /disposed|has been closed|aborted|canceled|cancelled/i.test(String(e));
+    const failures: string[] = [];
     await page.route(/\/api\/ontologies\/[^/]+\/view(\?|$)/, async (route) => {
-      const res = await route.fetch();
-      const v = (await res.json()) as { classes: { iri: string; label?: string }[] };
-      for (const c of v.classes) if (c.iri === `${VOL}Skill`) c.label = 'competence';
-      await route.fulfill({ response: res, json: v });
+      try {
+        const res = await route.fetch();
+        const v = (await res.json()) as { classes: { iri: string; label?: string }[] };
+        for (const c of v.classes) if (c.iri === `${VOL}Skill`) c.label = 'competence';
+        await route.fulfill({ response: res, json: v });
+      } catch (e) {
+        if (dropped(e)) return;
+        failures.push(String(e));
+        await route.abort().catch(() => {});
+      }
     });
     await page.getByRole('navigation', { name: 'Explore pages' }).getByRole('link', { name: 'Validate data' }).click();
     await expect(page.getByTestId('validate-status')).toBeVisible();
     await page.goBack();
     await expect(page.getByRole('heading', { level: 2, name: 'competence' })).toBeVisible();
+    await settle(page);
+    expect(failures).toEqual([]);
   });
 });
 
@@ -454,8 +468,17 @@ test.describe('diagram scope, focus and contrast (review fixes)', () => {
     await expect(views).toHaveAccessibleDescription(/Find a term/);
     await views.getByRole('radio', { name: 'Diagram' }).click();
     await expect(views).toHaveAccessibleDescription(/attributes, types and how many/);
-    await views.getByRole('radio', { name: 'Graph' }).click();
-    await expect(views).toHaveAccessibleDescription(/how classes connect/);
+    // Two views, not three: the Graph view was removed (the Diagram shows the same model).
+    await expect(views.getByRole('radio')).toHaveText(['List', 'Diagram']);
+  });
+
+  test('an old link to the Graph view opens the Diagram', async ({ page }) => {
+    await page.goto(`${base}?view=graph`);
+    await settle(page);
+    await expect(page.getByRole('radiogroup', { name: 'View' }).getByRole('radio', { name: 'Diagram' })).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId('ontology-graph')).toHaveCount(0);
+    await expect(page.locator('main')).not.toContainText(/\bGraph\b/);
+    await expectNoCrash(page);
   });
 });
 
@@ -1143,131 +1166,11 @@ test.describe('large and unusual ontologies (stubbed)', () => {
   });
 });
 
-test.describe('reduced motion', () => {
-  // How many times the drawing (zoom, pan and every node's position) changes, sampled every frame, while
-  // an action takes effect: an animation passes through intermediate states, an immediate
-  // change goes straight to the end. Counting frames drawn is unreliable on slow machines.
-  const changesDuring = async (page: Page, action: () => Promise<void>) => {
-    await page.waitForTimeout(800);
-    await page.evaluate(() => {
-      type Cy = { pan: () => { x: number; y: number }; zoom: () => number; nodes: () => { position: () => { x: number; y: number } }[] };
-      const cy = (document.querySelector('[data-testid="ontology-graph"] [data-cy]') as HTMLElement & { cy: Cy }).cy;
-      const w = window as unknown as { states: string[]; sampling: boolean };
-      // The zoom, the pan and every node's position.
-      const state = () => JSON.stringify([Math.round(cy.zoom() * 1000), ...[cy.pan(), ...cy.nodes().map((n) => n.position())].map((p) => [Math.round(p.x), Math.round(p.y)])]);
-      w.states = [state()];
-      w.sampling = true;
-      const tick = () => {
-        const s = state();
-        if (s !== w.states[w.states.length - 1]) w.states.push(s);
-        if (w.sampling) requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    });
-    await action();
-    await page.waitForTimeout(1200);
-    const states = await page.evaluate(() => {
-      const w = window as unknown as { states: string[]; sampling: boolean };
-      w.sampling = false;
-      return w.states.length;
-    });
-    return states - 1;
-  };
-
-  for (const motion of ['reduce', 'no-preference'] as const) {
-    test(`the graph ${motion === 'reduce' ? 'does not animate' : 'animates'} with reduced motion ${motion === 'reduce' ? 'on' : 'off'}`, async ({ page }) => {
-      await page.emulateMedia({ reducedMotion: motion });
-      await page.goto(`${base}?view=graph`);
-      const g = page.getByTestId('ontology-graph');
-      await expect(g).toHaveAttribute('data-ready', 'true');
-      await expect(g).toHaveAttribute('data-motion', motion === 'reduce' ? 'reduced' : 'full');
-      await page.getByRole('button', { name: 'Terms' }).click();
-      const layout = await changesDuring(page, () => page.getByRole('combobox', { name: 'Graph layout' }).selectOption('radial').then(() => {}));
-      // Selecting a class recentres on it.
-      const centre = await changesDuring(page, () => tree(page).getByRole('treeitem', { name: /^agent\b/ }).first().click());
-      if (motion === 'reduce') {
-        // Straight to the new layout or position.
-        expect(layout).toBeLessThanOrEqual(1);
-        expect(centre).toBeLessThanOrEqual(1);
-      } else {
-        // At least one state on the way.
-        expect(layout).toBeGreaterThanOrEqual(2);
-        expect(centre).toBeGreaterThanOrEqual(2);
-      }
-      await expectNoCrash(page);
-    });
-  }
-});
-
-test.describe('graph', () => {
-  test('lays out the ontology and switches layouts and filters without errors', async ({ page }) => {
-    await page.goto(`${base}?view=graph`);
-    const g = page.getByTestId('ontology-graph');
-    await expect(g).toHaveAttribute('data-ready', 'true');
-    await expect(g).toHaveAttribute('aria-label', /Graph of \d+ classes and \d+ links/);
-    const links = async () => Number((await g.getAttribute('aria-label'))!.match(/and (\d+) links/)![1]);
-    const base0 = await links();
-    expect(base0).toBeGreaterThan(5);
-
-    for (const layout of ['force', 'radial', 'hierarchy']) {
-      await page.getByRole('combobox', { name: 'Graph layout' }).selectOption(layout);
-      await page.waitForTimeout(500);
-      await expectNoCrash(page);
-    }
-    await page.getByRole('button', { name: 'Attributes', exact: true }).click();
-    await expect.poll(links).toBeGreaterThan(base0);
-    await page.getByRole('button', { name: 'Disjointness' }).click();
-    await page.getByRole('button', { name: 'Relationships', exact: true }).click();
-    await page.getByRole('button', { name: 'Subclasses', exact: true }).click();
-    await expect(g).toHaveAttribute('data-ready', 'true');
-  });
-
-  test('selecting a class from the tree highlights it in the graph and opens its page', async ({ page }) => {
-    await page.goto(`${base}?view=graph`);
-    await expect(page.getByTestId('ontology-graph')).toHaveAttribute('data-ready', 'true');
-    // The term navigation folds away in the canvas views.
-    await expect(tree(page)).toHaveCount(0);
-    await page.getByRole('button', { name: 'Terms' }).click();
-    await item(page, 'agent').click();
-    await item(page, 'agent').press('ArrowRight');
-    await item(page, 'person').click();
-    await expect.poll(() => term(page)).toBe(`${VOL}Person`);
-    await expect(page).toHaveURL(/view=graph/);
-    await expect(page.getByRole('complementary', { name: 'Term details' }).getByRole('heading', { name: 'person', exact: true })).toBeVisible();
-    // Picking a term keeps the whole graph; recentring is a separate action.
-    const g = page.getByTestId('ontology-graph');
-    await expect(g).not.toHaveAttribute('aria-label', /around/);
-    const all = Number((await g.getAttribute('aria-label'))!.match(/Graph of (\d+) classes/)![1]);
-    await page.getByRole('button', { name: 'Centre on person' }).click();
-    await expect(g).toHaveAttribute('aria-label', /around person/);
-    await expect(page).toHaveURL(/around=/);
-    const near = Number((await g.getAttribute('aria-label'))!.match(/Graph of (\d+) classes/)![1]);
-    expect(near).toBeLessThan(all);
-    await page.getByRole('button', { name: 'Show entire ontology' }).click();
-    await expect(g).not.toHaveAttribute('aria-label', /around person/);
-    await page.getByRole('button', { name: 'Close term details' }).click();
-    await expect.poll(() => term(page)).toBeNull();
-    // A click on a node in the canvas selects it too.
-    const box = (await page.getByTestId('ontology-graph').boundingBox())!;
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    await expectNoCrash(page);
-  });
-
-  test('PNG download works', async ({ page }) => {
-    await page.goto(`${base}?view=graph`);
-    const g = page.getByTestId('ontology-graph');
-    await expect(g).toHaveAttribute('data-ready', 'true');
-    const download = page.waitForEvent('download');
-    await g.getByRole('button', { name: 'Download as PNG' }).click();
-    expect((await download).suggestedFilename()).toBe('ontology-graph.png');
-  });
-});
-
 test.describe('on a phone', () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
   test('every view fits the screen', async ({ page }) => {
-    for (const v of ['', '?view=diagram', '?view=graph', `?term=${encodeURIComponent(`${VOL}Session`)}`]) {
+    for (const v of ['', '?view=diagram', `?term=${encodeURIComponent(`${VOL}Session`)}`]) {
       await test.step(v || 'classes', async () => {
         await page.goto(base + v);
         await settle(page);

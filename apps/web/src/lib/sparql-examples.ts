@@ -99,7 +99,7 @@ SELECT ?term ?replacedBy WHERE {
     {
       id: 'instances',
       title: 'Instances by type (sample data)',
-      description: 'How many things of each class are in the sample data. Run against “Ontology + sample data”.',
+      description: 'How many things of each class are in the sample data.',
       query: `${prefixes(prefix, ns, ['owl'])}
 
 SELECT ?type (COUNT(?thing) AS ?count) WHERE {
