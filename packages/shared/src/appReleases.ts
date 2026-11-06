@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.40.0',
     date: '2026-11-06',
     title: 'Logos for your connected agents',
+    pr: 105,
     changes: [
       {
         id: 'connected-agent-logos',
