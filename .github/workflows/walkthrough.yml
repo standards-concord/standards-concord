@@ -141,31 +141,22 @@ jobs:
           mkdir -p walkthrough/.cache/voice
           for t in $(gh release list --repo "$REPO" --limit 10 --json tagName --jq '.[].tagName'); do
             if gh release download "$t" --repo "$REPO" --pattern walkthrough-voice.tar.gz --dir "$RUNNER_TEMP" --clobber 2>/dev/null; then
-              tar -xzf "$RUNNER_TEMP/walkthrough-voice.tar.gz" -C walkthrough/.cache/voice
+              bash walkthrough/unpack-voice.sh "$RUNNER_TEMP/walkthrough-voice.tar.gz" walkthrough/.cache/voice
               echo "Restored narration from $t"
               break
             fi
           done
       # Narration from a run that attached nothing (the features video is only ever recorded
-      # on demand) is kept only in that run's artifact. Seeding from it re-voices nothing that
-      # run already voiced; files already restored are left as they are.
+      # on demand) is kept only in that run's artifact. seed-voice.sh accepts it only from a
+      # walkthrough.yml run of this repository started by hand or by a release, and adds only
+      # plain files, leaving those already restored as they are.
       - name: Seed narration from an earlier run
         if: steps.voice.outputs.ready == 'true' && inputs.seed_voice_run != ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RUN: ${{ inputs.seed_voice_run }}
-        run: |
-          case "$RUN" in
-            ''|*[!0-9]*) echo "::error::seed_voice_run must be a run id (digits only)"; exit 1 ;;
-          esac
-          gh run download "$RUN" --repo "$REPO" --name concord-walkthrough --dir "$RUNNER_TEMP/seed"
-          if [ ! -f "$RUNNER_TEMP/seed/walkthrough-voice.tar.gz" ]; then
-            echo "::error::Run $RUN's artifact has no walkthrough-voice.tar.gz"; exit 1
-          fi
-          mkdir -p walkthrough/.cache/voice
-          tar -xzf "$RUNNER_TEMP/seed/walkthrough-voice.tar.gz" -C walkthrough/.cache/voice --skip-old-files
-          echo "Seeded narration from run $RUN"
+        run: bash walkthrough/seed-voice.sh "$RUN" walkthrough/.cache/voice
 
       - name: Record
         id: record

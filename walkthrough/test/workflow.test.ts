@@ -54,22 +54,36 @@ describe('the recording workflow', () => {
 
   // The features video is only recorded on demand, so its narration (about 3,600 characters)
   // was kept only in that run's artifact, and the next features run would have paid for all
-  // of it again. seed_voice_run reuses it.
-  it('can reuse narration kept in an earlier run’s artifact before recording', () => {
+  // of it again. seed_voice_run reuses it, through seed-voice.sh (test/seed-voice.test.ts).
+  it('can reuse narration kept in an earlier run’s artifact, after the release’s and before recording', () => {
+    const restore = steps.findIndex((s) => /name: Restore narration from the last release/.test(s));
     const seed = steps.findIndex((s) => /name: Seed narration from an earlier run/.test(s));
     const record = steps.findIndex((s) => /name: Record\b/.test(s));
-    expect(seed).toBeGreaterThan(-1);
+    expect(restore).toBeGreaterThan(-1);
+    expect(seed).toBeGreaterThan(restore);
     expect(seed).toBeLessThan(record);
     const s = steps[seed];
     expect(yml).toMatch(/\n {6}seed_voice_run:\n/);
     expect(s).toMatch(/if: .*inputs\.seed_voice_run != ''/);
-    // The run id comes in through the environment, is checked to be digits, and isn't pasted into the script.
     expect(s).toMatch(/RUN: \$\{\{ inputs\.seed_voice_run \}\}/);
-    expect(s.slice(s.indexOf('run: |'))).not.toMatch(/\$\{\{/);
-    expect(s).toMatch(/\*\[!0-9\]\*\) .*exit 1/);
-    expect(s).toMatch(/gh run download "\$RUN" .*--name concord-walkthrough/);
-    expect(s).toMatch(/tar -xzf .*walkthrough-voice\.tar\.gz"? -C walkthrough\/\.cache\/voice --skip-old-files/);
+    expect(s).toMatch(/REPO: \$\{\{ github\.repository \}\}/);
+    // The checked script is what runs, given that same variable; nothing is unpacked here.
+    expect(s).toMatch(/run: bash walkthrough\/seed-voice\.sh "\$RUN" walkthrough\/\.cache\/voice\s*$/);
     const job = yml.slice(yml.indexOf('\n  record:'), yml.indexOf('\n    steps:', yml.indexOf('\n  record:')));
     expect(job).toMatch(/\n {6}actions: read\n/);
+    expect(job).not.toMatch(/: write\b/);
+  });
+
+  // An archive is only ever unpacked by unpack-voice.sh, which refuses links and odd paths.
+  it('unpacks narration archives only through unpack-voice.sh', () => {
+    expect(step(/name: Restore narration from the last release/)).toMatch(/bash walkthrough\/unpack-voice\.sh "\$RUNNER_TEMP\/walkthrough-voice\.tar\.gz" walkthrough\/\.cache\/voice/);
+    for (const s of steps) expect(s).not.toMatch(/tar (-\w*x|--extract)/);
+  });
+
+  // Inputs and other expressions reach scripts only through env, so no value can become shell code.
+  it('never pastes an expression into a script', () => {
+    const runs = [...yml.matchAll(/\n( +)run: (\|[^\n]*\n(?:\1 +[^\n]*\n|\s*\n)*|[^\n]*)/g)].map((m) => m[2]);
+    expect(runs.length).toBeGreaterThan(5);
+    for (const r of runs) expect(r).not.toMatch(/\$\{\{/);
   });
 });
