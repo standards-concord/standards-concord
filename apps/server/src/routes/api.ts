@@ -64,6 +64,7 @@ import * as releases from '../services/releases.js';
 import * as requirements from '../services/requirements.js';
 import { releaseTrace, useCaseDetail, useCasesForCR } from '../services/useCaseDetail.js';
 import { fairContext } from '../services/fairResolution.js';
+import { hostedImportClosure } from '../services/importClosure.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
@@ -325,7 +326,7 @@ export function apiRouter(): Router {
     // viewer may see that use case now: a report that was running when one was withdrawn drops it.
     if (!ref || ref === 'working') return void res.json(await useCases.validationForViewer(await workingValidation(p), req.user));
     const graph = await ontologyStore.at(p, ref);
-    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI) }), req.user));
+    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI), imports: await hostedImportClosure(graph) }), req.user));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {
@@ -812,7 +813,7 @@ export function apiRouter(): Router {
     const p = await project(req);
     const f = await fork(req);
     const graph = await ontologyStore.graphAt(p, f.head);
-    res.json(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }));
+    res.json(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI), imports: await hostedImportClosure(graph) }));
   });
   r.post('/ontologies/:id/forks/:fork/edits', async (req, res) => {
     const b = req.body ?? {};

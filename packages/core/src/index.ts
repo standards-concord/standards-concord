@@ -29,6 +29,8 @@ export { fairCheck } from './fair.js';
 export { structuralReasoner, owlReasoner } from './reasoner.js';
 export type { OwlReasonerOptions } from './reasoner.js';
 export { runCompetencyQuestions, validate } from './cq.js';
+export { checkImports, foreignAxioms, MAX_IMPORTS, resolveImportClosure, unionGraph } from './imports.js';
+export type { ImportClosure, ImportResolver, ResolvedImport, UnresolvedReason } from './imports.js';
 export type { CompetencyQuestion, ValidateOptions } from './cq.js';
 
 // Queries

@@ -386,4 +386,48 @@ export interface ValidationReport {
   passed: boolean;
   /** The working-draft revision the report is for, when the server validated its working draft. */
   revision?: string;
+  /**
+   * The ontology checked together with everything it imports (owl:imports), when it imports
+   * anything. `reasoner` is then the verdict on that union, counting only this ontology's own classes.
+   */
+  imports?: ImportCheck;
+}
+
+/** An ontology loaded into an import closure. */
+export interface ImportedOntologyRef {
+  /** The owl:imports IRI as written. */
+  iri: string;
+  title: string;
+  /** A release version, or 'draft'. */
+  version: string;
+  /** The ontology (or the root's IRI) whose owl:imports named this one. */
+  via: string;
+  /** Concord's id for the ontology, when Concord hosts it. */
+  ontologyId?: string;
+}
+
+/** An ontology checked together with its import closure. */
+export interface ImportCheck {
+  imports: ImportedOntologyRef[];
+  /** Imports that could not be loaded, so were not checked: not hosted on Concord, waiting for approval, or past the limit. */
+  unresolved: { iri: string; via: string; reason: 'not-hosted' | 'held' | 'limit' }[];
+  consistent: boolean;
+  /** How much the reasoner decided about the union (as ReasonerResult.checked). */
+  checked: 'complete' | 'consistency' | 'none';
+  /** This ontology's own classes that are unsatisfiable once its imports are loaded. */
+  unsatisfiable: IRI[];
+  /** Classes of the imported ontologies that are unsatisfiable: theirs to fix, so they don't fail this one. */
+  inheritedUnsatisfiable: IRI[];
+  /**
+   * What a failure comes from: this ontology alone (`import: null`), or each direct import
+   * that fails together with this ontology.
+   */
+  blame: { import: string | null; title: string; inconsistent: boolean; unsatisfiable: IRI[] }[];
+  /** Axioms this ontology states about another ontology's terms (it should constrain them, never re-define them). */
+  foreignAxioms: { subject: IRI; predicate: IRI; object: string; owner: string }[];
+  /** One ontology reached at two versions: both versions' axioms are in the union. */
+  versionClashes: { ontologyId: string; title: string; versions: string[] }[];
+  /** The union is consistent and none of this ontology's own classes is unsatisfiable. */
+  passed: boolean;
+  error?: string;
 }

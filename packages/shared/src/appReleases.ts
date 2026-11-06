@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.42.0',
+    date: '2026-11-06',
+    title: 'Ontologies checked with what they import',
+    changes: [
+      {
+        id: 'import-checks',
+        type: 'feat',
+        title: 'Every change is checked together with the ontologies it imports',
+        detail:
+          'An ontology that imports another is now reasoned over with that ontology loaded, so a change that contradicts it is caught, and the checks say which import the problem comes from. Imports that aren’t on Concord are listed as not checked. The Overview shows what an ontology builds on, and anyone signed in can propose importing another.',
+        roles: ['steward', 'contributor'],
+        to: '{o}#imports-title',
+        ask: 'When an import causes a problem, is it clear what to change?',
+      },
+    ],
+  },
+  {
     version: '0.41.0',
     date: '2026-11-06',
     title: 'Logos for your connected agents',

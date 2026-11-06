@@ -1,9 +1,10 @@
 import { useState, type ReactNode } from 'react';
 import type { ValidationReport } from '@concord/shared';
 import type { IssueSeverity } from '@concord/core/types';
+import { Link } from 'react-router';
 import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleAlert } from 'lucide-react';
 import type { Labeler } from '../lib/ontology';
-import { pct, plural } from '../lib/format';
+import { localName, pct, plural } from '../lib/format';
 import { checkedOf } from '../lib/reasonerCompare';
 import { useAdvancedFeatures } from '../lib/advanced';
 import { ProgressBar, cx } from './ui';
@@ -259,6 +260,125 @@ export function CqResults({ report, showQueries = false }: { report: ValidationR
   );
 }
 
+type ImportCheck = NonNullable<ValidationReport['imports']>;
+
+const NOT_CHECKED: Record<ImportCheck['unresolved'][number]['reason'], string> = {
+  'not-hosted': 'not hosted on Concord, so it was not loaded',
+  held: 'being reviewed before it is published, so it was not loaded',
+  limit: 'more imports than Concord loads at once',
+};
+
+/** Plain words for the axiom predicates foreign-axiom findings name. */
+const SAYS: Record<string, string> = {
+  subClassOf: 'is a kind of',
+  equivalentClass: 'is the same as',
+  disjointWith: 'never overlaps with',
+  domain: 'is used on',
+  range: 'has values of type',
+  subPropertyOf: 'is a narrower form of',
+  equivalentProperty: 'is the same as',
+  inverseOf: 'is the inverse of',
+  propertyDisjointWith: 'never overlaps with',
+  type: 'is a',
+};
+
+export const importsSummary = (c: ImportCheck) =>
+  c.passed
+    ? `${plural(c.imports.length, 'ontology', 'ontologies')}, consistent${c.unresolved.length ? `, ${c.unresolved.length} not checked` : ''}`
+    : c.checked === 'none'
+      ? 'not checked'
+      : 'conflicts';
+
+/**
+ * The ontology checked together with every ontology it imports: whether the combination still makes sense,
+ * which import a problem comes from, and what couldn't be loaded.
+ */
+export function ImportResults({ check, label }: { check: ImportCheck; label: Labeler }) {
+  const name = (iri: string) => label(iri) || localName(iri);
+  const verdict = check.checked === 'none' ? (
+    <span className="text-warn">It couldn't be checked together with what it imports, so validation can't pass.</span>
+  ) : !check.consistent ? (
+    <strong className="text-danger">Together with what it imports, no data could ever conform to it.</strong>
+  ) : check.unsatisfiable.length ? (
+    <span>
+      <strong className="text-danger">Together with what it imports, {plural(check.unsatisfiable.length, 'class', 'classes')} can never have members:</strong> {check.unsatisfiable.map(name).join(', ')}.
+    </span>
+  ) : (
+    <span>
+      <strong className="text-ok">Consistent with everything it imports.</strong>
+    </span>
+  );
+  return (
+    <div className="space-y-3 text-sm">
+      <p>{verdict}</p>
+      {check.checked === 'none' && check.error && <p className="text-xs text-muted">Why: {check.error}</p>}
+      {check.blame.length > 0 && (
+        <ul className="space-y-1" aria-label="Where the problem comes from">
+          {check.blame.map((b) => (
+            <li key={b.import ?? 'self'} className="flex items-start gap-2">
+              <CircleX className="mt-0.5 size-4 shrink-0 text-danger" aria-hidden />
+              <span>
+                {b.import === null ? 'The problem is in this ontology itself, not its imports.' : <>Comes from <strong>{b.title}</strong>{b.inconsistent ? ': together they contradict each other.' : b.unsatisfiable.length ? `: it makes ${b.unsatisfiable.map(name).join(', ')} impossible.` : '.'}</>}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {check.imports.length > 0 && (
+        <div>
+          <h5 className="mb-1 text-xs font-semibold text-muted">Checked with</h5>
+          <ul className="divide-y divide-line rounded-lg border border-line" aria-label="Imported ontologies checked">
+            {check.imports.map((i) => (
+              <li key={`${i.iri}@${i.version}`} className="flex flex-wrap items-baseline gap-x-2 px-3 py-1.5">
+                {i.ontologyId ? <Link to={`/o/${i.ontologyId}`} className="font-medium text-accent hover:underline">{i.title}</Link> : <span className="font-medium">{i.title}</span>}
+                <span className="text-xs text-muted">{i.version === 'draft' ? 'working draft (not released yet)' : `version ${i.version}`}</span>
+                <span className="w-full truncate font-mono text-xs text-muted">{i.iri}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {check.unresolved.length > 0 && (
+        <div>
+          <h5 className="mb-1 text-xs font-semibold text-muted">Not checked</h5>
+          <ul className="space-y-1" aria-label="Imports not checked">
+            {check.unresolved.map((u) => (
+              <li key={u.iri} className="flex items-start gap-2">
+                <Info className="mt-0.5 size-4 shrink-0 text-muted" aria-hidden />
+                <span className="min-w-0">
+                  <span className="break-all font-mono text-xs">{u.iri}</span> <span className="text-muted">— {NOT_CHECKED[u.reason]}.</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {check.foreignAxioms.length > 0 && (
+        <div>
+          <h5 className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-warn">
+            <TriangleAlert className="size-3.5" /> Changes the meaning of terms it imports ({check.foreignAxioms.length})
+          </h5>
+          <ul className="space-y-1" aria-label="Statements about imported terms">
+            {check.foreignAxioms.map((f, i) => (
+              <li key={i}>
+                <strong>{name(f.subject)}</strong> {SAYS[localName(f.predicate)] ?? localName(f.predicate)} <strong>{f.object.startsWith('(') ? 'a class expression' : name(f.object)}</strong>{' '}
+                <span className="text-muted">({f.subject.replace(/[#/][^#/]*$/, '')} belongs to {f.owner})</span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1 text-xs text-muted">Everyone who imports {check.foreignAxioms.length === 1 ? 'that ontology' : 'those ontologies'} with this one gets these too. Define your own term, or propose the change to its owners.</p>
+        </div>
+      )}
+      {check.inheritedUnsatisfiable.length > 0 && <p className="text-xs text-muted">Already impossible in an imported ontology (not this one's to fix): {check.inheritedUnsatisfiable.map(name).join(', ')}.</p>}
+      {check.versionClashes.map((v) => (
+        <p key={v.ontologyId} className="text-xs text-warn">
+          {v.title} is imported at more than one version ({v.versions.join(', ')}), so both are checked together.
+        </p>
+      ))}
+    </div>
+  );
+}
+
 /** Stable identity of a lint finding, so a new finding can be told apart from ones already seen. */
 const issueKey = (i: ValidationReport['lint'][number]) => [i.severity, i.code, i.iri ?? '', i.message].join('|');
 
@@ -299,6 +419,19 @@ export function ValidationDetails({
         <Disclosure className="px-4 py-3" heading={headingLevel} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} failures={report.fair.checks.filter((c) => !c.passed).map((c) => c.id)} keepMounted>
           <FairChecks report={report} />
         </Disclosure>
+        {report.imports && (
+          <Disclosure
+            className="px-4 py-3"
+            heading={headingLevel}
+            title="Imported ontologies"
+            summary={importsSummary(report.imports)}
+            defaultOpen={!report.imports.passed || report.imports.foreignAxioms.length > 0}
+            failures={[...report.imports.unsatisfiable, ...(report.imports.consistent ? [] : ['inconsistent'])]}
+            keepMounted
+          >
+            <ImportResults check={report.imports} label={label} />
+          </Disclosure>
+        )}
         <Disclosure
           className="px-4 py-3"
           heading={headingLevel}
