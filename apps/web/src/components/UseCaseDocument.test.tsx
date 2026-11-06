@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { UseCase } from '@concord/shared';
-import { CompetencyQuestions } from './UseCaseDocument';
+import { CompetencyQuestions, UseCaseDocument } from './UseCaseDocument';
 
 const uc = {
   id: 'uc_1',
@@ -18,6 +18,15 @@ describe('CompetencyQuestions', () => {
       expect(out).not.toContain('SPARQL test');
       expect(out).not.toContain('SELECT');
     }
+  });
+
+  it('leaves them out of a whole use case document unless asked, open or collapsible', () => {
+    for (const collapsible of [false, true]) {
+      const out = renderToStaticMarkup(<UseCaseDocument uc={uc} collapsible={collapsible} />);
+      expect(out).toContain('Which opportunities accept 15-year-olds?');
+      expect(out).not.toContain('SELECT');
+    }
+    expect(renderToStaticMarkup(<UseCaseDocument uc={uc} showQueries />)).toContain('SELECT');
   });
 
   it('shows SPARQL tests when asked (for editors)', () => {
