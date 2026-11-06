@@ -195,7 +195,21 @@ export interface CreateInput {
   atSave?: () => Promise<void> | void;
 }
 
+/**
+ * The most edits one change request may hold. Checking a request runs on the server's main thread, and
+ * every edit adds to it (5,000 took about 18 s, and nothing else was served meanwhile), so a longer list
+ * is refused with a request to split it. Real changes are a few dozen edits at most.
+ */
+export const MAX_EDITS = 500;
+
+/** Refuses an edit list longer than MAX_EDITS, before any work is done on it. */
+export function checkEditCount(ops: readonly unknown[] | undefined) {
+  if (ops && ops.length > MAX_EDITS)
+    throw new HttpError(413, `A change request can have at most ${MAX_EDITS} edits, and this one has ${ops.length}. Split it into smaller change requests.`);
+}
+
 export function createChangeRequest(project: OntologyProject, author: User, input: CreateInput): Promise<ChangeRequest> {
+  checkEditCount(input.ops);
   return withTriageBudget(author, () => createNow(project, author, input));
 }
 
@@ -214,6 +228,7 @@ async function createNow(project: OntologyProject, author: User, input: CreateIn
     tests = drafted.tests;
     title ||= drafted.title;
     analysis ??= drafted.analysis;
+    checkEditCount(ops);
   }
 
   const now = clock.iso();
@@ -680,6 +695,7 @@ const editsBasis = (cr: ChangeRequest) => `${cr.opsUpdatedAt ?? cr.createdAt} ${
 
 export async function updateOps(cr: ChangeRequest, actor: User, patch: EditsPatch) {
   const { title, description, ops } = patch;
+  checkEditCount(ops);
   await canEdit(cr, actor);
   return withTriageBudget(actor, () => updateOpsNow(cr, actor, { title, description, ops }));
 }
@@ -694,6 +710,8 @@ async function updateOpsNow(
   actor: User,
   patch: EditsPatch & { basis?: string; tests?: ChangeRequest['tests']; warnings?: string[]; note?: string },
 ) {
+  // Every path that replaces the edits (an AI revision included) comes through here.
+  checkEditCount(patch.ops);
   await locked(cr, async (c) => {
     await canEdit(c, actor);
     // Checked under the lock the edit is stored with, so a withdrawal during an AI revision counts.

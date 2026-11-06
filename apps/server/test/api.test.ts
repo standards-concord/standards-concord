@@ -6,7 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb, put } from '../src/db.js';
-import { getCR } from '../src/services/changeRequests.js';
+import { getCR, MAX_EDITS } from '../src/services/changeRequests.js';
 import { getProject, members, updateProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -243,6 +243,29 @@ describe('change request lifecycle', () => {
     expect(res.body.validation.reasoner).toMatchObject({ engine: 'none', available: false, checked: 'none', consistent: false });
     const jsonld = await editor.get(`/api/ontologies/${demoId}/source?format=jsonld`);
     expect(Object.keys(JSON.parse(jsonld.text)['@context'])).not.toContain('@import');
+  });
+
+  // Used to (#56): any number of edits was accepted, and checking them blocked the server (5,000 edits took
+  // about 18 s, with nothing else served meanwhile). Now a list over MAX_EDITS is refused before any work.
+  it('refuses a change request, or new edits for one, with more edits than the limit', async () => {
+    const editor = await login('editor', 'Editor Max');
+    const edits = (n: number, tag: string) =>
+      Array.from({ length: n }, (_, i) => ({ op: 'addClass', localName: `${tag}${i}`, label: `${tag} ${i}`, definition: `A class used to test the edit limit (${i}).` }));
+    const before = (await editor.get(`/api/ontologies/${demoId}/change-requests`)).body.length;
+    const tooMany = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Too many edits', description: '', kind: 'feature', ops: edits(MAX_EDITS + 1, 'Over') });
+    expect(tooMany.status).toBe(413);
+    expect(tooMany.body.error).toMatch(new RegExp(`at most ${MAX_EDITS} edits.*Split it`));
+    expect((await editor.get(`/api/ontologies/${demoId}/change-requests`)).body).toHaveLength(before);
+
+    // At the limit it is accepted.
+    const created = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Edits at the limit', description: '', kind: 'feature', ops: edits(MAX_EDITS, 'AtLimit') });
+    expect(created.status).toBe(201);
+    expect(created.body.ops).toHaveLength(MAX_EDITS);
+
+    // Replacing the edits with too many is refused too, and the stored edits are kept.
+    const patched = await editor.patch(`/api/change-requests/${created.body.id}`).send({ ops: edits(MAX_EDITS + 1, 'Patched') });
+    expect(patched.status).toBe(413);
+    expect((await editor.get(`/api/change-requests/${created.body.id}`)).body.ops[0].localName).toBe('AtLimit0');
   });
 
   it('drafts edits from plain language offline', async () => {
