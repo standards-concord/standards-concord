@@ -37,10 +37,19 @@ test.describe('change requests', () => {
     await expect(page.getByRole('tab', { name: /^Changes 1/ })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Proposed changes (1)' })).toBeVisible();
     await expect(page.getByRole('tabpanel').getByText(name.toLowerCase()).first()).toBeVisible();
-    // The triples view shows the RDF being added.
-    await page.getByRole('button', { name: 'Triples' }).click();
-    await expect(page.getByRole('tabpanel').getByText(new RegExp(name)).first()).toBeVisible();
-    await page.getByRole('button', { name: 'Readable' }).click();
+    // The Diff tab shows the Turtle being added, as green lines (it replaced the raw "Triples" view).
+    await expect(page.getByRole('button', { name: 'Triples' })).toHaveCount(0);
+    await page.getByRole('tab', { name: /^Diff/ }).click();
+    const diff = page.getByRole('table', { name: 'Turtle diff' });
+    await expect(diff.locator('[data-diff="add"]').filter({ hasText: `vol:${name}` }).first()).toBeVisible();
+    await expect(diff.locator('[data-diff="del"]')).toHaveCount(0);
+    await expect(page.getByTestId('turtle-diff-summary')).toContainText(/^\+\d+ −0 lines$/);
+    // It shows what merging writes: where the term came from as dcterms:provenance, and never the
+    // requester's name. (The first diff named Tom as dcterms:contributor, which merging doesn't write.)
+    await expect(diff.locator('[data-diff="add"]').filter({ hasText: /dcterms:provenance "[^"]+#\d+"/ })).toHaveCount(1);
+    await expect(diff.locator('[data-diff="add"]').filter({ hasText: /dcterms:contributor|Tom Okafor/ })).toHaveCount(0);
+    const added = await diff.locator('[data-diff="add"]').count();
+    await page.getByRole('tab', { name: /^Changes/ }).click();
 
     // 2. Submitted, it is classified and validated.
     await actions(page).getByRole('button', { name: 'Submit for review' }).click();
@@ -73,6 +82,11 @@ test.describe('change requests', () => {
     await page.reload();
     await expect(status(page)).toContainText('Merged');
     await expect(page.getByText(/No actions — this request is merged/)).toBeVisible();
+    // Merged, the Diff tab shows its own merge commit: the same lines, however the draft has moved on since.
+    await page.getByRole('tab', { name: /^Diff/ }).click();
+    await expect(diff.locator('[data-diff="add"]').filter({ hasText: `vol:${name}` }).first()).toBeVisible();
+    await expect(diff.locator('[data-diff="add"]')).toHaveCount(added);
+    await expect(diff.locator('[data-diff="del"]')).toHaveCount(0);
     await page.getByRole('tab', { name: /^Discussion/ }).click();
     // Each comment shows once, with the reviewer's decision.
     await expect(page.getByText('Looks right to me. (Mei Chen)')).toHaveCount(1);

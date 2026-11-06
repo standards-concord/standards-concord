@@ -253,7 +253,6 @@ export function ForkPage() {
                   <span className="text-xs text-muted">
                     {h.author} · {formatDate(h.date, true)}
                   </span>
-                  <code className="font-mono text-xs text-subtle">{h.sha.slice(0, 7)}</code>
                 </li>
               ))}
             </ol>

@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.35.0',
+    version: '0.36.0',
     date: '2026-11-06',
     title: 'Tidier Browse pages and plain type names',
     pr: 93,
@@ -82,6 +82,43 @@ export const APP_RELEASES: AppRelease[] = [
           'A long property name that wraps onto two lines stays left-aligned instead of centring. The governance rules start in one column, every governance section has an icon, system events in the activity feed get a round icon, and the Concord name is no longer cut short on a phone.',
         roles: [],
         to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.35.0',
+    date: '2026-11-06',
+    title: 'Advanced features, and a diff on every change',
+    pr: 94,
+    changes: [
+      {
+        id: 'turtle-diff',
+        type: 'feat',
+        title: 'See a change as a diff of the Turtle file',
+        detail:
+          'Each change request has a Diff tab showing the ontology file before and after, line by line, like a code review on GitHub. It replaces the raw Triples view.',
+        roles: [],
+        to: '{o}/changes',
+        ask: 'Does the diff make it clearer what a change really does to the file?',
+      },
+      {
+        id: 'advanced-features',
+        type: 'feat',
+        title: 'Query is now an advanced feature',
+        detail:
+          'Settings has a new Advanced features switch, off by default. Turn it on to see Query under Explore. Links straight to a query page still work.',
+        roles: [],
+        to: '/settings',
+        ask: 'Is there anything else you would rather see only when you ask for it?',
+      },
+      {
+        id: 'fewer-geeky-details',
+        type: 'feat',
+        title: 'Fewer under-the-hood details',
+        detail:
+          'Reasoner details and Check again in this browser are gone. FAIR and quality check codes now appear when you hover over a tick or cross. Commit hashes on releases and forks, and the canned SPARQL examples menu, have been removed.',
+        roles: [],
+        to: '{o}#health',
       },
     ],
   },
