@@ -126,13 +126,6 @@ export const featureActions: Record<string, Action> = {
     c.d.claim(v?.reasoner?.consistent === true, 'the reasoner reports the working draft consistent');
     await c.d.highlight(c.d.page.getByRole('group', { name: 'Health summary' }), 'the health summary');
   },
-  async 'f-recheck-browser'(c) {
-    await c.d.clearHighlight();
-    const btn = c.d.page.getByRole('button', { name: 'Check again in this browser' });
-    if (!(await c.d.click(btn, 'Check again in this browser', { settle: false }))) return;
-    await c.d.claimVisible(c.d.page.getByText('consistent, all classes satisfiable'), 'the in-browser reasoner finds every class satisfiable', 30_000);
-    await c.d.claimVisible(c.d.page.getByText('Same result as the server.'), 'the in-browser result agrees with the server');
-  },
   async 'f-show-fair'(c) {
     // The narration says you can see which checks pass and which couldn't be run, but the group
     // lists only failing checks until "Show all" is chosen, so open both before it is spoken.
@@ -201,15 +194,18 @@ export const featureActions: Record<string, Action> = {
     c.d.claim(level === 'patch', `the edit is classified as a patch (got ${level})`);
     await c.d.highlight(c.d.page.getByRole('button', { name: /^Level: / }), 'the level badge');
   },
-  async 'f-show-triples'(c) {
+  async 'f-show-diff'(c) {
     await c.d.clearHighlight();
-    if (await c.d.click(c.d.page.getByRole('button', { name: 'Triples' }), 'the Triples view')) {
-      await sleep(300);
-      await c.d.claimVisible(c.d.page.getByRole('tabpanel').getByText(/for example a volunteer in their role/).first(), 'the triples show the new definition');
-      await c.d.scroll(260, 1000);
-    }
+    if (!(await c.d.click(c.d.page.getByRole('tab', { name: /^Diff/ }), 'the Diff tab'))) return;
+    const diff = c.d.page.getByRole('table', { name: 'Turtle diff' });
+    // The new definition is an added line, and the old one a removed line.
+    await c.d.claimVisible(diff.locator('[data-diff="add"]').filter({ hasText: /for example a volunteer in their role/ }), 'the diff adds the new definition');
+    await c.d.claimVisible(diff.locator('[data-diff="del"]').first(), 'the diff removes the old definition');
+    await c.d.highlight(diff, 'the Turtle diff');
   },
   async 'f-show-checks'(c) {
+    // The Checks tab replaces the diff, so drop its highlight first.
+    await c.d.clearHighlight();
     await c.d.scroll(-2000, 500);
     await c.d.click(c.d.page.getByRole('tab', { name: /Checks/ }), 'the Checks tab');
     const v = (await cr(c))?.validation;

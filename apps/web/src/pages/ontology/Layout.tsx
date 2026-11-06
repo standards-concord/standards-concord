@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation, useNavigate, useParams } from 'react-router'
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
 import { useAsync, useLocalStorage, type AsyncState } from '../../lib/hooks';
+import { ADVANCED_TABS, useAdvancedFeatures } from '../../lib/advanced';
 import { useSession } from '../../lib/session';
 import { makeLabeler, type Labeler } from '../../lib/ontology';
 import { ExternalLink } from 'lucide-react';
@@ -74,6 +75,7 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
   const segment = loc.pathname.split('/')[3] ?? '';
   const current = sectionOf(segment);
   const [showAll, setShowAll] = useLocalStorage(SHOW_ALL_KEY, false);
+  const [advanced] = useAdvancedFeatures();
   // The section you're in always shows, even if it isn't one your role normally needs.
   const hidden = SECTIONS.filter((s) => s.roles && !canSee(s.roles) && s !== current);
   const shown = showAll ? SECTIONS : SECTIONS.filter((s) => !hidden.includes(s));
@@ -149,7 +151,8 @@ function SectionNav({ id, canSee }: { id: string; canSee: (roles: Role[]) => boo
       {current.tabs.length > 1 && (
         <div className="border-t border-line">
           <nav className="flex gap-1 overflow-x-auto py-2" aria-label={`${current.label} pages`}>
-            {current.tabs.map(([path, label]) => {
+            {/* Advanced pages (Settings → Advanced features) only show when that is on, or while you're on one. */}
+            {current.tabs.filter(([path]) => advanced || !ADVANCED_TABS.has(path) || path === activeTab).map(([path, label]) => {
               const active = path === activeTab;
               return (
                 <Link

@@ -13,7 +13,7 @@ import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { mountAppChecks } from './appChecks.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
-import { reconcile as reconcileAutopilot } from '../services/appChecks.js';
+import { reconcile as reconcileAutopilot, turtleDiff } from '../services/appChecks.js';
 import * as crs from '../services/changeRequests.js';
 import { proposeTermEdit } from '../services/termEdits.js';
 import { withTriageBudget } from '../services/budget.js';
@@ -762,6 +762,12 @@ export function apiRouter(): Router {
     return round as number;
   };
   r.get('/change-requests/:id', async (req, res) => res.json(await crOut(await cr(req), req)));
+  // The edits as a Turtle diff. Withheld like the change request itself when it draws on a use case the viewer can't see.
+  r.get('/change-requests/:id/turtle-diff', async (req, res) => {
+    const c = await cr(req);
+    if (await useCases.crWithheld(c, req.user)) throw new HttpError(404, 'No such change request');
+    res.json(await turtleDiff(c));
+  });
   r.patch('/change-requests/:id', async (req, res) => res.json(await crOut(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}), req)));
   r.post('/change-requests/:id/submit', async (req, res) => res.json(await crOut(await crs.submit(await cr(req), requireUser(req)), req)));
   r.post('/change-requests/:id/reviews', async (req, res) => {

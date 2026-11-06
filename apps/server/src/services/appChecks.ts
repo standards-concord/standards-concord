@@ -299,6 +299,26 @@ export async function proposedSource(cr: ChangeRequest, format: OutputFormat): P
   return { text, revision, filename };
 }
 
+/**
+ * The change's edits as Turtle before and after, for the change request's Diff tab. An open
+ * change is applied to the working draft as it is now (what merging would do); a merged one to
+ * the draft it was based on, so later commits don't show up in its diff. Both sides are
+ * serialized the same way, so a line diff of the two shows only what the change does.
+ */
+export async function turtleDiff(cr: ChangeRequest): Promise<{ before: string; after: string } | { error: string }> {
+  const project = await getProject(cr.ontologyId);
+  const closed = cr.status === 'merged' || cr.status === 'released';
+  const base = closed && cr.baseCommit ? await ontologyStore.graphAt(project, cr.baseCommit) : await ontologyStore.working(project);
+  let after;
+  try {
+    after = applyChangeOps(base, cr.ops, { author: (await getUser(cr.authorId))?.name, date: (closed ? cr.statusSince : clock.iso()).slice(0, 10), source: `${project.slug}#${cr.number}` }).graph;
+  } catch (err) {
+    return { error: `This change can't be applied to the ${closed ? 'draft it was based on' : 'current working draft'}: ${(err as Error).message}` };
+  }
+  const [before, text] = await Promise.all([serialize(base, 'turtle'), serialize(after, 'turtle')]);
+  return { before, after: text };
+}
+
 /* ------------------------------------------------------------------------ */
 /* CI: what to test, and results                                             */
 /* ------------------------------------------------------------------------ */

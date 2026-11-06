@@ -1,4 +1,4 @@
-/** Ready-made queries for the SPARQL editor's Examples menu. */
+/** Ready-made queries: the first is the SPARQL editor's starting query. (The Examples menu went: the assistant's suggestions do its job in plain words.) */
 
 export interface SparqlExample {
   id: string;

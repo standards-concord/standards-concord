@@ -93,24 +93,33 @@ test.describe('progressive disclosure', () => {
       if ((await lint.getAttribute('aria-expanded')) !== 'true') await lint.click();
       // Every finding is listed by its message.
       for (const issue of report.lint.slice(0, 5)) await expect(health.getByText(issue.message, { exact: true }).first()).toBeVisible();
+      // The rule's code is on its icon's hover, not printed beside the message.
+      const first = report.lint[0];
+      await expect(health.getByText(first.code, { exact: true })).toHaveCount(0);
+      await expect(health.getByRole('img', { name: new RegExp(`^(Error|Warning|Suggestion)\\. ${first.code}`) }).first()).toHaveAttribute('title', new RegExp(`^${first.code}`));
     }
 
     const fair = health.getByRole('button', { name: /FAIR checks/ });
     await expect(fair).toContainText(/\d+ of \d+ pass/);
     if ((await fair.getAttribute('aria-expanded')) !== 'true') await fair.click();
-    // Opening the group lists only the failing checks; passing ones (and the scoring note and
-    // FOOPS! references) wait behind "Show all".
-    type Check = { title: string; passed: boolean; status?: string };
+    // Opening the group lists only the failing checks; passing ones wait behind "Show all". Each
+    // check's FOOPS!/FAIR reference is on its tick or cross's hover, not printed (Jesse, 6 Nov 2026).
+    type Check = { title: string; passed: boolean; status?: string; reference?: string };
     const checks = report.fair.checks as Check[];
     const failing = checks.filter((c) => (c.status ?? (c.passed ? 'pass' : 'fail')) === 'fail');
     const passing = checks.filter((c) => c.passed);
     for (const c of failing) await expect(health.getByText(c.title, { exact: true }).first()).toBeVisible();
     if (passing.length) await expect(health.getByText(passing[0].title, { exact: true })).toHaveCount(0);
-    await expect(health.getByText(/FOOPS! test \(Garijo/)).toHaveCount(0);
+    await expect(health.getByText(/FOOPS!/)).toHaveCount(0);
+    if (failing[0]?.reference) {
+      const icon = health.getByRole('img', { name: `Fails. ${failing[0].reference}` });
+      await expect(icon).toHaveAttribute('title', failing[0].reference);
+    }
     const showAll = health.getByRole('button', { name: `Show all ${checks.length} checks` });
     await showAll.click();
     await expect(health.getByText(checks[0].title, { exact: true }).first()).toBeVisible();
-    await expect(health.getByText(/FOOPS! test \(Garijo/)).toBeVisible();
+    await expect(health.getByText(/FOOPS!/)).toHaveCount(0);
+    if (passing[0]) await expect(health.getByRole('img', { name: new RegExp(`^Passes\\.`) }).first()).toBeVisible();
     await health.getByRole('button', { name: 'Show failing only' }).click();
     if (passing.length) await expect(health.getByText(passing[0].title, { exact: true })).toHaveCount(0);
 

@@ -330,6 +330,7 @@ export const api = {
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   proposeTermEdit: (id: string, body: TermEditInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/term-edits`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  turtleDiff: (id: string) => get<{ before: string; after: string } | { error: string }>(`/api/change-requests/${e(id)}/turtle-diff`),
   publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
   acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),
   dismissPublicReport: (id: string, reportId: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/dismiss`),

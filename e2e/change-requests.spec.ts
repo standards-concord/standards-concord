@@ -37,10 +37,14 @@ test.describe('change requests', () => {
     await expect(page.getByRole('tab', { name: /^Changes 1/ })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Proposed changes (1)' })).toBeVisible();
     await expect(page.getByRole('tabpanel').getByText(name.toLowerCase()).first()).toBeVisible();
-    // The triples view shows the RDF being added.
-    await page.getByRole('button', { name: 'Triples' }).click();
-    await expect(page.getByRole('tabpanel').getByText(new RegExp(name)).first()).toBeVisible();
-    await page.getByRole('button', { name: 'Readable' }).click();
+    // The Diff tab shows the Turtle being added, as green lines (it replaced the raw "Triples" view).
+    await expect(page.getByRole('button', { name: 'Triples' })).toHaveCount(0);
+    await page.getByRole('tab', { name: /^Diff/ }).click();
+    const diff = page.getByRole('table', { name: 'Turtle diff' });
+    await expect(diff.locator('[data-diff="add"]').filter({ hasText: `vol:${name}` }).first()).toBeVisible();
+    await expect(diff.locator('[data-diff="del"]')).toHaveCount(0);
+    await expect(page.getByTestId('turtle-diff-summary')).toContainText(/^\+\d+ −0 lines$/);
+    await page.getByRole('tab', { name: /^Changes/ }).click();
 
     // 2. Submitted, it is classified and validated.
     await actions(page).getByRole('button', { name: 'Submit for review' }).click();
