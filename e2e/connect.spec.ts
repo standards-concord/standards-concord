@@ -330,6 +330,8 @@ test.describe('Connect page', () => {
       ['Homemade research bot', 'agent'],
       ['Not Claude', 'agent'],
       ['Cursor-malware', 'agent'],
+      ['Cursor (malware)', 'agent'],
+      ['constructor', 'agent'],
     ];
     for (const [name] of expected) await connectAgent(page, baseURL!, name);
     await page.goto('/connect#agents');

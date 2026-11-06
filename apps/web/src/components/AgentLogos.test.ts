@@ -28,4 +28,15 @@ describe('agentAppFor', () => {
     for (const name of ['Not Claude', 'Unofficial ChatGPT Bridge', 'Cursor-malware', 'Claude Codex', 'My Codex fork', 'Claude Code helper', 'Claude Code (a) (b)', 'VS Code extension', 'Homemade research bot', ''])
       expect(agentAppFor(name), name).toBeUndefined();
   });
+
+  it('allows a bracketed label only after Claude Code, which adds the server’s name', () => {
+    for (const name of ['Cursor (malware)', 'ChatGPT (unofficial)', 'Claude (beta)', 'Codex (fork)', 'VS Code (preview)'])
+      expect(agentAppFor(name), name).toBeUndefined();
+  });
+
+  it('treats names that look like object properties as ordinary unknown names', () => {
+    // A plain-object alias table used to return Object.prototype members for these, which broke rendering.
+    for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf', 'Constructor (x)'])
+      expect(agentAppFor(name), name).toBeUndefined();
+  });
 });

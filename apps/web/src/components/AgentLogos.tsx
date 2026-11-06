@@ -138,17 +138,17 @@ const LOGOS: Record<AgentApp, () => React.JSX.Element> = {
   vscode: VSCodeLogo,
 };
 
-/** The names each app registers with, compared after normalizeAgentName. Exact matches only. */
-const ALIASES: Record<string, AgentApp> = {
-  claude: 'claude',
-  'claude code': 'claude-code',
-  chatgpt: 'chatgpt',
-  codex: 'codex',
-  cursor: 'cursor',
-  'visual studio code': 'vscode',
-  'vs code': 'vscode',
-  vscode: 'vscode',
-};
+/** The names each app registers with, compared after normalizeAgentName. Exact matches only (a Map, so "constructor" is just a name). */
+const ALIASES = new Map<string, AgentApp>([
+  ['claude', 'claude'],
+  ['claude code', 'claude-code'],
+  ['chatgpt', 'chatgpt'],
+  ['codex', 'codex'],
+  ['cursor', 'cursor'],
+  ['visual studio code', 'vscode'],
+  ['vs code', 'vscode'],
+  ['vscode', 'vscode'],
+]);
 
 /** Lower case, with runs of whitespace (spaces, tabs, non-breaking spaces) collapsed to one space and trimmed. */
 export function normalizeAgentName(name: string) {
@@ -157,9 +157,10 @@ export function normalizeAgentName(name: string) {
 
 /**
  * Which app a connected agent is, from the name it registered with. The whole
- * name must be one of the app's names, optionally followed by one bracketed
- * label: Claude Code registers as "Claude Code (<server name>)". So "Not
- * Claude" or "Cursor-malware" get the generic mark, not an official one.
+ * name must be one of the app's names. The one exception is Claude Code, which
+ * registers as "Claude Code (<server name>)", so it may carry one bracketed
+ * label. "Not Claude", "Cursor-malware" or "Cursor (malware)" get the generic
+ * mark, not an official one.
  *
  * Accepted limit: the name is the app's own claim, and nothing stops another
  * app registering as exactly "Claude". The row already shows that same name as
@@ -168,7 +169,8 @@ export function normalizeAgentName(name: string) {
  */
 export function agentAppFor(clientName: string): AgentApp | undefined {
   const name = normalizeAgentName(clientName);
-  return ALIASES[name] ?? ALIASES[name.replace(/ ?\([^()]*\)$/, '')];
+  if (/^claude code \([^()]*\)$/.test(name)) return 'claude-code';
+  return ALIASES.get(name);
 }
 
 /** The logo for an app, decorative and the same size as in the Connect picker. */
