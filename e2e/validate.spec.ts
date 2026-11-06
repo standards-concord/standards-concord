@@ -250,7 +250,7 @@ test.describe('Validate data', () => {
   test('after signing out, the next account downloads the ontology again', async ({ page }) => {
     await page.goto('/o/volunteering/validate');
     await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
-    // Sign out from the account menu, without reloading the page.
+    // Sign out from the account menu and in again as someone else, all without reloading the page.
     await page.getByRole('button', { name: /E2E validator/ }).click();
     await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
     await expect(page).toHaveURL(/\/login/);
@@ -258,12 +258,13 @@ test.describe('Validate data', () => {
     page.on('request', (r) => {
       if (/\/api\/ontologies\/[^/]+\/source\?.*ref=1\.0\.0/.test(r.url())) downloads.push(r.url());
     });
+    await page.getByRole('button', { name: 'Try the demo' }).click();
+    await expect(page).not.toHaveURL(/\/login/);
+    // Back to Validate data in the same page (the address bar would reload it and forget everything anyway).
     await page.evaluate(() => {
       history.pushState({}, '', '/o/volunteering/validate');
       dispatchEvent(new PopStateEvent('popstate'));
     });
-    await page.getByRole('button', { name: 'Try the demo' }).click();
-    await expect(page).toHaveURL(/\/o\/volunteering\/validate$/);
     await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
     expect(downloads.length).toBeGreaterThan(0);
   });
