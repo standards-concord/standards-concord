@@ -366,6 +366,8 @@ export function CodeBlock({
         className="overflow-auto p-4 pr-14 font-mono text-[0.8rem] leading-relaxed"
         style={{ maxHeight }}
         data-language={language}
+        // A <pre> can't carry a name; as a labelled region screen readers announce it.
+        role={ariaLabel ? 'region' : undefined}
         aria-label={ariaLabel}
         // Scrollable, so keyboard users need to be able to reach it.
         tabIndex={0}
