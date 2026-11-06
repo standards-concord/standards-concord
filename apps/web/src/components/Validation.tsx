@@ -5,6 +5,7 @@ import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleA
 import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';
 import { checkedOf } from '../lib/reasonerCompare';
+import { useAdvancedFeatures } from '../lib/advanced';
 import { ProgressBar, cx } from './ui';
 import { HighlightedCode } from './code/CodeView';
 import { Disclosure } from './Disclosure';
@@ -27,7 +28,6 @@ export function validationVerdict(report: Pick<ValidationReport, 'passed' | 'rea
 export function ValidationSummary({ report }: { report: ValidationReport }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
-  const infos = report.lint.filter((i) => i.severity === 'info').length;
   const r = report.reasoner;
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" role="group" aria-label="Health summary">
@@ -38,7 +38,7 @@ export function ValidationSummary({ report }: { report: ValidationReport }) {
         sub="Reasoner"
         warn={checkedOf(r) !== 'complete' && !(r.available && !r.consistent)}
       />
-      <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub={infos ? `Lint · ${plural(infos, 'suggestion')}` : 'Lint (OWL best practice)'} />
+      <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub="Quality checks" />
       <div className="rounded-lg border border-line p-3">
         <div className="text-lg font-semibold tabular-nums">{pct(report.fair.score)}</div>
         <div className="text-xs text-muted">FAIR score</div>
@@ -60,13 +60,19 @@ function SummaryTile({ ok, warn, title, sub }: { ok: boolean; warn?: boolean; ti
   );
 }
 
+/**
+ * Errors and warnings. Suggestions (style nits that never block anything) show only with Advanced
+ * features on (Settings), so a healthy standard doesn't look noisy.
+ */
 export function LintIssues({ report, label }: { report: ValidationReport; label: Labeler }) {
-  if (!report.lint.length) return <p className="text-sm text-muted">No lint issues — the ontology follows the strict OWL profile’s best-practice rules.</p>;
-  const serious = report.lint.some((i) => i.severity !== 'info');
+  const [advanced] = useAdvancedFeatures();
+  const shown = advanced ? report.lint : report.lint.filter((i) => i.severity !== 'info');
+  if (!shown.length) return <p className="text-sm text-muted">No problems: the ontology follows OWL best practice.</p>;
+  const serious = shown.some((i) => i.severity !== 'info');
   return (
     <div className="space-y-4">
       {(['error', 'warning', 'info'] as IssueSeverity[]).map((sev) => {
-        const items = report.lint.filter((i) => i.severity === sev);
+        const items = shown.filter((i) => i.severity === sev);
         if (!items.length) return null;
         const { icon: Icon, cls, label: l } = SEV[sev];
         const list = (
@@ -186,9 +192,21 @@ export function FairChecks({ report }: { report: ValidationReport }) {
   );
 }
 
-export function CqResults({ report }: { report: ValidationReport }) {
+/** Whether each question can be answered. Editors can open one to see its SPARQL test and results. */
+export function CqResults({ report, showQueries = false }: { report: ValidationReport; showQueries?: boolean }) {
   const [openIdx, setOpenIdx] = useState<number>();
-  if (!report.competencyQuestions.length) return <p className="text-sm text-muted">No competency questions with SPARQL tests yet. They come from use cases.</p>;
+  if (!report.competencyQuestions.length) return <p className="text-sm text-muted">No competency questions with tests yet. They come from use cases.</p>;
+  if (!showQueries)
+    return (
+      <ul className="divide-y divide-line rounded-lg border border-line text-sm">
+        {report.competencyQuestions.map((q, i) => (
+          <li key={i} className="flex items-start gap-2 px-3 py-2">
+            {q.satisfied ? <CircleCheck className="mt-0.5 size-4 shrink-0 text-ok" aria-label="Answerable" role="img" /> : <CircleX className="mt-0.5 size-4 shrink-0 text-danger" aria-label="Not answerable" role="img" />}
+            <span className="flex-1">{q.question}</span>
+          </li>
+        ))}
+      </ul>
+    );
   return (
     <ul className="divide-y divide-line rounded-lg border border-line text-sm">
       {report.competencyQuestions.map((q, i) => (
@@ -236,7 +254,6 @@ export function CqResults({ report }: { report: ValidationReport }) {
   );
 }
 
-/** Summary tiles up front; lint, FAIR and competency-question detail one click away. */
 /** Stable identity of a lint finding, so a new finding can be told apart from ones already seen. */
 const issueKey = (i: ValidationReport['lint'][number]) => [i.severity, i.code, i.iri ?? '', i.message].join('|');
 
@@ -246,21 +263,23 @@ export function ValidationDetails({
   openLintKey,
   lintNote,
   headingLevel = 4,
+  showQueries = false,
 }: {
   report: ValidationReport;
   label: Labeler;
   /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */
   openLintKey?: unknown;
   lintNote?: ReactNode;
-  /** Level of the Lint / FAIR / Competency question headings: one below the section that holds them. */
+  /** Level of the quality / FAIR / competency question headings: one below the section that holds them. */
   headingLevel?: 3 | 4;
+  /** Editors: each competency question opens to its SPARQL test and results. */
+  showQueries?: boolean;
 }) {
+  const [advanced] = useAdvancedFeatures();
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
-  const infos = report.lint.length - errors - warnings;
-  const lintSummary = report.lint.length
-    ? [errors && plural(errors, 'error'), warnings && plural(warnings, 'warning'), infos && plural(infos, 'suggestion')].filter(Boolean).join(', ')
-    : 'none';
+  const infos = advanced ? report.lint.length - errors - warnings : 0;
+  const lintSummary = [errors && plural(errors, 'error'), warnings && plural(warnings, 'warning'), infos && plural(infos, 'suggestion')].filter(Boolean).join(', ') || 'none';
   const fairPassed = report.fair.checks.filter((c) => c.passed).length;
   const cqOk = report.competencyQuestions.filter((q) => q.satisfied).length;
   return (
@@ -268,7 +287,7 @@ export function ValidationDetails({
       <ValidationSummary report={report} />
       <ReasonerResult report={report} label={label} />
       <div className="divide-y divide-line rounded-lg border border-line">
-        <Disclosure className="px-4 py-3" heading={headingLevel} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="Quality checks" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
           <LintIssues report={report} label={label} />
           {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
         </Disclosure>
@@ -284,7 +303,7 @@ export function ValidationDetails({
           failures={report.competencyQuestions.filter((q) => !q.satisfied).map((q) => q.question)}
           keepMounted
         >
-          <CqResults report={report} />
+          <CqResults report={report} showQueries={showQueries} />
         </Disclosure>
       </div>
     </div>

@@ -232,11 +232,15 @@ test.describe('Meet co-lead bot', () => {
     const views = page.getByRole('radiogroup', { name: 'Meeting views' });
     await expect(views.getByRole('radio', { name: /Summary/ })).toHaveAttribute('aria-checked', 'true');
     await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible();
-    // The summary shows counts, not the whole transcript.
-    await expect(page.getByRole('list', { name: 'What the call produced' })).toContainText('transcript lines');
+    // The summary shows counts of what the call produced, not the whole transcript, and no counts of the
+    // machinery (transcript lines, bot prompts), with "1 use case", not "1 use cases".
+    const produced = page.getByRole('list', { name: 'What the call produced' });
+    await expect(produced).toContainText(/use cases?/);
+    await expect(produced).not.toContainText(/transcript lines|bot prompts/);
+    for (const item of await produced.getByRole('listitem').allTextContents()) expect(item.replace(/\s+/g, ' ').trim()).not.toMatch(/^1 .*s$/);
     await expect(page.getByText('Thanks for joining.', { exact: false })).toHaveCount(0);
 
-    await page.getByRole('button', { name: /transcript lines/ }).click();
+    await views.getByRole('radio', { name: /Transcript/ }).click();
     await expect(page.getByText(/Thanks for joining/)).toBeVisible();
     await expect(views.getByRole('radio', { name: /Transcript/ })).toHaveAttribute('aria-checked', 'true');
     await views.getByRole('radio', { name: /Bot prompts/ }).click();

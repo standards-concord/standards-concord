@@ -109,21 +109,12 @@ export function OverviewTab() {
           </p>
           <Disclosure className="mt-4 max-w-[68ch] border-t border-line pt-3" tone="muted" title="Ontology details">
             <dl className="grid gap-x-4 gap-y-1.5 text-sm sm:grid-cols-[9rem_1fr]">
-              <Row term="Classes">{o.stats.classes ?? '—'}</Row>
-              <Row term="Properties">{o.stats.properties ?? '—'}</Row>
-              <Row term="Individuals">{o.stats.individuals ?? '—'}</Row>
-              <Row term="Use cases">{o.stats.useCases ?? '—'}</Row>
-              <Row term="Releases">{o.stats.releases}</Row>
+              {/* Only what the sentence above doesn't already say (counts, version and policy are there). */}
               <Row term="Ontology IRI">
                 <span className="font-mono text-xs break-all">{o.ontologyIRI}</span>
               </Row>
-              <Row term="Current version">v{o.currentVersion}</Row>
+              {(o.stats.individuals ?? 0) > 0 && <Row term="Individuals">{o.stats.individuals}</Row>}
               {o.domain && <Row term="Domain">{o.domain}</Row>}
-              <Row term="Governance">
-                <Link to={`/o/${id}/governance`} className={proseLink}>
-                  {o.governance.name}
-                </Link>
-              </Row>
               <Row term="Created">{formatDate(o.createdAt)}</Row>
               {o.github && (
                 <Row term="Published to">
@@ -246,9 +237,10 @@ export function OverviewTab() {
                 label={label}
                 headingLevel={3}
                 openLintKey={healthKey}
+                showQueries={hasRole('editor', 'steward', 'owner')}
                 lintNote={
                   <>
-                    Lint runs again on every{' '}
+                    Quality checks run again on every{' '}
                     <Link to={`/o/${id}/changes`} className={proseLink}>
                       change request
                     </Link>

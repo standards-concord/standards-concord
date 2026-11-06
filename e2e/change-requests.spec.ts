@@ -75,7 +75,11 @@ test.describe('change requests', () => {
     // Two approvals are in, but the review period still has to run.
     await page.goto(url);
     await expect(status(page)).toContainText('In review');
-    await expect(page.getByRole('button', { name: /^Approval details 2 of 2 approvals · review ends in/ })).toBeVisible();
+    // The approval count is in Approval details, which no longer repeats it as a one-line summary.
+    await expect(page.getByText('Still needed', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Approval details', exact: true }).click();
+    await expect(page.getByText('2 / 2', { exact: true })).toBeVisible();
+    await expect(page.getByText(/left · ends /)).toBeVisible();
     // Fast-forward the simulated clock past it: the default policy merges approved changes automatically.
     const r = await page.request.post('/api/simulation/clock', { data: { advanceDays: 8 } });
     expect(r.ok(), await r.text()).toBeTruthy();
@@ -177,7 +181,8 @@ test.describe('change requests', () => {
     await expect(status(page)).toContainText('Needs work');
     await actions(page).getByRole('button', { name: 'Approve' }).click();
     await expect(status(page)).toContainText('In review');
-    await expect(page.getByRole('button', { name: /^Approval details 1 of 2 approvals/ })).toBeVisible();
+    await page.getByRole('button', { name: 'Approval details', exact: true }).click();
+    await expect(page.getByText('1 / 2', { exact: true })).toBeVisible();
   });
 
   test('the author can withdraw a request, and nobody can act on it after', async ({ page, request }) => {

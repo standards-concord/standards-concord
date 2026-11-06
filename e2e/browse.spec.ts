@@ -115,7 +115,9 @@ test.describe('class tree and class pages', () => {
     await expect(props.getByText('Inherited from')).toBeVisible();
     const hasSkill = props.getByRole('row', { name: /has skill/ });
     await expect(hasSkill).toContainText('skill');
-    await expect(hasSkill).toContainText('0..*');
+    // How many, in words, with the exact cardinality on hover.
+    await expect(hasSkill).toContainText('Any number');
+    await expect(hasSkill.getByRole('cell', { name: 'Any number' })).toHaveAttribute('title', '0..*');
 
     // Relationships that can point at a volunteer, via its parent.
     // Secondary detail is grouped into collapsed sections with counts.
@@ -150,7 +152,8 @@ test.describe('class tree and class pages', () => {
     await page.goto(`${base}?term=${encodeURIComponent(`${VOL}Application`)}`);
     await settle(page);
     const props = page.getByRole('table', { name: 'Properties of application' });
-    await expect(props.getByRole('row', { name: /for opportunity/ }).locator('td').nth(1)).toHaveText('1');
+    await expect(props.getByRole('row', { name: /for opportunity/ }).locator('td').nth(1)).toHaveText('Exactly one');
+    await expect(props.getByRole('row', { name: /for opportunity/ }).locator('td').nth(1)).toHaveAttribute('title', '1..1');
     await expect(props.getByRole('row', { name: /submitted by/ })).toContainText('person');
   });
 
@@ -1060,7 +1063,7 @@ test.describe('large and unusual ontologies (stubbed)', () => {
     await page.goto(`${base}?term=${encodeURIComponent(NS + 'Owner')}`);
     const table = page.getByRole('table', { name: 'Properties of Owner' });
     const row = table.getByRole('row').filter({ hasText: 'hasPet' });
-    await expect(row.getByRole('cell').nth(1)).toHaveText('1..*');
+    await expect(row.getByRole('cell').nth(1)).toHaveText('At least one');
     await expect(row).toContainText('at most 1 Cat');
     await expect(row).toContainText('at least one Dog');
 

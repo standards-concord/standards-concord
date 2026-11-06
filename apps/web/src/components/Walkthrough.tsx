@@ -56,7 +56,7 @@ function WelcomeStep() {
       <Disclosure tone="muted" title="What can I try?">
         <ul className="space-y-1.5 text-muted">
           <li>• Describe how you use data to an AI interviewer (typed or spoken), or let a bot co-facilitate your Google Meet.</li>
-          <li>• Proposed changes are classified as patch / minor / major, validated by a reasoner, linted and FAIR-scored.</li>
+          <li>• Proposed changes are classified as patch / minor / major, validated by a reasoner, quality-checked and FAIR-scored.</li>
           <li>• Review and voting follow a governance policy you choose, then versions are released and published.</li>
           <li>• Coding agents connect over MCP to read the ontology and report gaps.</li>
         </ul>

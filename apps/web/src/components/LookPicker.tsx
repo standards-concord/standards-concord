@@ -19,7 +19,7 @@ export function LookPicker({ level = 3 }: { level?: 2 | 3 | 4 }) {
   const [look, setLook] = useLook();
   return (
     <Card>
-      <CardHeader level={level} icon={Palette} title="Visual style" subtitle="Saved in this browser. You can also add ?look=odi, spec, civic, workbench or classic to any link." />
+      <CardHeader level={level} icon={Palette} title="Visual style" subtitle="Saved in this browser." />
       <div role="radiogroup" aria-label="Visual style" className="grid gap-3 p-5 sm:grid-cols-2">
         {LOOKS.map((l) => {
           const active = l.id === look;

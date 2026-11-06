@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.36.0',
+    date: '2026-11-06',
+    title: 'Fewer technical details, everywhere',
+    changes: [
+      {
+        id: 'fewer-details',
+        type: 'feat',
+        title: 'Less about how Concord works, more about the standard',
+        detail:
+          'Lint is now "Quality checks", and style suggestions only show with Advanced features on. Only editors can open a competency question to its SPARQL. Change requests no longer restate their edits in the AI analysis, and say where they came from only when it isn’t the default. Fork pages lose the MCP tool names and list two formats up front. Source & export keeps Turtle, JSON-LD and SHACL up front, with the rest under More formats. "How many" on a class reads "Optional", "At least one" and so on. The ontology IRI moves into Ontology details, and meeting summaries count only what the call produced.',
+        roles: [],
+        to: '{o}',
+        ask: 'Is there anything you used to rely on that you can no longer find?',
+      },
+    ],
+  },
+  {
     version: '0.35.0',
     date: '2026-11-06',
     title: 'Advanced features, and a diff on every change',
