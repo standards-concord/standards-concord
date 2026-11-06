@@ -146,7 +146,7 @@ function Members() {
       <div className="divide-y divide-line">
         {ontology.members.map((m) => (
           <div key={m.userId} className="flex flex-wrap items-start gap-3 px-5 py-3">
-            <Avatar name={m.user?.name} src={m.user?.avatarUrl} simulated={m.user?.simulated} size={32} roles={ringRoles(m.roles, ontology.ownerIds.includes(m.userId))} />
+            <Avatar name={m.user?.name} src={m.user?.avatarUrl} simulated={m.user?.simulated} size={32} roles={ringRoles(m.roles, ontology.ownerIds.includes(m.userId))} decorative />
             <div className="min-w-44 flex-1">
               <div className="text-sm font-medium">
                 {m.user?.name ?? m.userId} {ontology.ownerIds.includes(m.userId) && <Crown className="inline size-3.5 text-warn" />}

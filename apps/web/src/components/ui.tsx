@@ -194,7 +194,22 @@ export function Badge({ tone = 'neutral', children, className, icon: Icon, title
   );
 }
 
-export function Avatar({ name, src, size = 28, simulated, roles }: { name?: string; src?: string; size?: number; simulated?: boolean; roles?: readonly RingRole[] }) {
+export function Avatar({
+  name,
+  src,
+  size = 28,
+  simulated,
+  roles,
+  decorative,
+}: {
+  name?: string;
+  src?: string;
+  size?: number;
+  simulated?: boolean;
+  roles?: readonly RingRole[];
+  /** Hidden from screen readers (the tooltip stays), for when the name and roles are written out beside it. */
+  decorative?: boolean;
+}) {
   const [broken, setBroken] = useState(false);
   const hue = [...(name ?? '?')].reduce((a, c) => a + c.charCodeAt(0), 0) % 360;
   // Owners, stewards and ODI oversight get a ring in their most senior role's colour (see ringRoles);
@@ -206,14 +221,14 @@ export function Avatar({ name, src, size = 28, simulated, roles }: { name?: stri
   const picture = src && !broken;
   return (
     <span
-      role="img"
-      aria-label={label}
+      {...(decorative ? { 'aria-hidden': true } : { role: 'img', 'aria-label': label })}
       title={label}
       data-avatar={picture ? 'picture' : 'initials'}
       data-role-ring={ring}
       className={cx(
         'relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[var(--r-avatar)] text-[0.65rem] font-semibold text-white',
-        ring ? 'outline-2 outline-offset-1' : simulated && 'ring-1 ring-line-strong',
+        // No other ring or edge (simulated people used to have a grey one), so a ring always means a role.
+        ring && 'outline-2 outline-offset-1',
       )}
       // The pictures are black line art, so they sit on a light tint of the person's colour; initials are white on the darker shade.
       style={{
