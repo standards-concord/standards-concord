@@ -226,7 +226,7 @@ exit 1
     ['another workflow', { ...trusted, path: '.github/workflows/ci.yml' }],
     ['a pull request', { ...trusted, event: 'pull_request' }],
     ['a pull_request_target run', { ...trusted, event: 'pull_request_target' }],
-    ['a fork', { ...trusted, head_repository: { full_name: 'someone/standards-concord' } }],
+    ['a fork', { ...trusted, head_repository: { full_name: 'someone/a-fork' } }],
     ['a run with no details', {}],
   ];
   for (const [what, run] of untrusted) {
