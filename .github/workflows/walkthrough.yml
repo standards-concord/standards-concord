@@ -19,6 +19,8 @@ name: Walkthrough video
 # variable, default 2500; the tour and feedback scripts in full are about 8,000, the clips about 2,100) and refuses before
 # sending anything if it would need more. For a first or full recording, run this
 # workflow by hand with a larger budget (0 for no limit) and the release tag to attach to.
+# Narration voiced in a run that attached nothing (such as a features run) is in that run's
+# artifact: pass its run id as `seed_voice_run` to reuse it rather than pay for it again.
 
 on:
   release:
@@ -48,6 +50,10 @@ on:
         description: Release tag to attach the videos to, such as v0.17.0 (publish mode only; created from this commit if it doesn't exist; empty attaches nothing)
         type: string
         default: ''
+      seed_voice_run:
+        description: Run id whose artifact holds narration to reuse, such as an earlier features run (narration kept with a release is reused anyway; empty reuses none)
+        type: string
+        default: ''
 
 # Nothing here writes to the repository except the attach job, which asks for it itself.
 permissions:
@@ -64,6 +70,8 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      # Only to download an earlier run's artifact when seed_voice_run asks for it.
+      actions: read
     outputs:
       recorded: ${{ steps.record.outcome == 'success' }}
     steps:
@@ -133,11 +141,22 @@ jobs:
           mkdir -p walkthrough/.cache/voice
           for t in $(gh release list --repo "$REPO" --limit 10 --json tagName --jq '.[].tagName'); do
             if gh release download "$t" --repo "$REPO" --pattern walkthrough-voice.tar.gz --dir "$RUNNER_TEMP" --clobber 2>/dev/null; then
-              tar -xzf "$RUNNER_TEMP/walkthrough-voice.tar.gz" -C walkthrough/.cache/voice
+              bash walkthrough/unpack-voice.sh "$RUNNER_TEMP/walkthrough-voice.tar.gz" walkthrough/.cache/voice
               echo "Restored narration from $t"
               break
             fi
           done
+      # Narration from a run that attached nothing (the features video is only ever recorded
+      # on demand) is kept only in that run's artifact. seed-voice.sh accepts it only from a
+      # walkthrough.yml run of this repository started by hand or by a release, and adds only
+      # plain files, leaving those already restored as they are.
+      - name: Seed narration from an earlier run
+        if: steps.voice.outputs.ready == 'true' && inputs.seed_voice_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ inputs.seed_voice_run }}
+        run: bash walkthrough/seed-voice.sh "$RUN" walkthrough/.cache/voice
 
       - name: Record
         id: record
