@@ -32,6 +32,30 @@ test.describe('feedback', () => {
     await expect(page.getByRole('button', { name: /Guided feedback/ })).toBeVisible();
   });
 
+  // The choices used to enable for a moment while the signed-in account's data was still loading, then disable
+  // again until it arrived. A click in that moment did nothing, so testers (and these tests, now and then) stayed
+  // on the choice of pathway. Now they enable once, when everything they need has loaded.
+  test('the ways to give feedback enable once, and stay enabled', async ({ page }) => {
+    await page.addInitScript(() => {
+      const w = window as unknown as { __flips: string[] };
+      w.__flips = [];
+      new MutationObserver((records) => {
+        for (const r of records) {
+          if (r.attributeName !== 'disabled' || !(r.target as Element).textContent?.includes('Guided feedback')) continue;
+          w.__flips.push(r.oldValue === null ? 'disabled' : 'enabled');
+        }
+      }).observe(document, { subtree: true, attributes: true, attributeFilter: ['disabled'], attributeOldValue: true });
+    });
+    await signIn(page, { name: `Feedback tester ${uniq()}`, role: 'contributor' });
+    await page.goto('/feedback');
+    const guided = page.getByRole('button', { name: /Guided feedback/ });
+    await expect(guided).toBeEnabled();
+    await settle(page);
+    expect(await page.evaluate(() => (window as unknown as { __flips: string[] }).__flips)).toEqual(['enabled']);
+    await guided.click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Guided feedback' })).toBeVisible();
+  });
+
   test('guided feedback captures answers as you go, and they can be edited before submitting', async ({ page }) => {
     await signIn(page, { name: `Feedback tester ${uniq()}`, role: 'contributor' });
     await page.goto('/feedback');

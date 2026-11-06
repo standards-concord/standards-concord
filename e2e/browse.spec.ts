@@ -208,11 +208,20 @@ test.describe('moving around the ontology is instant', () => {
     await settle(page);
     await expect(page.getByRole('heading', { level: 2, name: 'skill' })).toBeVisible();
     // Stand in for a merge: from now on the draft's view names Skill differently.
+    // The app drops a view request when it moves on (here, leaving Browse for Validate data). That request's
+    // response is then disposed, and reading it used to fail the test with "Response has been disposed".
+    // A dropped request has no one waiting for it, so there is nothing to rewrite.
     await page.route(/\/api\/ontologies\/[^/]+\/view(\?|$)/, async (route) => {
-      const res = await route.fetch();
-      const v = (await res.json()) as { classes: { iri: string; label?: string }[] };
+      let res: Awaited<ReturnType<typeof route.fetch>>;
+      let v: { classes: { iri: string; label?: string }[] };
+      try {
+        res = await route.fetch();
+        v = (await res.json()) as typeof v;
+      } catch {
+        return;
+      }
       for (const c of v.classes) if (c.iri === `${VOL}Skill`) c.label = 'competence';
-      await route.fulfill({ response: res, json: v });
+      await route.fulfill({ response: res, json: v }).catch(() => {});
     });
     await page.getByRole('navigation', { name: 'Explore pages' }).getByRole('link', { name: 'Validate data' }).click();
     await expect(page.getByTestId('validate-status')).toBeVisible();
