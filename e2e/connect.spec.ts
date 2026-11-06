@@ -1,4 +1,6 @@
+import type { Page } from '@playwright/test';
 import { expect, signIn, test } from './fixtures';
+import { fakeAgent } from './mcp-agent';
 
 const APPS = ['Claude', 'ChatGPT', 'Claude Code', 'Codex', 'Cursor', 'VS Code'];
 
@@ -13,6 +15,19 @@ function contrast(a: number[], b: number[]) {
   };
   const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
   return (hi! + 0.05) / (lo! + 0.05);
+}
+
+/** Connect an MCP client that registers under `name`, allowing it as the signed-in person. */
+async function connectAgent(page: Page, baseURL: string, name: string) {
+  const agent = await fakeAgent(baseURL, name);
+  try {
+    await page.goto((await agent.authorizationUrl).href);
+    await page.getByTestId('oauth-allow').click();
+    await expect(page.locator('#done')).toBeVisible();
+    await agent.finish((await agent.callback).get('code')!);
+  } finally {
+    await agent.close();
+  }
 }
 
 const TOOL_NAMES = ['list_ontologies', 'get_ontology', 'search_terms', 'sparql_query', 'validate_data', 'propose_change', 'get_change_request'];
@@ -296,6 +311,43 @@ test.describe('Connect page', () => {
     await expect(page.getByTestId('new-token')).toHaveCount(0);
     await expect(page.getByRole('status')).toHaveText('Revoked token “Second”.');
     await expect(tokens.getByRole('button', { name: 'Revoke First' })).toBeVisible();
+  });
+
+  // Connected agents used to be listed by name only. Each now shows its app's logo, matched from the whole name it
+  // registered with (ignoring case and spacing), and any other name, including one that merely contains an app's
+  // name, gets a generic agent mark rather than someone else's.
+  test('each connected agent shows its app’s logo', async ({ page, baseURL }) => {
+    test.slow();
+    await signIn(page, { name: 'Logo tester' });
+    const expected: [string, string][] = [
+      ['Claude', 'claude'],
+      ['Claude Code (concord)', 'claude-code'],
+      ['ChatGPT', 'chatgpt'],
+      ['Codex', 'codex'],
+      ['Cursor', 'cursor'],
+      ['Visual Studio Code', 'vscode'],
+      ['claude  CODE (Concord)', 'claude-code'],
+      ['Homemade research bot', 'agent'],
+      ['Not Claude', 'agent'],
+      ['Cursor-malware', 'agent'],
+      ['Cursor (malware)', 'agent'],
+      ['constructor', 'agent'],
+    ];
+    for (const [name] of expected) await connectAgent(page, baseURL!, name);
+    await page.goto('/connect#agents');
+    const list = page.getByTestId('connections');
+    for (const [name, logo] of expected) {
+      const row = list.getByRole('listitem').filter({ has: page.getByText(name, { exact: true }) });
+      await expect(row).toHaveCount(1);
+      const mark = row.locator('svg[data-logo]');
+      await expect(mark, `${name} shows the ${logo} mark`).toHaveAttribute('data-logo', logo);
+      await expect(mark).toBeVisible();
+      await expect(mark).toHaveAttribute('aria-hidden', 'true');
+      const box = (await mark.boundingBox())!;
+      expect([box.width, box.height], `${name} logo size`).toEqual([20, 20]);
+      // The logo is decorative: the row and its button are still named by the app's own name.
+      await expect(row.getByRole('button', { name: `Disconnect ${name}` })).toBeVisible();
+    }
   });
 
   test('each ontology’s Connect an agent tab is the same hub, with connected agents and tokens', async ({ page, request }) => {

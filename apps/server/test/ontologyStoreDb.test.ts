@@ -114,7 +114,7 @@ describe('database-backed ontology store', () => {
       await store.writeRelease(p, '1.0.0', await graph('v1'), { 'index.html': '<h1>1.0.0</h1>' }, 'First release', { name: 'Steward' });
       const fork = await store.commitFork(p, 'f', await graph('fork'), 'Fork it', { name: 'Dev' }, { parent: await store.head(p), create: true }, async () => undefined);
       const forked = await store.commitFork(p, 'f', await graph('fork 2'), 'Fork edit', { name: 'Dev' }, { parent: fork }, async () => undefined);
-      await store.commitWorking(p, await graph('v2'), 'Second edit', { name: 'Ben' });
+      const second = await store.commitWorking(p, await graph('v2'), 'Second edit', { name: 'Ben' });
       // A fork synced with upstream: two parents, the fork's own first.
       const synced = await store.commitFork(p, 'f', await graph('fork 3'), 'Sync with upstream', { name: 'Dev' }, { parent: forked, extraParents: [await store.head(p)] }, async () => undefined);
       await store.updateReleaseFiles(p, { '1.0.0': { 'index.html': '<h1>1.0.0 (superseded)</h1>', 'notes.md': 'n' } }, 'Refresh release pages');
@@ -132,6 +132,10 @@ describe('database-backed ontology store', () => {
         changelog: (await store.readReleaseFile(p, '1.1.0', 'ontology.ttl'))?.includes('"v2"'),
         released: (await (await store.at(p, '1.0.0')).toTurtle()).includes('"v1"'),
         working: (await store.readWorkingText(p)).includes('"v2"'),
+        // A merged change request's diff: its commit against the commit it was made on (the first parent).
+        second: await store.commitOf(p, second).then(async (c) => ({ subject: c.subject, parentHasV1: (await store.readAt(p, c.parent!)).includes('"v1"') })),
+        syncedOnFork: (await store.commitOf(p, synced)).parent === forked,
+        first: await store.commitOf(p, upstream0),
         synced,
       };
     };
@@ -140,6 +144,9 @@ describe('database-backed ontology store', () => {
     expect(fromDb).toEqual(fromGit);
     expect(fromDb.versions).toEqual(['1.0.0', '1.1.0']);
     expect(fromDb.forkLog).toEqual(['Sync with upstream', 'Fork edit', 'Fork it']);
+    expect(fromDb.second).toEqual({ subject: 'Second edit', parentHasV1: true });
+    expect(fromDb.syncedOnFork).toBe(true);
+    expect(fromDb.first).toEqual({ parent: undefined, subject: 'Create A vocabulary' });
     expect((await readCommit(synced)).parents).toHaveLength(2);
   });
 

@@ -1,7 +1,7 @@
 import { useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { canCastVote, type ChangeOp, type ChangeRequestDetail } from '@concord/shared';
-import { ArrowLeft, Check, CircleSlash, ClipboardList, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch } from 'lucide-react';
+import { ArrowLeft, Check, CircleSlash, ClipboardList, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch, FileDiff } from 'lucide-react';
 import { api, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
@@ -10,7 +10,8 @@ import { makeLabeler } from '../../lib/ontology';
 import { LevelBadge, OriginIcon, RoleChips } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
 import { PolicyGlance } from '../../components/PolicyRules';
-import { OpCards, TermChanges, TripleDiff } from '../../components/OpsView';
+import { OpCards, TermChanges } from '../../components/OpsView';
+import { TurtleDiff } from '../../components/code/TurtleDiff';
 import { ValidationDetails, validationVerdict } from '../../components/Validation';
 import { AppChecksCard, AutopilotBadge } from '../../components/AppChecks';
 import { voteStanding } from '../../lib/voteStanding';
@@ -330,9 +331,18 @@ function ClassificationBubble({ cr }: { cr: ChangeRequestDetail }) {
   );
 }
 
-type View = 'changes' | 'checks' | 'discussion';
+type View = 'changes' | 'diff' | 'checks' | 'discussion';
 
 /** ARIA tabs with the standard keyboard pattern: one tab stop, arrow keys, Home and End move between tabs and select them. */
+/** Loads the change's before-and-after Turtle when the Diff tab opens, and again when the edits change. */
+function TurtleDiffPanel({ crId, editsVersion }: { crId: string; editsVersion?: number }) {
+  const state = useAsync(() => api.turtleDiff(crId), [crId, editsVersion]);
+  if (state.error) return <ErrorCard error={state.error} onRetry={state.reload} />;
+  if (!state.data) return <Loading label="Building the diff…" />;
+  if ('error' in state.data) return <p className="text-sm text-muted">{state.data.error}</p>;
+  return <TurtleDiff before={state.data.before} after={state.data.after} />;
+}
+
 function Tabs({ view, onChange, items }: { view: View; onChange: (v: View) => void; items: { id: View; label: string; note?: string; tone?: 'danger' | 'warn' }[] }) {
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     // Move from the focused tab, not the selected one: keys can arrive before the selection re-renders.
@@ -369,12 +379,11 @@ function Tabs({ view, onChange, items }: { view: View; onChange: (v: View) => vo
 
 export function ChangeRequestPage() {
   const { crId = '' } = useParams();
-  const { id, ontology, view, userById } = useOntology();
+  const { id, ontology, view, userById, hasRole } = useOntology();
   const { now } = useSession();
   const state = useAsync(() => api.changeRequest(crId), [crId]);
-  const [showTriples, setShowTriples] = useState(false);
   const [params, setParams] = useSearchParams();
-  const tab = (['changes', 'checks', 'discussion'].includes(params.get('view') ?? '') ? params.get('view') : 'changes') as View;
+  const tab = (['changes', 'diff', 'checks', 'discussion'].includes(params.get('view') ?? '') ? params.get('view') : 'changes') as View;
   const setTab = (v: View) => {
     const n = new URLSearchParams(params);
     if (v === 'changes') n.delete('view');
@@ -393,6 +402,7 @@ export function ChangeRequestPage() {
   const cr = state.data;
   const author = cr.author ?? userById(cr.authorId);
   const nameOf = (uid: string) => userById(uid)?.name ?? (uid === cr.authorId ? author?.name : undefined) ?? 'Someone';
+  const avatarOf = (uid: string) => userById(uid)?.avatarUrl ?? (uid === cr.authorId ? author?.avatarUrl : undefined);
 
   return (
     <div>
@@ -411,8 +421,9 @@ export function ChangeRequestPage() {
           <span className="flex items-center gap-1.5">
             <Avatar name={author?.name} src={author?.avatarUrl} size={18} simulated={author?.simulated} /> {author?.name ?? 'Unknown'}
           </span>
-          <OriginIcon origin={cr.origin} withLabel />
-          <span>{titleCase(cr.kind)}</span>
+          {/* Where it came from and what kind it is, only when they aren't the default (proposed directly, a feature). */}
+          {cr.origin.type !== 'direct' && <OriginIcon origin={cr.origin} withLabel />}
+          {cr.kind !== 'feature' && <span>{titleCase(cr.kind)}</span>}
           <span>opened {relativeTime(cr.createdAt, now())}</span>
           {cr.origin.type === 'meeting' && (
             <Link className="text-accent hover:underline" to={`/o/${id}/meetings/${cr.origin.meetingId}`}>
@@ -446,6 +457,7 @@ export function ChangeRequestPage() {
             onChange={setTab}
             items={[
               { id: 'changes', label: 'Changes', note: `${cr.ops.length}` },
+              ...(cr.withheld || !cr.ops.length ? [] : [{ id: 'diff' as const, label: 'Diff' }]),
               {
                 id: 'checks',
                 label: 'Checks',
@@ -468,58 +480,11 @@ export function ChangeRequestPage() {
               </Card>
             )}
 
-            {!!cr.useCases?.length && (
-              <Card>
-                <CardHeader icon={ClipboardList} title={`Addresses ${cr.useCases.length === 1 ? 'a use case' : `${cr.useCases.length} use cases`}`} subtitle="They close automatically when this change is released." />
-                <ul className="divide-y divide-line" data-testid="cr-use-cases">
-                  {cr.useCases.map((u) => (
-                    <li key={u.id} className="px-5 py-3">
-                      <UseCaseRefLink ontologyId={id} r={u} />
-                    </li>
-                  ))}
-                </ul>
-              </Card>
-            )}
-
-            <Card>
-              <CardHeader
-                title={`Proposed changes (${cr.ops.length})`}
-                actions={
-                  <div className="inline-flex rounded-lg border border-line-strong p-0.5 text-xs">
-                    <button onClick={() => setShowTriples(false)} className={cx('rounded-md px-2.5 py-1', !showTriples ? 'bg-surface-2 font-medium' : 'text-muted')}>
-                      Readable
-                    </button>
-                    <button onClick={() => setShowTriples(true)} className={cx('rounded-md px-2.5 py-1', showTriples ? 'bg-surface-2 font-medium' : 'text-muted')}>
-                      Triples
-                    </button>
-                  </div>
-                }
-              />
-              <div className="p-5">
-                {showTriples ? (
-                  <TripleDiff diff={cr.diff} />
-                ) : (
-                  <div className="space-y-4">
-                    <OpCards ops={cr.ops} label={label} />
-                    {cr.diff?.terms.length ? (
-                      <details>
-                        <summary className="cursor-pointer text-xs font-medium text-accent">Effect on terms ({cr.diff.terms.length})</summary>
-                        <div className="mt-2">
-                          <TermChanges diff={cr.diff} />
-                        </div>
-                      </details>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-            </Card>
-
             {cr.analysis && (
               <Card>
                 <CardHeader icon={ScanSearch} title="AI analysis" actions={cr.analysis.recommendation && <Badge tone="accent">{RECOMMENDATION[cr.analysis.recommendation]}</Badge>} />
                 <div className="space-y-3 p-5 text-sm">
-                  <Markdown text={cr.analysis.summary} />
-                  {/* Decision-relevant cautions stay visible; the supporting explanation is behind the disclosure. */}
+                  {/* No summary: it restated Proposed changes. Cautions stay visible; the reasoning is behind the disclosure. */}
                   {cr.analysis.existingTerms?.length ? (
                     <p className="flex items-start gap-2 rounded-lg bg-warn-soft p-2.5 text-xs" role="note">
                       <Lightbulb className="mt-0.5 size-3.5 shrink-0 text-warn" />
@@ -557,6 +522,49 @@ export function ChangeRequestPage() {
                 </div>
               </Card>
             )}
+
+            {!!cr.useCases?.length && (
+              <Card>
+                <CardHeader icon={ClipboardList} title={`Addresses ${cr.useCases.length === 1 ? 'a use case' : `${cr.useCases.length} use cases`}`} subtitle="They close automatically when this change is released." />
+                <ul className="divide-y divide-line" data-testid="cr-use-cases">
+                  {cr.useCases.map((u) => (
+                    <li key={u.id} className="px-5 py-3">
+                      <UseCaseRefLink ontologyId={id} r={u} />
+                    </li>
+                  ))}
+                </ul>
+              </Card>
+            )}
+
+            <Card>
+              <CardHeader
+                title={`Proposed changes (${cr.ops.length})`}
+              />
+              <div className="p-5">
+                <div className="space-y-4">
+                  <OpCards ops={cr.ops} label={label} />
+                  {cr.diff?.terms.length ? (
+                    <details>
+                      <summary className="cursor-pointer text-xs font-medium text-accent">Effect on terms ({cr.diff.terms.length})</summary>
+                      <div className="mt-2">
+                        <TermChanges diff={cr.diff} />
+                      </div>
+                    </details>
+                  ) : null}
+                </div>
+              </div>
+            </Card>
+
+            </div>
+          )}
+          {tab === 'diff' && (
+            <div role="tabpanel" id="cr-panel-diff" aria-labelledby="cr-tab-diff" tabIndex={0} className="outline-none focus-visible:outline-2 focus-visible:outline-accent">
+              <Card>
+                <CardHeader icon={FileDiff} title="Turtle diff" subtitle={cr.status === 'merged' || cr.status === 'released' ? 'The ontology file before and after this change.' : 'The ontology file as it is now, and with this change merged.'} />
+                <div className="p-5">
+                  <TurtleDiffPanel crId={cr.id} editsVersion={cr.editsVersion} />
+                </div>
+              </Card>
             </div>
           )}
           {tab === 'checks' && (
@@ -565,7 +573,7 @@ export function ChangeRequestPage() {
               <CardHeader icon={ShieldCheck} title="Validation" subtitle="Run automatically on the working draft with this change applied." />
               <div className="p-5">
                 {cr.validation ? (
-                  <ValidationDetails report={cr.validation} label={label} />
+                  <ValidationDetails report={cr.validation} label={label} showQueries={hasRole('editor', 'steward', 'owner')} />
                 ) : (
                   <p className="text-sm text-muted">Not validated yet — validation runs when the request is submitted.</p>
                 )}
@@ -591,7 +599,7 @@ export function ChangeRequestPage() {
                       {item.kind === 'event' ? (
                         <span className="mt-1.5 ml-2 size-2 shrink-0 rounded-full bg-line-strong" />
                       ) : (
-                        <Avatar name={nameOf(item.kind === 'review' ? item.r.userId : item.v.userId)} size={24} />
+                        <Avatar name={nameOf(item.kind === 'review' ? item.r.userId : item.v.userId)} src={avatarOf(item.kind === 'review' ? item.r.userId : item.v.userId)} size={24} />
                       )}
                       <div className="min-w-0 flex-1 text-sm">
                         {item.kind === 'review' && (

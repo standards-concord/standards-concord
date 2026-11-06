@@ -328,6 +328,15 @@ test.describe('looks', () => {
             ['subtle', 'surface-2'],
             ['header-focus', 'header-bg', 3],
             ['focus', 'surface', 3],
+            // Avatar role rings (owner, steward, ODI oversight) against the page and cards.
+            ['role-owner', 'surface', 3],
+            ['role-owner', 'bg', 3],
+            ['role-steward', 'surface', 3],
+            ['role-steward', 'bg', 3],
+            ['role-odi', 'surface', 3],
+            ['role-odi', 'bg', 3],
+            // The ODI oversight role chip.
+            ['role-odi', 'role-odi-soft'],
           ];
           const probe = document.createElement('span');
           document.body.appendChild(probe);

@@ -5,10 +5,10 @@ import { askOf, odiApprovedFromTimeline } from '../../lib/asks';
 import { scrollBehavior } from '../../lib/motion';
 import { api } from '../../api';
 import { useAsync } from '../../lib/hooks';
-import { formatDate, plural, relativeTime } from '../../lib/format';
+import { formatDate, plural, relativeTime, ringRoles } from '../../lib/format';
 import { useSession } from '../../lib/session';
 import { ActivityFeed } from '../../components/ActivityFeed';
-import { LevelBadge, RoleChips, StatusPill } from '../../components/badges';
+import { LevelBadge, RoleChips, RoleRingLegend, StatusPill } from '../../components/badges';
 import { Disclosure } from '../../components/Disclosure';
 import { ValidationDetails } from '../../components/Validation';
 import { Avatar, ErrorCard, Loading } from '../../components/ui';
@@ -52,6 +52,7 @@ export function OverviewTab() {
   }, [healthKey, settled]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const members = o.members ?? [];
+  const shownMembers = members.slice(0, 14);
   const inProgress = (changes.data ?? [])
     .filter((cr) => IN_PROGRESS.includes(cr.status))
     .sort((a, b) => IN_PROGRESS.indexOf(a.status) - IN_PROGRESS.indexOf(b.status) || b.updatedAt.localeCompare(a.updatedAt));
@@ -108,21 +109,12 @@ export function OverviewTab() {
           </p>
           <Disclosure className="mt-4 max-w-[68ch] border-t border-line pt-3" tone="muted" title="Ontology details">
             <dl className="grid gap-x-4 gap-y-1.5 text-sm sm:grid-cols-[9rem_1fr]">
-              <Row term="Classes">{o.stats.classes ?? '—'}</Row>
-              <Row term="Properties">{o.stats.properties ?? '—'}</Row>
-              <Row term="Individuals">{o.stats.individuals ?? '—'}</Row>
-              <Row term="Use cases">{o.stats.useCases ?? '—'}</Row>
-              <Row term="Releases">{o.stats.releases}</Row>
+              {/* Only what the sentence above doesn't already say (counts, version and policy are there). */}
               <Row term="Ontology IRI">
                 <span className="font-mono text-xs break-all">{o.ontologyIRI}</span>
               </Row>
-              <Row term="Current version">v{o.currentVersion}</Row>
+              {(o.stats.individuals ?? 0) > 0 && <Row term="Individuals">{o.stats.individuals}</Row>}
               {o.domain && <Row term="Domain">{o.domain}</Row>}
-              <Row term="Governance">
-                <Link to={`/o/${id}/governance`} className={proseLink}>
-                  {o.governance.name}
-                </Link>
-              </Row>
               <Row term="Created">{formatDate(o.createdAt)}</Row>
               {o.github && (
                 <Row term="Published to">
@@ -233,7 +225,7 @@ export function OverviewTab() {
           <h2 id="health-title" className="text-xl font-bold">
             Health of the working draft
           </h2>
-          <p className="mt-1 text-sm text-muted">Strict OWL lint, reasoner consistency, FAIR checks and competency-question tests, run on every change.</p>
+          <p className="mt-1 text-sm text-muted">Checked again on every change.</p>
           <div className="mt-4">
             {validation.error && !validation.data ? (
               <ErrorCard error={validation.error} onRetry={validation.reload} />
@@ -245,10 +237,10 @@ export function OverviewTab() {
                 label={label}
                 headingLevel={3}
                 openLintKey={healthKey}
-                checkInBrowser={() => api.workingTurtle(id)}
+                showQueries={hasRole('editor', 'steward', 'owner')}
                 lintNote={
                   <>
-                    Lint runs again on every{' '}
+                    Quality checks run again on every{' '}
                     <Link to={`/o/${id}/changes`} className={proseLink}>
                       change request
                     </Link>
@@ -273,14 +265,16 @@ export function OverviewTab() {
           </div>
           {members.length ? (
             <>
-              <ul className="mt-3 flex flex-wrap gap-1.5" aria-label="Members">
-                {members.slice(0, 14).map((m) => (
+              {/* Room between avatars for the role rings, which sit 3px outside them. */}
+              <ul className="mt-3 flex flex-wrap gap-2" aria-label="Members">
+                {shownMembers.map((m) => (
                   <li key={m.userId}>
-                    <Avatar name={m.user?.name ?? m.userId} src={m.user?.avatarUrl} simulated={m.user?.simulated} size={32} />
+                    <Avatar name={m.user?.name ?? m.userId} src={m.user?.avatarUrl} simulated={m.user?.simulated} size={32} roles={ringRoles(m.roles, o.ownerIds.includes(m.userId))} />
                   </li>
                 ))}
               </ul>
               {members.length > 14 && <p className="mt-2 text-sm text-muted">and {members.length - 14} more</p>}
+              <RoleRingLegend className="mt-2.5" roles={shownMembers.flatMap((m) => ringRoles(m.roles, o.ownerIds.includes(m.userId)).slice(0, 1))} />
               <Disclosure className="mt-3" tone="muted" title="Who does what">
                 <ul className="divide-y divide-line">
                   {members.map((m) => (

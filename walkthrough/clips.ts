@@ -129,7 +129,8 @@ export const clipActions: Record<string, Action> = {
   },
   async 'c-validate'(c) {
     await c.d.clearHighlight();
-    if (!(await c.d.click(c.d.page.getByRole('button', { name: 'Validate', exact: true }), 'Validate'))) return;
+    // There is no Validate button: the page checks the file as soon as it is in, and again when the release changes.
+    await c.d.claimVisible(c.d.page.getByTestId('validate-status').getByText(/^Checked in/), 'the data was checked straight away');
     const verdict = c.d.page.getByTestId('validation-verdict');
     await c.d.claimVisible(verdict.getByText('1 violation'), 'the report finds the one problem');
     await c.d.claimVisible(c.d.page.getByTestId('validation-subtitle').getByText(/checked against v\d+\.\d+\.\d+$/), 'the data was checked against a release');
@@ -218,8 +219,9 @@ export const clipActions: Record<string, Action> = {
     await c.d.find(produced, 'what the call produced');
     // Each count is shown even when it is zero, so check the numbers, not just the labels.
     const counts = ((await produced.getByRole('listitem').allTextContents().catch(() => [])) as string[]).map((t) => t.replace(/\s+/g, ' ').trim());
-    for (const k of ['use cases', 'terms', 'competency questions', 'open questions']) {
-      const n = Number(counts.find((t) => t.endsWith(` ${k}`))?.split(' ')[0]);
+    // "1 use case", "2 use cases": the label agrees with the number.
+    for (const k of ['use case', 'term', 'competency question', 'open question']) {
+      const n = Number(counts.find((t) => new RegExp(` ${k}s?$`).test(t))?.split(' ')[0]);
       c.d.claim(n > 0, `the call produced ${k} (${counts.join(', ')})`);
     }
     const decisions = c.d.page.getByText('Decisions', { exact: true }).locator('xpath=ancestor::*[.//ul][1]').getByRole('listitem');

@@ -37,6 +37,7 @@ import { CHANGE_DRAFTER, REVISER, TRIAGE, UNTRUSTED_TEXT } from '../llm/prompts.
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
 import { applyAutopilot, autopilotStands, checksFor, onStatusChanged, revisionOf } from './appChecks.js';
+import { nudgeRunsSoon } from './appGithub.js';
 import { decisionOrder, evaluate, reviewsInRound, votesOnEdits } from './governance.js';
 import { triageBudgetAvailable, withTriageBudget } from './budget.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
@@ -631,6 +632,8 @@ export async function submit(cr: ChangeRequest, actor: User) {
       return advanceNow(c, actor);
     });
     if (after.status !== 'review') return after;
+    // Apps connected through GitHub get a run started for this version of the change.
+    nudgeRunsSoon(after.ontologyId);
     // Connected apps may already have results for this version of the change.
     await onStatusChanged(after);
     return refresh(after);
@@ -696,6 +699,8 @@ async function updateOpsNow(
     await save(c);
   });
   await triage(cr);
+  // New edits on an open change: apps connected through GitHub get a run for them.
+  nudgeRunsSoon(cr.ontologyId);
   return advance(cr, actor);
 }
 
@@ -882,13 +887,18 @@ function literalText(object: string): string | undefined {
 /** Stands in for today's date when fingerprinting, so only the dates merging generates (dcterms:created and the like) are left out. */
 const DATE_STAND_IN = '0001-01-01';
 
+/**
+ * What merging adds to the edits themselves: the date, and where they came from. No author: dcterms:contributor
+ * would publish the requester's name on every new term. Where it came from is recorded as generated provenance
+ * (dcterms:provenance), apart from sources people state. merge() and the change request's Turtle diff both use it.
+ */
+export const mergeContext = (project: Pick<OntologyProject, 'slug'>, cr: Pick<ChangeRequest, 'number'>, date: string) => ({ date, provenance: `${project.slug}#${cr.number}` });
+
 /** What merging this request now would publish, worked out exactly as merge() does it. */
 async function publicationOf(cr: ChangeRequest, given?: OntologyProject) {
   const project = given ?? (await getProject(cr.ontologyId));
   const { graph: working, head: base } = await ontologyStore.workingAt(project);
-  // No author: dcterms:contributor would publish the requester's name on every new term. Where it came
-  // from is recorded as generated provenance (dcterms:provenance), apart from sources people state.
-  const ctx = (date: string) => ({ date, provenance: `${project.slug}#${cr.number}` });
+  const ctx = (date: string) => mergeContext(project, cr, date);
   const after = applyChangeOps(working, cr.ops, ctx(clock.iso().slice(0, 10))).graph;
   const added = diffOntologies(working, after).addedNTriples;
   const kgcl = toKGCL(cr.ops, after.prefixes);
@@ -965,6 +975,8 @@ export async function merge(cr: ChangeRequest, actor: User | undefined, chargeTo
       for (const other of (await listCRs(cr.ontologyId)).filter((o) => o.id !== cr.id && ['review', 'voting', 'needs-work'].includes(o.status))) {
         await triage(other, { analyse: false });
       }
+      // The working draft moved, so every open change is a new version for connected apps.
+      nudgeRunsSoon(cr.ontologyId);
     }
     return cr;
   };

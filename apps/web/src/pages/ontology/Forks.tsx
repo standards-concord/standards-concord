@@ -123,8 +123,7 @@ export function ForksTab() {
         <div>
           <h2 className="text-lg font-semibold">Forks</h2>
           <p className="max-w-2xl text-sm text-muted">
-            Personal pre-releases for building applications. Add the terms you need to a fork, import its URL, and keep building while the change is reviewed. Concord tells you when it has
-            landed so you can switch back.
+            Add the terms your app needs to a fork and build against it while the change is reviewed.
           </p>
         </div>
         {session?.user && (
@@ -139,7 +138,7 @@ export function ForksTab() {
         <Loading />
       ) : !list.data.length ? (
         <EmptyState icon={GitFork} title="No forks yet" action={session?.user ? <Button icon={Plus} onClick={() => setOpen(true)}>New fork</Button> : undefined}>
-          Coding agents can create forks too, over MCP (create_fork).
+          Coding agents can create forks too.
         </EmptyState>
       ) : (
         <div className="space-y-6">

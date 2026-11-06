@@ -10,6 +10,8 @@ import { processOutstanding } from './services/feedbackIssues.js';
 import { runTick, seedDemo } from './services/simulation.js';
 import type { OntologyProject } from '@concord/shared';
 import { syncFeedbackSharing } from './services/feedback.js';
+import { backfillDemoAvatars } from './services/users.js';
+import { sweepRuns } from './services/appGithub.js';
 
 acquireProcessLock(config.dataDir);
 await openDb();
@@ -31,6 +33,8 @@ const secrets = await migrateClientSecrets();
 if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
 if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
 if (config.demoMode) {
+  const pictures = await backfillDemoAvatars();
+  if (pictures) console.log(`[seed] gave ${pictures} demo account(s) a profile picture`);
   await seedDemo().catch((err) => console.error('[seed] failed', err));
 }
 // Release pages written by an older renderer (or without a use case snapshot) are regenerated.
@@ -57,6 +61,11 @@ setInterval(() => {
   meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
 }, 60_000).unref();
 void meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
+
+// Apps connected through the Concord GitHub App: start runs a request didn't (a gap, a retry due, another process).
+setInterval(() => {
+  sweepRuns().catch((err) => console.warn('[github-app]', (err as Error).message));
+}, 60_000).unref();
 
 // Public feedback summaries that couldn't be posted straight away (GitHub down, hourly cap, rate limit) are retried.
 setInterval(() => {

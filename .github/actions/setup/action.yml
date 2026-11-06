@@ -39,8 +39,43 @@ runs:
       shell: bash
       run: pnpm exec playwright install-deps chromium
 
+    # Extra apt packages. The downloaded .deb files are cached per package list (and restored
+    # from any earlier list as a fallback), because the runners' Ubuntu mirror is sometimes so
+    # slow that downloading ffmpeg alone took over half an hour and timed jobs out. With the
+    # files cached, apt installs without downloading them again. The cache is saved straight
+    # after the install, so a job that fails later still leaves it for the next one.
+    - id: apt-key
+      if: inputs.apt != ''
+      shell: bash
+      run: |
+        echo "dir=$HOME/.cache/apt-archives" >> "$GITHUB_OUTPUT"
+        echo "prefix=apt-${{ runner.os }}-$(lsb_release -rs)-" >> "$GITHUB_OUTPUT"
+        echo "packages=$(echo '${{ inputs.apt }}' | tr -s ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//; s/ /+/g')" >> "$GITHUB_OUTPUT"
+    - id: apt-cache
+      if: inputs.apt != ''
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.apt-key.outputs.dir }}
+        key: ${{ steps.apt-key.outputs.prefix }}${{ steps.apt-key.outputs.packages }}
+        restore-keys: ${{ steps.apt-key.outputs.prefix }}
     - if: inputs.apt != ''
       shell: bash
       run: |
-        [ "${{ inputs.playwright }}" = "true" ] || sudo apt-get update -qq
-        sudo apt-get install -y --no-install-recommends ${{ inputs.apt }}
+        dir='${{ steps.apt-key.outputs.dir }}'
+        mkdir -p "$dir/partial"
+        # Keep what is downloaded, retry stalled downloads, and give up on a dead connection
+        # rather than hang until the job's timeout.
+        opts=(-o "Dir::Cache::Archives=$dir" -o APT::Keep-Downloaded-Packages=true -o Acquire::Retries=5 -o Acquire::http::Timeout=60)
+        install() { sudo apt-get install -y --no-install-recommends "${opts[@]}" ${{ inputs.apt }}; }
+        # With every file cached, the image's package lists may already be enough.
+        if [ "${{ inputs.playwright }}" = "true" ] || ! install; then
+          [ "${{ inputs.playwright }}" = "true" ] || sudo apt-get update -qq -o Acquire::Retries=5 -o Acquire::http::Timeout=60
+          install
+        fi
+        sudo rm -rf "$dir/partial" "$dir/lock"
+        sudo chown -R "$(id -u):$(id -g)" "$dir"
+    - if: inputs.apt != '' && steps.apt-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.apt-key.outputs.dir }}
+        key: ${{ steps.apt-key.outputs.prefix }}${{ steps.apt-key.outputs.packages }}

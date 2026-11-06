@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { ChangeOp, OntologyDiff } from '@concord/shared';
 import { Minus, Pencil, Plus, Archive } from 'lucide-react';
 import { describeOp, type Labeler } from '../lib/ontology';
@@ -38,32 +37,6 @@ export function OpCards({ ops, label }: { ops: ChangeOp[]; label: Labeler }) {
         );
       })}
     </ul>
-  );
-}
-
-export function TripleDiff({ diff }: { diff?: OntologyDiff }) {
-  const [max, setMax] = useState(300);
-  if (!diff) return <p className="text-sm text-muted">The triple-level diff appears once the change has been triaged.</p>;
-  const lines = [...diff.removedNTriples.map((l) => ['-', l] as const), ...diff.addedNTriples.map((l) => ['+', l] as const)];
-  return (
-    <div>
-      <p className="mb-2 text-xs text-muted">
-        <span className="text-ok">+{diff.addedTriples}</span> / <span className="text-danger">−{diff.removedTriples}</span> triples (N-Triples, sorted)
-      </p>
-      <div className="max-h-[480px] overflow-auto rounded-lg border border-line bg-surface-2 font-mono text-[0.72rem] leading-relaxed">
-        {lines.slice(0, max).map(([sign, l], i) => (
-          <div key={i} className={cx('px-3 whitespace-pre', sign === '+' ? 'bg-ok-soft text-ok' : 'bg-danger-soft text-danger')}>
-            {sign} {l}
-          </div>
-        ))}
-        {!lines.length && <div className="p-3 text-muted">No triple changes.</div>}
-      </div>
-      {lines.length > max && (
-        <button className="mt-2 text-xs text-accent" onClick={() => setMax((m) => m + 500)}>
-          Show more ({lines.length - max} remaining)
-        </button>
-      )}
-    </div>
   );
 }
 

@@ -67,16 +67,16 @@ test.describe('progressive disclosure', () => {
     const chip = page.getByRole('button', { name: /^Health: / });
     await chip.click();
     const panel = page.getByRole('dialog', { name: /^Health: / });
-    for (const row of ['Reasoner', 'FAIR score', 'Lint (OWL best practice)', 'Overall validation']) await expect(panel.getByText(row, { exact: true })).toBeVisible();
+    for (const row of ['Reasoner', 'FAIR score', 'Quality checks', 'Overall validation']) await expect(panel.getByText(row, { exact: true })).toBeVisible();
     await panel.getByRole('link', { name: /full report/ }).click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}#health$`));
     // Following the link closes the popup.
     await expect(panel).toHaveCount(0);
     await settle(page);
     // Arriving from the chip opens the lint findings, so linting is visible straight away.
-    const lint = page.getByRole('button', { name: /Lint findings/ });
+    const lint = page.getByRole('button', { name: /Quality checks/ });
     await expect(lint).toHaveAttribute('aria-expanded', 'true');
-    await expect(page.locator('#health').getByText(/No lint issues|Errors \(|Warnings \(|Suggestions \(/).first()).toBeVisible();
+    await expect(page.locator('#health').getByText(/No problems|Errors \(|Warnings \(/).first()).toBeVisible();
   });
 
   test('the overview keeps lint, FAIR and competency-question detail one click away', async ({ page }) => {
@@ -87,20 +87,43 @@ test.describe('progressive disclosure', () => {
     const health = page.locator('#health');
     await expect(health.getByText('Health of the working draft')).toBeVisible();
 
-    const lint = health.getByRole('button', { name: /Lint findings/ });
-    const lintCount = report.lint?.length ?? 0;
-    if (lintCount) {
-      if ((await lint.getAttribute('aria-expanded')) !== 'true') await lint.click();
+    const lint = health.getByRole('button', { name: /Quality checks/ });
+    // Errors and warnings are listed; style suggestions only with Advanced features on (fewer-details.spec).
+    const shown = (report.lint ?? []).filter((i: { severity: string }) => i.severity !== 'info');
+    if ((await lint.getAttribute('aria-expanded')) !== 'true') await lint.click();
+    if (!shown.length) await expect(health.getByText(/^No problems/)).toBeVisible();
+    if (shown.length) {
       // Every finding is listed by its message.
-      for (const issue of report.lint.slice(0, 5)) await expect(health.getByText(issue.message, { exact: true }).first()).toBeVisible();
+      for (const issue of shown.slice(0, 5)) await expect(health.getByText(issue.message, { exact: true }).first()).toBeVisible();
+      // The rule's code is on its icon's hover, not printed beside the message.
+      const first = shown[0];
+      await expect(health.getByText(first.code, { exact: true })).toHaveCount(0);
+      await expect(health.getByRole('img', { name: new RegExp(`^(Error|Warning|Suggestion)\\. ${first.code}`) }).first()).toHaveAttribute('title', new RegExp(`^${first.code}`));
     }
 
     const fair = health.getByRole('button', { name: /FAIR checks/ });
     await expect(fair).toContainText(/\d+ of \d+ pass/);
     if ((await fair.getAttribute('aria-expanded')) !== 'true') await fair.click();
-    // Opening the group shows every check at once: there is no second "Show all" toggle inside it.
-    await expect(health.getByText(/Show all \d+ checks|Show failing only/)).toHaveCount(0);
-    await expect(health.getByText(report.fair.checks[0].title, { exact: true }).first()).toBeVisible();
+    // Opening the group lists only the failing checks; passing ones wait behind "Show all". Each
+    // check's FOOPS!/FAIR reference is on its tick or cross's hover, not printed (Jesse, 6 Nov 2026).
+    type Check = { title: string; passed: boolean; status?: string; reference?: string };
+    const checks = report.fair.checks as Check[];
+    const failing = checks.filter((c) => (c.status ?? (c.passed ? 'pass' : 'fail')) === 'fail');
+    const passing = checks.filter((c) => c.passed);
+    for (const c of failing) await expect(health.getByText(c.title, { exact: true }).first()).toBeVisible();
+    if (passing.length) await expect(health.getByText(passing[0].title, { exact: true })).toHaveCount(0);
+    await expect(health.getByText(/FOOPS!/)).toHaveCount(0);
+    if (failing[0]?.reference) {
+      const icon = health.getByRole('img', { name: `Fails. ${failing[0].reference}` });
+      await expect(icon).toHaveAttribute('title', failing[0].reference);
+    }
+    const showAll = health.getByRole('button', { name: `Show all ${checks.length} checks` });
+    await showAll.click();
+    await expect(health.getByText(checks[0].title, { exact: true }).first()).toBeVisible();
+    await expect(health.getByText(/FOOPS!/)).toHaveCount(0);
+    if (passing[0]) await expect(health.getByRole('img', { name: new RegExp(`^Passes\\.`) }).first()).toBeVisible();
+    await health.getByRole('button', { name: 'Show failing only' }).click();
+    if (passing.length) await expect(health.getByText(passing[0].title, { exact: true })).toHaveCount(0);
 
     const cqs = health.getByRole('button', { name: /Competency questions/ });
     if ((await cqs.getAttribute('aria-expanded')) !== 'true') await cqs.click();
@@ -178,7 +201,7 @@ test.describe('progressive disclosure', () => {
     await settle(page);
     const health = page.locator('#health');
     await expect(health.getByRole('heading', { level: 2, name: 'Health of the working draft' })).toBeVisible();
-    for (const name of [/Lint findings/, /FAIR checks/, /Competency questions/]) await expect(health.getByRole('heading', { level: 3, name })).toBeVisible();
+    for (const name of [/Quality checks/, /FAIR checks/, /Competency questions/]) await expect(health.getByRole('heading', { level: 3, name })).toBeVisible();
   });
 
   test('the overview says the draft is being reviewed, not "undefined", when its counts are withheld', async ({ page }) => {
@@ -196,7 +219,7 @@ test.describe('progressive disclosure', () => {
     const about = page.getByRole('region', { name: 'About this ontology' });
     await expect(about).not.toContainText('undefined');
     await expect(about).not.toContainText('NaN');
-    await expect(about.getByRole('definition').first()).toHaveText('—');
+    await expect(about.getByText('Ontology IRI', { exact: true })).toBeVisible();
   });
 
   test('a contributor is asked to review changes, since any member can send one back, but not to merge or vote', async ({ page }) => {
@@ -408,9 +431,13 @@ test.describe('progressive disclosure', () => {
       await page.keyboard.press('Escape');
     }
 
-    // Changes, Checks and Discussion are separate views.
+    // Changes, Checks and Discussion are separate views, with a Diff of the Turtle when the request has edits.
     const tabs = page.getByRole('tablist', { name: 'Change request views' });
-    await expect(tabs.getByRole('tab')).toHaveCount(3);
+    const crId = new URL(page.url()).pathname.split('/').pop()!;
+    const shown = (await (await page.request.get(`/api/change-requests/${crId}`)).json()) as { ops: unknown[]; withheld?: boolean };
+    const views = shown.ops.length && !shown.withheld ? ['Changes', 'Diff', 'Checks', 'Discussion'] : ['Changes', 'Checks', 'Discussion'];
+    await expect(tabs.getByRole('tab')).toHaveCount(views.length);
+    for (const [i, v] of views.entries()) await expect(tabs.getByRole('tab').nth(i)).toHaveText(new RegExp(`^${v}`));
     await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('aria-selected', 'true');
     await expect(page.getByText(/Proposed changes \(\d+\)/)).toBeVisible();
     const rationale = page.getByRole('button', { name: /Rationale and risks/ });
@@ -422,7 +449,7 @@ test.describe('progressive disclosure', () => {
     await tabs.getByRole('tab', { name: /Checks/ }).click();
     await expect(page).toHaveURL(/view=checks/);
     await expect(page.getByText(/Proposed changes \(\d+\)/)).toHaveCount(0);
-    const lint = page.getByRole('button', { name: /Lint findings/ });
+    const lint = page.getByRole('button', { name: /Quality checks/ });
     if (await lint.count()) {
       await expect(lint).toBeVisible();
       await expect(page.getByRole('button', { name: /FAIR checks/ })).toBeVisible();

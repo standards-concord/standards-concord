@@ -29,9 +29,6 @@ In about {minutes} minutes, we'll follow one small change from a term's page all
 [do: f-open-health]
 Every change is checked against the whole standard: strict OWL lint, a reasoner, FAIR checks, and the competency questions the ontology must answer.
 
-[do: f-recheck-browser]
-The reasoner is sparq, compiled to WebAssembly, so you can run it again right here in your browser. Every class is satisfiable, and it agrees with the server.
-
 [do: f-show-fair]
 The FAIR checks follow published tests, so you can see which ones pass, and which couldn't be run here.
 
@@ -56,8 +53,8 @@ Propose change. The term itself doesn't change yet. My edit becomes a change req
 [do: f-open-change]
 Concord has already classified it as a patch, because it only changes wording, and Tom has confirmed the meaning stays the same.
 
-[do: f-show-triples]
-The triples view shows exactly which statement is removed and which is added.
+[do: f-show-diff]
+The diff shows exactly which line of the file is removed and which is added.
 
 [do: f-show-checks]
 And the checks have passed: lint, the reasoner and the competency questions all ran with the change applied.
@@ -106,13 +103,13 @@ And the same address serves machines. Ask for Turtle, and Turtle is what you get
 ## Checking data {#check-data}
 
 [do: f-open-check]
-Finally, data. Check data validates your own data against SHACL shapes generated from the standard. It runs in your browser too, so the data never leaves the page.
+Finally, data. Validate data checks your own data against SHACL shapes generated from the standard. It runs in your browser too, so the data never leaves the page.
 
 [do: f-paste-data]
 Here's some data about a food bank shift, with one mistake in it.
 
 [do: f-check]
-Press Check, and each problem reads as a plain sentence, written with your data's own prefixes.
+It's checked as you type, and each problem reads as a plain sentence, written with your data's own prefixes.
 
 [do: f-hover]
 It's underlined in the editor, and hovering shows the same explanation.
@@ -121,10 +118,10 @@ It's underlined in the editor, and hovering shows the same explanation.
 Click the problem to jump straight to it. The minimum age is written as text, but it should be a whole number, and the report even says how to write it.
 
 [do: f-fix]
-Write it that way, check again, and the data conforms.
+Write it that way, and the data conforms.
 
 [do: f-open-validate]
-For files in other formats, or a check against a particular release, Validate data gives a full report to download. And the same check is one API call to the standard's own address.
+The same page takes files in other formats, checks against any release, and gives a full report to download. And the same check is one API call to the standard's own address.
 
 ## Wrapping up {#outro}
 

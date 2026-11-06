@@ -55,13 +55,15 @@ test.describe('with the backend', () => {
     const wasm = page.waitForResponse((r) => r.url().endsWith('.wasm'));
     await page.goto(`/o/${demo.id}/query`);
     expect((await wasm).headers()['content-type']).toContain('application/wasm');
-    await expect(page.getByTestId('sparq-ready')).toHaveText(/triples loaded/, { timeout: 30_000 });
+    await expect(page.getByTestId('sparq-ready')).toHaveText(/triples loaded|Ontology loaded/, { timeout: 30_000 });
     await page.getByRole('button', { name: 'Run', exact: true }).click();
     await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);
     // The query assistant answers through the backend, and its query runs here when asked.
     await page.getByTestId('query-suggestions').getByRole('button').first().click();
     await expect(page.getByTestId('query-chat').getByTestId('chat-message-assistant')).toHaveCount(2, { timeout: 60_000 });
-    await expect(page.getByLabel('Run against')).toHaveValue(/data|ontology/);
+    // There is no dataset to choose; the results say what the query runs over.
+    await expect(page.getByLabel('Run against')).toHaveCount(0);
+    await expect(page.getByTestId('dataset-summary')).toBeVisible();
     // It runs only once the person presses Run.
     await page.getByTestId('query-run-prompt').getByRole('button', { name: 'Run this query' }).click();
     await expect(page.getByTestId('query-results')).toContainText(/\d+ rows?/);

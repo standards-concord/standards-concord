@@ -1,5 +1,7 @@
 # Concord app check
 
+> **Maintainers:** this folder is the source. It is published to the public repository [standards-concord/app-check](https://github.com/standards-concord/app-check), which workflows use as `standards-concord/app-check@v1`, so repositories anywhere can use it whether or not Concord's own repository is public. After changing it here, run `scripts/publish-action.sh` (it copies the folder there and moves the `v1` tag; a breaking change to the inputs needs `v2`).
+
 Test your application against every change proposed to an ontology on Concord, before the change is merged.
 
 Each run:
@@ -32,7 +34,13 @@ On the **App checks** page of the ontology (Changes → App checks), turn on aut
 - If an approved change loses an autopilot yes it needed, even while it is being merged, it goes back to review (or its vote reopens) instead of being merged.
 - Once you review or vote on a version of a change yourself, at any stage, autopilot takes back anything it said for you on that version and leaves the change to you.
 
-## Set up
+## Set up through the Concord GitHub App (no token)
+
+On the ontology's **App checks** page, connect your app and choose **Connect with GitHub**. Install the Concord app on your app's repository, and Concord brings you back. Then **Open the pull request** adds `.github/workflows/concord.yml` on a branch for you to merge (or add it yourself; the page shows it). The workflow has no secret: it names the app (`app: <app id>`) and the run signs in with GitHub's proof that it runs in that repository, which Concord pinned by its numeric id when you installed. Concord starts the workflow whenever there is something new to test (a change proposed or edited, or the working draft moving on), at most once every two minutes per app, and once straight after the pull request is merged; the daily schedule is a backstop.
+
+Uninstalling the Concord app on GitHub, or removing the repository from it, disconnects the app on Concord. **Stop using GitHub** on the App checks page does the same from Concord's side (uninstall on GitHub too, to remove its access). Results already reported stay.
+
+## Set up with a token
 
 1. On the ontology's **App checks** page, connect your app. Copy the token (it starts `cna_`) into a repository secret named `CONCORD_APP_TOKEN`.
 2. Add `.github/workflows/concord.yml` (the page fills this in for you):
@@ -56,7 +64,7 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - uses: standards-concord/standards-concord/actions/app-check@main
+      - uses: standards-concord/app-check@v1
         with:
           concord-url: https://standards-concord.vercel.app
           token: ${{ secrets.CONCORD_APP_TOKEN }}
@@ -86,7 +94,8 @@ Either give `ontology-file`, the path of the copy your app already reads, and it
 
 | Input | Default | |
 | --- | --- | --- |
-| `token` | (required) | The app token. |
+| `token` | | The app token. Required unless `app` is set. |
+| `app` | | For an app connected through the Concord GitHub App: its id. The run signs in with GitHub's proof instead of a token. |
 | `test-command` | (required) | The command that tests your app. Exit code 0 means it passed. |
 | `concord-url` | `https://standards-concord.vercel.app` | Where Concord runs. |
 | `ontology-file` | | Copy of the ontology to swap for each version. |
@@ -120,6 +129,7 @@ Outside GitHub Actions, runs aren't verified, so autopilot doesn't act on them; 
 
 The script uses two endpoints, authenticated with `Authorization: Bearer cna_…`:
 
+- `POST /api/app-checks/session` with `{ app: <app id>, oidc: <GitHub Actions OIDC token for audience concord-app-check:<app id>> }`, for an app connected through the Concord GitHub App, returns `{ token, expiresAt }`: a run token (`cnr_…`, six hours) to send as `Authorization: Bearer` with the calls below, in place of the app token. The OIDC token must meet the same rules as below and come from the repository the app was installed on (by numeric id); it is used up. Ask GitHub for a fresh one for the working-draft result.
 - `GET /api/app-checks/pending?commit=<app commit>` starts a run. Changes already tested by this same app commit are left out; without `commit`, every open change is listed. The reply to the run's working-draft result carries `targets` again: what the run should test now that its draft result is in, longest waiting first (since the app last tested it, or since it was proposed). Use that list. It returns the run's `attempt` number and lists the baseline and open change requests, each with a `revision` and a `source` path. `GET /api/change-requests/:id/proposed?format=turtle` is the ontology after a change. Send the app token with it, as with the other calls: change requests are only for signed-in people and the CI of apps connected to that ontology.
 - `POST /api/app-checks` with `{ target: "baseline" | <change request id>, revision, attempt, outcome: "passed" | "failed" | "error", summary?, runUrl?, commit?, oidc? }`. `oidc`, sent with the working-draft result, is a GitHub Actions OIDC token for the audience `concord-app-check:<app id>`. If it checks out, the run is verified, and the reply says `verified: true` and carries `runKeys`, one key per change in the run, valid until `runKeysUntil` (six hours). To check out, the token must be:
   - signed by GitHub, with numeric `iat`, `exp` and an optional `nbf`, valid for at most an hour;

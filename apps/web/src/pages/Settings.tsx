@@ -1,16 +1,18 @@
 import { Link } from 'react-router';
-import { Bot, Lock, LogIn, UserRound } from 'lucide-react';
+import { Bot, Lock, LogIn, SlidersHorizontal, UserRound } from 'lucide-react';
 import { api } from '../api';
 import { useSession } from '../lib/session';
+import { useAdvancedFeatures } from '../lib/advanced';
 import { formatDate, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { GitHubIcon, GoogleIcon, SolidIcon } from '../components/badges';
 import { CollapsibleCard } from '../components/Disclosure';
-import { Avatar, Badge, Card, CardHeader, CopyButton, PageHeader, AnchorButton } from '../components/ui';
+import { Avatar, Badge, Card, CardHeader, CopyButton, PageHeader, AnchorButton, Toggle } from '../components/ui';
 
 /** The signed-in person's profile: who they are, how they sign in, and where their private data lives. */
 export function SettingsPage() {
   const { session } = useSession();
+  const [advanced, setAdvanced] = useAdvancedFeatures();
   const u = session?.user;
   if (!u) return null;
   const solidOn = session?.solid?.enabled ?? false;
@@ -40,8 +42,9 @@ export function SettingsPage() {
             {u.providers.map((p) => (
               <li key={p.provider + p.subject} className="flex items-center gap-3 px-5 py-3 text-sm">
                 {p.provider === 'google' ? <GoogleIcon /> : p.provider === 'github' ? <GitHubIcon /> : p.provider === 'solid' ? <SolidIcon /> : <UserRound className="size-4 text-muted" />}
-                <span className="font-medium">{p.provider === 'solid' ? 'Solid (your WebID)' : titleCase(p.provider)}</span>
-                <span className="truncate text-xs text-muted">{p.subject}</span>
+                <span className="font-medium">{p.provider === 'solid' ? 'Solid (your WebID)' : p.provider === 'demo' ? 'Demo account' : titleCase(p.provider)}</span>
+                {/* A demo account's subject is an internal id (persona:priya). */}
+                {p.provider !== 'demo' && <span className="truncate text-xs text-muted">{p.subject}</span>}
               </li>
             ))}
           </ul>
@@ -71,7 +74,8 @@ export function SettingsPage() {
               ? 'You signed in with your own WebID. What Concord saves for you, such as interview transcripts, goes in a private pod Concord keeps for you here, not in Concord’s database.'
               : solidOn
               ? 'Private data, such as interview transcripts, is saved to your own Solid pod. If the pod can’t be reached, it’s kept in Concord’s private storage instead. Concord set this up for you.'
-              : 'This server runs without a Solid server, so private data, such as interview transcripts, is kept in Concord’s private storage.'
+              : // Not how this server is set up (no Solid server): that's configuration, not something to act on.
+                'The address that identifies you to Solid apps.'
           }
           keepMounted
         >
@@ -97,6 +101,14 @@ export function SettingsPage() {
             )}
           </div>
         </CollapsibleCard>
+
+        <Card>
+          <CardHeader level={2} icon={SlidersHorizontal} title="Advanced features" subtitle="Tools most people won’t need. Saved in this browser." />
+          <div className="space-y-2 p-5">
+            <Toggle checked={advanced} onChange={setAdvanced} label="Show advanced features" />
+            <p className="text-sm text-muted">Adds Query to Explore, for asking questions of an ontology in SPARQL, and shows style suggestions alongside quality-check errors and warnings.</p>
+          </div>
+        </Card>
 
         <p className="flex items-center gap-2 text-sm text-muted">
           <Bot className="size-4" />

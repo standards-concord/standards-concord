@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { forPeople } from '../../lib/forPeople';
 import { Link, useParams } from 'react-router';
 import type { ForkCheck, ForkConflict, ForkTerm } from '@concord/shared';
 import { ArrowLeft, ArrowRight, CircleCheck, GitFork, GitPullRequest, Info, RefreshCw, Sparkles, TriangleAlert, Undo2, X } from 'lucide-react';
@@ -20,6 +21,34 @@ const FORMAT_LABELS: Record<string, string> = {
   linkml: 'LinkML',
   shacl: 'SHACL shapes',
 };
+
+/** Turtle and JSON-LD up front; the other formats behind "More formats". */
+const MAIN_FORMATS = ['turtle', 'jsonld'];
+
+function ForkFormats({ formats }: { formats: Record<string, string> }) {
+  const [more, setMore] = useState(false);
+  const all = Object.entries(formats);
+  const shown = more ? all : all.filter(([fmt]) => MAIN_FORMATS.includes(fmt));
+  const hidden = all.length - all.filter(([fmt]) => MAIN_FORMATS.includes(fmt)).length;
+  return (
+    <ul className="mt-3 flex flex-wrap items-center gap-1.5" aria-label="Formats">
+      {shown.map(([fmt, url]) => (
+        <li key={fmt}>
+          <a href={url} target="_blank" rel="noreferrer" className="inline-flex rounded-full border border-line-strong px-2 py-0.5 text-xs hover:bg-surface-2">
+            {FORMAT_LABELS[fmt] ?? fmt}
+          </a>
+        </li>
+      ))}
+      {!more && hidden > 0 && (
+        <li>
+          <button type="button" onClick={() => setMore(true)} className="px-1 text-xs font-medium text-accent hover:underline">
+            More formats
+          </button>
+        </li>
+      )}
+    </ul>
+  );
+}
 
 const KIND_LABEL: Record<string, string> = { class: 'Class', objectProperty: 'Relationship', datatypeProperty: 'Attribute', individual: 'Individual', term: 'Term' };
 
@@ -69,7 +98,7 @@ function Conflicts({ conflicts, onDiscard, pending }: { conflicts: ForkConflict[
   );
 }
 
-/** The same advice an agent gets from check_forks at the start of a session. */
+/** The same advice an agent gets at the start of a session, without the tool names (forPeople). */
 function NextSteps({ check, onDiscard, pending }: { check: ForkCheck; onDiscard?: (c: ForkConflict) => void; pending?: boolean }) {
   const Icon =
     check.outcome === 'switch-to-release' || check.outcome === 'switch-to-draft' ? CircleCheck : check.outcome === 'sync-fork' ? RefreshCw : check.outcome === 'resolve-conflicts' ? TriangleAlert : Info;
@@ -78,11 +107,11 @@ function NextSteps({ check, onDiscard, pending }: { check: ForkCheck; onDiscard?
       <div className="flex items-start gap-3">
         <Icon className="mt-0.5 size-5 shrink-0" aria-hidden />
         <div className="min-w-0 flex-1">
-          <p className="font-medium">{check.message}</p>
+          <p className="font-medium">{forPeople(check.message)}</p>
           {check.steps.length > 0 && (
             <ol className="mt-2 list-decimal space-y-1 pl-5 text-sm text-muted">
               {check.steps.map((s) => (
-                <li key={s}>{s}</li>
+                <li key={s}>{forPeople(s)}</li>
               ))}
             </ol>
           )}
@@ -210,7 +239,6 @@ export function ForkPage() {
           <span>
             Fork of {ontology.title} v{f.baseVersion}
           </span>
-          <span className="font-mono">{f.version}</span>
           <span>updated {relativeTime(f.updatedAt, now())}</span>
         </div>
         {f.purpose && <p className="mt-2 max-w-3xl text-sm">{f.purpose}</p>}
@@ -253,7 +281,6 @@ export function ForkPage() {
                   <span className="text-xs text-muted">
                     {h.author} · {formatDate(h.date, true)}
                   </span>
-                  <code className="font-mono text-xs text-subtle">{h.sha.slice(0, 7)}</code>
                 </li>
               ))}
             </ol>
@@ -270,18 +297,12 @@ export function ForkPage() {
               </code>
               <CopyButton text={f.urls.iri} variant="ghost" />
             </div>
-            <ul className="mt-3 flex flex-wrap gap-1.5" aria-label="Formats">
-              {Object.entries(f.urls.formats).map(([fmt, url]) => (
-                <li key={fmt}>
-                  <a href={url} target="_blank" rel="noreferrer" className="inline-flex rounded-full border border-line-strong px-2 py-0.5 text-xs hover:bg-surface-2">
-                    {FORMAT_LABELS[fmt] ?? fmt}
-                  </a>
-                </li>
-              ))}
-            </ul>
+            <p className="mt-2 text-xs text-muted">
+              Version <span className="font-mono">{f.version}</span>
+            </p>
+            <ForkFormats formats={f.urls.formats} />
             <p className="mt-3 text-xs text-muted">
-              Coding agents can do all of this over MCP: <code className="font-mono">create_fork</code>, <code className="font-mono">edit_fork</code>, <code className="font-mono">propose_fork</code> and,
-              at the start of each session, <code className="font-mono">check_forks</code>.{' '}
+              Coding agents can do all of this too.{' '}
               <Link to={`/o/${id}/connect`} className="text-accent hover:underline">
                 Connect an agent
               </Link>

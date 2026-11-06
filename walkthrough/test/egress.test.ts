@@ -55,6 +55,18 @@ beforeAll(async () => {
     aRequests.push(req.url ?? '');
     if (req.url === '/chain') res.writeHead(302, { location: `${B}/hop` }).end();
     else if (req.url === '/events') res.writeHead(302, { location: `${C}/events` }).end();
+    else if (req.url === '/big') {
+      // A long response, written in pieces, for a client that hangs up part-way.
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      const piece = Buffer.alloc(64 * 1024);
+      let left = 200;
+      const more = () => {
+        if (res.destroyed || !left--) return void res.end();
+        res.write(piece);
+        setTimeout(more, 2);
+      };
+      more();
+    }
     else if (req.url === '/early')
       // WebRTC from the very first inline script, and from a fresh iframe, with the errors swallowed.
       res
@@ -467,6 +479,32 @@ describe.runIf(run)('egress proxy', () => {
       const before = outside.size;
       await tunnel(`localhost:${bPort}`, await clientHello('localhost'));
       expect(outside.size).toBe(before);
+    });
+
+    // A browser that navigates away hangs up mid-response, and the proxy's next write fails
+    // with EPIPE. That used to be reported as an "unparseable request (EPIPE)" outside
+    // request, which failed the v0.32.0 release recording of the feedback video.
+    it('does not report a client that hangs up part-way through a response', async () => {
+      // Its own proxy and set, so nothing an earlier test recorded can hide a new entry.
+      const mine = new Set<string>();
+      const hangUps: string[] = [];
+      const proxy = await startEgressProxy([A], mine, { onHangUp: (code) => hangUps.push(code) });
+      try {
+        // Close or reset part-way until the proxy's write has failed with EPIPE at least once.
+        for (let k = 0; k < 200 && !hangUps.includes('EPIPE'); k++)
+          await new Promise<void>((resolve) => {
+            const sock = net.connect(Number(new URL(proxy.url).port), '127.0.0.1', () =>
+              sock.write(`GET ${A}/big HTTP/1.1\r\nHost: ${new URL(A).host}\r\n\r\n`),
+            );
+            sock.once('data', () => setTimeout(() => (k % 2 ? sock.resetAndDestroy() : sock.destroy()), 10 * (k % 8)));
+            sock.on('close', () => resolve());
+          });
+        await new Promise((r) => setTimeout(r, 300));
+        expect(hangUps).toContain('EPIPE');
+        expect([...mine]).toEqual([]);
+      } finally {
+        await proxy.close();
+      }
     });
 
     it('reports a tunnel that closes before its first bytes can be checked', async () => {

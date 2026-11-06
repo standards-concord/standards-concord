@@ -17,6 +17,10 @@
  *   CONCORD_CHANGE_REQUEST  the change request number (unset for the baseline)
  *   CONCORD_REVISION        fingerprint of the version under test
  *
+ * An app connected through the Concord GitHub App needs no token: set CONCORD_APP to the app's id
+ * instead, and on GitHub Actions (with `permissions: id-token: write`) the run signs in with
+ * GitHub's proof that it runs in the app's repository.
+ *
  * No dependencies, so it starts fast and there is nothing to install or audit.
  */
 import { execFileSync, spawn } from 'node:child_process';
@@ -27,7 +31,8 @@ import path from 'node:path';
 const env = process.env;
 const flag = (v) => /^(1|true|yes|on)$/i.test(String(v ?? '').trim());
 const base = (env.CONCORD_URL || 'https://standards-concord.vercel.app').replace(/\/+$/, '');
-const token = env.CONCORD_APP_TOKEN ?? '';
+let token = (env.CONCORD_APP_TOKEN ?? '').trim();
+const appId = (env.CONCORD_APP ?? '').trim();
 const command = env.CONCORD_TEST_COMMAND ?? '';
 const format = env.CONCORD_FORMAT || 'turtle';
 const maxChanges = Math.max(1, Number(env.CONCORD_MAX_CHANGES) || 20);
@@ -65,32 +70,48 @@ const log = (...a) => quiet || console.log(...a);
 const group = (title) => quiet || console.log(env.GITHUB_ACTIONS ? `::group::${title}` : `\n== ${title}`);
 const endGroup = () => quiet || (env.GITHUB_ACTIONS && console.log('::endgroup::'));
 
-if (!token.startsWith('cna_')) fail('Set the app token (it starts with cna_). Create one on the App checks page of your ontology in Concord.');
+if (token && !token.startsWith('cna_')) fail('The app token should start with cna_. Create one on the App checks page of your ontology in Concord.');
+if (!token && !appId) fail('Set the app token (it starts with cna_), or, for an app connected through the Concord GitHub App, app: the app’s id. Both are on the App checks page of your ontology in Concord.');
 if (!command.trim()) fail('Set test-command to the command that tests your app, e.g. "npm test".');
-if (env.GITHUB_ACTIONS) console.log(`::add-mask::${token}`);
+if (env.GITHUB_ACTIONS && token) console.log(`::add-mask::${token}`);
 
-async function api(method, p, body) {
+/** Call Concord, trying again (up to `tries` times) when it can't be reached or has a server error. */
+async function api(method, p, body, { tries = 3 } = {}) {
   const url = new URL(p, `${base}/`);
   for (let attempt = 1; ; attempt++) {
     let res;
     try {
       res = await fetch(url, {
         method,
-        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        headers: { ...(token && { Authorization: `Bearer ${token}` }), Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
         body: body ? JSON.stringify(body) : undefined,
       });
     } catch (err) {
-      if (attempt < 3) {
+      if (attempt < tries) {
         await new Promise((r) => setTimeout(r, attempt * 2000));
         continue;
       }
-      throw new Error(`Can't reach Concord at ${base}: ${err.message}`);
+      const e = new Error(`Can't reach Concord at ${base}: ${err.message}`);
+      e.transient = true;
+      throw e;
     }
-    if (res.status >= 500 && attempt < 3) {
+    if (res.status >= 500 && attempt < tries) {
       await new Promise((r) => setTimeout(r, attempt * 2000));
       continue;
     }
-    const text = await res.text();
+    let text;
+    try {
+      text = await res.text();
+    } catch (err) {
+      // The connection dropped partway through the reply: as if Concord couldn't be reached.
+      if (attempt < tries) {
+        await new Promise((r) => setTimeout(r, attempt * 2000));
+        continue;
+      }
+      const e = new Error(`${method} ${url.pathname}: the reply from Concord was cut off (${err.message})`);
+      e.transient = true;
+      throw e;
+    }
     if (!res.ok) {
       let msg = text;
       try {
@@ -98,6 +119,7 @@ async function api(method, p, body) {
       } catch {}
       const e = new Error(`${method} ${url.pathname}: ${res.status} ${msg}`);
       e.status = res.status;
+      e.transient = res.status >= 500;
       throw e;
     }
     return { text, json: () => JSON.parse(text), headers: res.headers };
@@ -234,6 +256,22 @@ async function check(label, source, extraEnv) {
 
 const rows = [];
 let pending;
+if (!token) {
+  // Connected through the Concord GitHub App: trade GitHub's proof that this run is in the app's
+  // repository for a token that lasts the run. Each proof can be used once, so every try asks
+  // GitHub for a fresh one (Concord may have used up the last one before its reply was lost).
+  for (let attempt = 1; !token; attempt++) {
+    const proof = await runIdentity(appId);
+    if (!proof) fail('Without an app token, the run signs in with GitHub’s proof that it runs in the app’s repository. Run it on GitHub Actions with `permissions: id-token: write`.');
+    try {
+      token = (await api('POST', '/api/app-checks/session', { app: appId, oidc: proof }, { tries: 1 })).json().token;
+    } catch (err) {
+      if (!err.transient || attempt >= 3) fail(`Concord didn’t accept this run for app ${appId}: ${err.message}`);
+      await new Promise((r) => setTimeout(r, attempt * 2000));
+    }
+  }
+  if (env.GITHUB_ACTIONS) console.log(`::add-mask::${token}`);
+}
 try {
   // Say which app commit this run tests: results carry over only between runs of the same commit.
   const q = new URLSearchParams({ ...(recheck && { all: '1' }), ...(commit && { commit }) }).toString();

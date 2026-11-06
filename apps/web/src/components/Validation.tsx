@@ -1,11 +1,12 @@
 import { useState, type ReactNode } from 'react';
 import type { ValidationReport } from '@concord/shared';
-import type { IssueSeverity, ReasonerResult as ReasonerReport } from '@concord/core/types';
-import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Cpu, Info, TriangleAlert } from 'lucide-react';
+import type { IssueSeverity } from '@concord/core/types';
+import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleAlert } from 'lucide-react';
 import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';
-import { checkedOf, compareWithServer } from '../lib/reasonerCompare';
-import { Badge, ProgressBar, cx } from './ui';
+import { checkedOf } from '../lib/reasonerCompare';
+import { useAdvancedFeatures } from '../lib/advanced';
+import { ProgressBar, cx } from './ui';
 import { HighlightedCode } from './code/CodeView';
 import { Disclosure } from './Disclosure';
 
@@ -14,6 +15,8 @@ const SEV: Record<IssueSeverity, { icon: typeof Info; cls: string; label: string
   warning: { icon: TriangleAlert, cls: 'text-warn', label: 'Warnings' },
   info: { icon: Info, cls: 'text-muted', label: 'Suggestions' },
 };
+
+const SEV_ONE: Record<IssueSeverity, string> = { error: 'Error', warning: 'Warning', info: 'Suggestion' };
 
 /** One-word-ish verdict that never claims more than was checked: without the reasoner, a pass covers only the checks that ran. */
 export function validationVerdict(report: Pick<ValidationReport, 'passed' | 'reasoner'>, style: 'title' | 'inline' = 'title'): string {
@@ -25,7 +28,6 @@ export function validationVerdict(report: Pick<ValidationReport, 'passed' | 'rea
 export function ValidationSummary({ report }: { report: ValidationReport }) {
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
-  const infos = report.lint.filter((i) => i.severity === 'info').length;
   const r = report.reasoner;
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" role="group" aria-label="Health summary">
@@ -33,10 +35,10 @@ export function ValidationSummary({ report }: { report: ValidationReport }) {
       <SummaryTile
         ok={checkedOf(r) === 'complete' && r.consistent && !r.unsatisfiable.length}
         title={checkedOf(r) === 'consistency' && r.consistent ? 'Partly checked' : !r.available ? 'Not run' : r.consistent ? 'Consistent' : 'Inconsistent'}
-        sub={`Reasoner (${r.engine})`}
+        sub="Reasoner"
         warn={checkedOf(r) !== 'complete' && !(r.available && !r.consistent)}
       />
-      <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub={infos ? `Lint · ${plural(infos, 'suggestion')}` : 'Lint (OWL best practice)'} />
+      <SummaryTile ok={errors === 0} warn={errors === 0 && warnings > 0} title={errors ? plural(errors, 'error') : warnings ? plural(warnings, 'warning') : 'Clean'} sub="Quality checks" />
       <div className="rounded-lg border border-line p-3">
         <div className="text-lg font-semibold tabular-nums">{pct(report.fair.score)}</div>
         <div className="text-xs text-muted">FAIR score</div>
@@ -58,27 +60,30 @@ function SummaryTile({ ok, warn, title, sub }: { ok: boolean; warn?: boolean; ti
   );
 }
 
+/**
+ * Errors and warnings. Suggestions (style nits that never block anything) show only with Advanced
+ * features on (Settings), so a healthy standard doesn't look noisy.
+ */
 export function LintIssues({ report, label }: { report: ValidationReport; label: Labeler }) {
-  if (!report.lint.length) return <p className="text-sm text-muted">No lint issues — the ontology follows the strict OWL profile’s best-practice rules.</p>;
-  const serious = report.lint.some((i) => i.severity !== 'info');
+  const [advanced] = useAdvancedFeatures();
+  const shown = advanced ? report.lint : report.lint.filter((i) => i.severity !== 'info');
+  if (!shown.length) return <p className="text-sm text-muted">No problems: the ontology follows OWL best practice.</p>;
+  const serious = shown.some((i) => i.severity !== 'info');
   return (
     <div className="space-y-4">
       {(['error', 'warning', 'info'] as IssueSeverity[]).map((sev) => {
-        const items = report.lint.filter((i) => i.severity === sev);
+        const items = shown.filter((i) => i.severity === sev);
         if (!items.length) return null;
         const { icon: Icon, cls, label: l } = SEV[sev];
         const list = (
           <ul className="divide-y divide-line rounded-lg border border-line">
             {items.map((i, idx) => (
-              <li key={idx} className="flex flex-wrap items-start justify-between gap-2 px-3 py-2 text-sm">
+              <li key={idx} className="flex items-start gap-2 px-3 py-2 text-sm">
+                <StatusIcon icon={Icon} cls={cls} status={SEV_ONE[sev]} note={[i.code, i.reference].filter(Boolean).join(' · ')} />
                 <div className="min-w-0">
                   <p>{i.message}</p>
-                  <p className="mt-0.5 text-xs text-muted">
-                    <code className="font-mono">{i.code}</code>
-                    {i.iri && <> · {label(i.iri)}</>}
-                  </p>
+                  {i.iri && <p className="mt-0.5 text-xs text-muted">{label(i.iri)}</p>}
                 </div>
-                {i.reference && <Badge tone="outline">{i.reference}</Badge>}
               </li>
             ))}
           </ul>
@@ -103,76 +108,9 @@ export function LintIssues({ report, label }: { report: ValidationReport; label:
   );
 }
 
-/** "sparq · reasoning 1.2 ms (14 ms in all)", or "structural · 3 ms". */
-function timing(r: ReasonerReport) {
-  return r.checkMs !== undefined ? `${r.engine} · reasoning ${r.checkMs} ms (${r.durationMs} ms in all)` : `${r.engine} · ${r.durationMs} ms`;
-}
-
-/** The working draft's Turtle and the revision it is. */
-export type DraftLoader = () => Promise<{ turtle: string; revision?: string }>;
-
-/**
- * Runs the same OWL reasoner (sparq, WebAssembly) on this device, in a Web Worker, over the
- * draft's Turtle, and compares the result with the server's when both are for the same revision.
- */
-function BrowserCheck({ server, revision, load, label }: { server: ReasonerReport; revision?: string; load: DraftLoader; label: Labeler }) {
-  // The revision the browser checked is kept, not a "same revision" flag, so the comparison
-  // stays right when the server's report is reloaded for a newer revision.
-  const [state, setState] = useState<{ status: 'idle' | 'running' | 'done' | 'error'; r?: ReasonerReport; checkedRevision?: string; error?: string }>({ status: 'idle' });
-  const run = async () => {
-    setState({ status: 'running' });
-    try {
-      const draft = await load();
-      const { reasonInBrowser } = await import('../lib/reasonInBrowser');
-      const r = await reasonInBrowser(draft.turtle);
-      setState({ status: 'done', r, checkedRevision: draft.revision });
-    } catch (e) {
-      setState({ status: 'error', error: (e as Error).message });
-    }
-  };
-  const r = state.r;
-  const comparison = r && compareWithServer(r, state.checkedRevision, server, revision);
-  return (
-    <div className="flex flex-wrap items-center gap-2 text-xs">
-      <button type="button" onClick={run} disabled={state.status === 'running'} className="inline-flex items-center gap-1 rounded-md border border-line px-2 py-1 hover:bg-surface-2 disabled:opacity-60">
-        <Cpu className="size-3.5" aria-hidden /> {state.status === 'running' ? 'Checking in this browser…' : 'Check again in this browser'}
-      </button>
-      <span role="status" className="text-muted">
-        {state.status === 'error' && <span className="text-danger">The in-browser check failed: {state.error}</span>}
-        {state.status === 'done' && r && (
-          <>
-            This browser:{' '}
-            <strong className={checkedOf(r) !== 'complete' ? 'text-warn' : r.consistent && !r.unsatisfiable.length ? 'text-ok' : 'text-danger'}>
-              {checkedOf(r) === 'none'
-                ? 'no verdict'
-                : !r.consistent
-                  ? 'inconsistent'
-                  : checkedOf(r) === 'consistency'
-                    ? 'consistent, but not every class could be checked'
-                    : r.unsatisfiable.length
-                      ? `unsatisfiable: ${r.unsatisfiable.map(label).join(', ')}`
-                      : 'consistent, all classes satisfiable'}
-            </strong>{' '}
-            ({timing(r)}).{' '}
-            {comparison === 'other-revision' ? (
-              <span className="text-warn">This check and the server's result are for different revisions of the draft, so they can't be compared. Reload the page to compare.</span>
-            ) : comparison === 'same' ? (
-              'Same result as the server.'
-            ) : (
-              <span className="text-warn">The server's result for the same revision differs.</span>
-            )}
-          </>
-        )}
-      </span>
-    </div>
-  );
-}
-
-export function ReasonerResult({ report, label, checkInBrowser }: { report: ValidationReport; label: Labeler; /** Loads the working draft, to re-run the reasoner in this browser. */ checkInBrowser?: DraftLoader }) {
+export function ReasonerResult({ report, label }: { report: ValidationReport; label: Labeler }) {
   const r = report.reasoner;
   const checked = checkedOf(r);
-  const problem = !r.consistent || r.unsatisfiable.length > 0;
-  const hasDetail = r.unsatisfiable.length > 0 || !!r.explanation || r.inferredSubClassOf.length > 0 || !!r.profile?.length;
   const verdict = checked === 'consistency' && r.consistent ? (
     <span>
       <strong className="text-warn">Consistent, but not every class could be checked.</strong> Validation doesn't pass until the reasoner can check them all.
@@ -186,119 +124,66 @@ export function ReasonerResult({ report, label, checkInBrowser }: { report: Vali
   ) : (
     <strong className="text-danger">Inconsistent — no data could ever conform to this ontology.</strong>
   );
-  const detail = (
-    <div className="space-y-2">
-      {checked !== 'complete' && r.error && <p className="text-xs text-muted">Why: {r.error}</p>}
-      {r.unsatisfiable.length > 0 && <p className="text-danger">Unsatisfiable: {r.unsatisfiable.map(label).join(', ')}</p>}
-      {r.explanation && <p className="rounded-lg bg-surface-2 p-2 text-xs whitespace-pre-line">{r.explanation}</p>}
-      {!!r.profile?.length && (
-        <div>
-          <p className="text-xs text-muted">OWL 2 DL profile notes (reasoning still ran):</p>
-          <ul className="mt-1 text-xs">
-            {r.profile.map((n, i) => (
-              <li key={i}>{n.detail}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {r.inferredSubClassOf.length > 0 && (
-        <div>
-          <p className="text-xs text-muted">Inferred (not asserted) subclass relations:</p>
-          <ul className="mt-1 text-xs">
-            {r.inferredSubClassOf.map(([a, b], i) => (
-              <li key={i}>
-                {label(a)} ⊑ {label(b)}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
+  // Only what needs fixing is shown. Which engine ran, how long it took, inferred relations and
+  // profile notes are under-the-hood detail, so they aren't (Jesse, 6 Nov 2026).
   return (
     <div className="space-y-2 text-sm">
       <p className="flex flex-wrap items-center gap-2">
         <Brain className="size-4 text-muted" />
         {verdict}
-        <span className="text-xs text-subtle">{timing(r)}</span>
       </p>
-      {(hasDetail || (checked !== 'complete' && r.error)) &&
-        (problem ? (
-          detail
-        ) : (
-          <Disclosure tone="muted" title={<span className="text-xs">Reasoner details</span>} summary={r.inferredSubClassOf.length ? plural(r.inferredSubClassOf.length, 'inferred relation') : undefined}>
-            {detail}
-          </Disclosure>
-        ))}
-      {checkInBrowser && <BrowserCheck server={r} revision={report.revision} load={checkInBrowser} label={label} />}
+      {checked !== 'complete' && r.error && <p className="text-xs text-muted">Why: {r.error}</p>}
+      {r.unsatisfiable.length > 0 && <p className="text-danger">Unsatisfiable: {r.unsatisfiable.map(label).join(', ')}</p>}
+      {r.explanation && <p className="rounded-lg bg-surface-2 p-2 text-xs whitespace-pre-line">{r.explanation}</p>}
     </div>
   );
 }
 
-const PRINCIPLES = [
-  { key: 'F', name: 'Findable' },
-  { key: 'A', name: 'Accessible' },
-  { key: 'I', name: 'Interoperable' },
-  { key: 'R', name: 'Reusable' },
-] as const;
+/**
+ * A pass/fail icon whose technical reference (a FOOPS! test, a lint rule) shows on hover or
+ * focus, so the list itself reads in plain words.
+ */
+function StatusIcon({ icon: Icon, cls, status, note }: { icon: typeof Info; cls: string; status: string; note?: string }) {
+  if (!note) return <Icon className={cx('mt-0.5 size-4 shrink-0', cls)} aria-label={status} role="img" />;
+  return (
+    <span tabIndex={0} role="img" aria-label={`${status}. ${note}`} title={note} className="mt-0.5 shrink-0 cursor-help rounded-full focus-visible:outline-2 focus-visible:outline-accent" data-testid="status-note">
+      <Icon className={cx('size-4', cls)} aria-hidden />
+    </span>
+  );
+}
 
-/** `showAll` lists every check (failing first) with no inner toggle, for use inside a disclosure. */
-export function FairChecks({ report, showAll }: { report: ValidationReport; showAll?: boolean }) {
-  const [expanded, setOpen] = useState(false);
-  const open = showAll || expanded;
-  const { checks, byPrinciple } = report.fair;
+/** Only the failing checks, unless expanded: then every check, failing first. Each check's FOOPS!/FAIR reference is on its icon's hover. */
+export function FairChecks({ report }: { report: ValidationReport }) {
+  const [open, setOpen] = useState(false);
+  const { checks } = report.fair;
   const status = (c: (typeof checks)[number]) => c.status ?? (c.passed ? 'pass' : 'fail');
   const failed = checks.filter((c) => status(c) === 'fail');
   const order = { fail: 0, 'not-checked': 1, pass: 2 } as const;
-  const shown = open ? [...checks].sort((a, b) => order[status(a)] - order[status(b)]) : failed.slice(0, 4);
+  const shown = open ? [...checks].sort((a, b) => order[status(a)] - order[status(b)]) : failed;
   const skipped = checks.filter((c) => status(c) === 'not-checked').length;
   return (
     <div className="text-sm">
-      {/* Reports saved before per-principle scoring have no breakdown. */}
-      {byPrinciple && <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {PRINCIPLES.map(({ key, name }) => {
-          const p = byPrinciple[key];
-          return (
-            <div key={key} className="rounded-lg border border-line p-2">
-              <div className="flex items-baseline justify-between gap-1">
-                <span className="text-xs font-medium">{name}</span>
-                <span className="text-xs tabular-nums text-muted">
-                  {p.passed}/{p.total}
-                </span>
-              </div>
-              <ProgressBar className="mt-1.5" value={p.score} tone={p.score >= 0.8 ? 'ok' : p.score >= 0.5 ? 'warn' : 'danger'} />
-            </div>
-          );
-        })}
-      </div>}
-      <p className="mb-3 text-xs text-muted">
-        The FAIR score is the average of these four, so each principle counts equally. Each check follows a FOOPS! test (Garijo, Corcho and Poveda-Villalón, 2021).
-        {skipped > 0 && ` ${plural(skipped, 'check')} could not be run here and ${skipped === 1 ? 'is' : 'are'} left out.`}
-      </p>
       <ul className="space-y-1.5">
         {shown.map((c) => (
           <li key={c.id} className="flex items-start gap-2">
             {status(c) === 'pass' ? (
-              <CircleCheck className="mt-0.5 size-4 shrink-0 text-ok" />
+              <StatusIcon icon={CircleCheck} cls="text-ok" status="Passes" note={c.reference} />
             ) : status(c) === 'fail' ? (
-              <CircleX className="mt-0.5 size-4 shrink-0 text-danger" />
+              <StatusIcon icon={CircleX} cls="text-danger" status="Fails" note={c.reference} />
             ) : (
-              <Info className="mt-0.5 size-4 shrink-0 text-muted" />
+              <StatusIcon icon={Info} cls="text-muted" status="Not checked" note={c.reference} />
             )}
             <span className="min-w-0">
-              <span className="mr-1.5 rounded bg-surface-2 px-1 font-mono text-[0.7rem]">{c.principle}</span>
               <span className="font-medium">{c.title}</span>
-              <span className="block text-xs text-muted">
-                {c.message}
-                {c.reference && <span className="text-subtle"> · {c.reference}</span>}
-              </span>
+              <span className="block text-xs text-muted">{c.message}</span>
             </span>
           </li>
         ))}
         {!shown.length && <li className="text-muted">All {checks.length - skipped} FAIR checks that could be run pass.</li>}
       </ul>
-      {!showAll && (checks.length > shown.length || open) ? (
-        <button onClick={() => setOpen((o) => !o)} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-accent">
+      {open && skipped > 0 && <p className="mt-2 text-xs text-muted">{plural(skipped, 'check')} could not be run here and {skipped === 1 ? 'is' : 'are'} left out of the score.</p>}
+      {checks.length > failed.length || open ? (
+        <button type="button" aria-expanded={open} onClick={() => setOpen((o) => !o)} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-accent">
           {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
           {open ? 'Show failing only' : `Show all ${checks.length} checks`}
         </button>
@@ -307,9 +192,26 @@ export function FairChecks({ report, showAll }: { report: ValidationReport; show
   );
 }
 
-export function CqResults({ report }: { report: ValidationReport }) {
+/**
+ * Whether each question can be answered. Editors can open one to see its SPARQL test and results.
+ * Hiding them from everyone else only keeps the list short (reviewers need "answerable or not"); it is
+ * not an access rule. Who may receive the SPARQL at all is decided on the server (useCases.ts: group
+ * members, since a group's use cases are shared working material).
+ */
+export function CqResults({ report, showQueries = false }: { report: ValidationReport; showQueries?: boolean }) {
   const [openIdx, setOpenIdx] = useState<number>();
-  if (!report.competencyQuestions.length) return <p className="text-sm text-muted">No competency questions with SPARQL tests yet. They come from use cases.</p>;
+  if (!report.competencyQuestions.length) return <p className="text-sm text-muted">No competency questions with tests yet. They come from use cases.</p>;
+  if (!showQueries)
+    return (
+      <ul className="divide-y divide-line rounded-lg border border-line text-sm">
+        {report.competencyQuestions.map((q, i) => (
+          <li key={i} className="flex items-start gap-2 px-3 py-2">
+            {q.satisfied ? <CircleCheck className="mt-0.5 size-4 shrink-0 text-ok" aria-label="Answerable" role="img" /> : <CircleX className="mt-0.5 size-4 shrink-0 text-danger" aria-label="Not answerable" role="img" />}
+            <span className="flex-1">{q.question}</span>
+          </li>
+        ))}
+      </ul>
+    );
   return (
     <ul className="divide-y divide-line rounded-lg border border-line text-sm">
       {report.competencyQuestions.map((q, i) => (
@@ -357,7 +259,6 @@ export function CqResults({ report }: { report: ValidationReport }) {
   );
 }
 
-/** Summary tiles up front; lint, FAIR and competency-question detail one click away. */
 /** Stable identity of a lint finding, so a new finding can be told apart from ones already seen. */
 const issueKey = (i: ValidationReport['lint'][number]) => [i.severity, i.code, i.iri ?? '', i.message].join('|');
 
@@ -367,37 +268,36 @@ export function ValidationDetails({
   openLintKey,
   lintNote,
   headingLevel = 4,
-  checkInBrowser,
+  showQueries = false,
 }: {
   report: ValidationReport;
   label: Labeler;
   /** Opens the lint findings whenever this changes to a new value, e.g. when a link to the report is followed. */
   openLintKey?: unknown;
   lintNote?: ReactNode;
-  /** Level of the Lint / FAIR / Competency question headings: one below the section that holds them. */
+  /** Level of the quality / FAIR / competency question headings: one below the section that holds them. */
   headingLevel?: 3 | 4;
-  /** Loads the working draft, to re-run the reasoner in this browser. */
-  checkInBrowser?: DraftLoader;
+  /** Editors: each competency question opens to its SPARQL test and results. */
+  showQueries?: boolean;
 }) {
+  const [advanced] = useAdvancedFeatures();
   const errors = report.lint.filter((i) => i.severity === 'error').length;
   const warnings = report.lint.filter((i) => i.severity === 'warning').length;
-  const infos = report.lint.length - errors - warnings;
-  const lintSummary = report.lint.length
-    ? [errors && plural(errors, 'error'), warnings && plural(warnings, 'warning'), infos && plural(infos, 'suggestion')].filter(Boolean).join(', ')
-    : 'none';
+  const infos = advanced ? report.lint.length - errors - warnings : 0;
+  const lintSummary = [errors && plural(errors, 'error'), warnings && plural(warnings, 'warning'), infos && plural(infos, 'suggestion')].filter(Boolean).join(', ') || 'none';
   const fairPassed = report.fair.checks.filter((c) => c.passed).length;
   const cqOk = report.competencyQuestions.filter((q) => q.satisfied).length;
   return (
     <div className="space-y-5">
       <ValidationSummary report={report} />
-      <ReasonerResult report={report} label={label} checkInBrowser={checkInBrowser} />
+      <ReasonerResult report={report} label={label} />
       <div className="divide-y divide-line rounded-lg border border-line">
-        <Disclosure className="px-4 py-3" heading={headingLevel} title="Lint findings" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="Quality checks" summary={lintSummary} defaultOpen={errors > 0 || warnings > 0} openKey={openLintKey} failures={report.lint.filter((i) => i.severity !== 'info').map(issueKey)} keepMounted>
           <LintIssues report={report} label={label} />
           {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
         </Disclosure>
         <Disclosure className="px-4 py-3" heading={headingLevel} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} failures={report.fair.checks.filter((c) => !c.passed).map((c) => c.id)} keepMounted>
-          <FairChecks report={report} showAll />
+          <FairChecks report={report} />
         </Disclosure>
         <Disclosure
           className="px-4 py-3"
@@ -408,7 +308,7 @@ export function ValidationDetails({
           failures={report.competencyQuestions.filter((q) => !q.satisfied).map((q) => q.question)}
           keepMounted
         >
-          <CqResults report={report} />
+          <CqResults report={report} showQueries={showQueries} />
         </Disclosure>
       </div>
     </div>

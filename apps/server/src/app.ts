@@ -11,6 +11,7 @@ import { reportRouter } from './public/report.js';
 import { publicRouter } from './public/routes.js';
 import { validationRouter } from './public/validate.js';
 import { apiRouter } from './routes/api.js';
+import { mountGithubAppWebhook } from './routes/githubApp.js';
 import { forkResolver } from './routes/forkResolver.js';
 import { solid } from './services/solid.js';
 import { getUser } from './services/users.js';
@@ -47,6 +48,7 @@ export function createApp(): express.Express {
   // OAuth 2.1 for MCP clients: discovery, client registration, /authorize, /token, /revoke.
   app.use(oauthRoutes);
   app.all('/mcp', express.json({ limit: '5mb' }), mcpHandler);
+  mountGithubAppWebhook(app);
   app.use('/api', apiRouter());
   // Development forks, dereferenceable so applications can import them (/def/<ontology>/forks/<fork>).
   app.use(forkResolver());

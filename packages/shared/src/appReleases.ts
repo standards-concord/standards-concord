@@ -53,6 +53,291 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.41.1',
+    date: '2026-11-06',
+    title: 'App checks work from any repository',
+    pr: 108,
+    changes: [
+      {
+        id: 'app-check-action-public',
+        type: 'fix',
+        title: 'The app check workflow uses a public action',
+        detail:
+          'The workflow on App checks now uses standards-concord/app-check@v1, the action’s own public home. Before, it pointed inside Concord’s repository, which only repositories in the standards-concord organisation can use while that repository is private. If you added the workflow before today, change its uses: line to standards-concord/app-check@v1.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
+      },
+    ],
+  },
+  {
+    version: '0.41.0',
+    date: '2026-11-06',
+    title: 'Logos for your connected agents',
+    pr: 105,
+    changes: [
+      {
+        id: 'connected-agent-logos',
+        type: 'feat',
+        title: 'Each connected agent shows its app’s logo',
+        detail:
+          'Under Connected agents, Claude, Claude Code, ChatGPT, Codex, Cursor and VS Code now show their logos beside their names, so you can see at a glance what you’ve connected. Other apps get a plain agent icon.',
+        roles: ['agent'],
+        to: '/connect#agents',
+      },
+    ],
+  },
+  {
+    version: '0.40.0',
+    date: '2026-11-06',
+    title: 'One picture of the ontology, and a simpler Query',
+    changes: [
+      {
+        id: 'diagram-only',
+        type: 'feat',
+        title: 'Browse has List and Diagram; the Graph view is gone',
+        detail:
+          'The Graph view drew the same classes as the Diagram, in a layout that was harder to read. Browse now has two views: List, to find a term, and Diagram, to see what data each class has and how the classes connect. Old links to the Graph open the Diagram.',
+        roles: [],
+        to: '{o}/browse?view=diagram',
+        ask: 'Did you use the Graph view for anything the Diagram doesn’t do?',
+      },
+      {
+        id: 'query-no-dataset-choice',
+        type: 'feat',
+        title: 'Query runs over your sample data without asking',
+        detail:
+          'There is no “Run against” choice any more: when your sample data has records, queries run over the ontology plus those records, and the results say so. The keyboard hints moved into a Keyboard shortcuts pop-up beside the editor; “Tab moves to the next control” stays in view.',
+        roles: [],
+        to: '{o}/query',
+        ask: 'Did you ever need to run a query over the ontology alone while you had sample data?',
+      },
+    ],
+  },
+  {
+    version: '0.39.0',
+    date: '2026-11-06',
+    title: 'Instant term browsing, and data checked in your browser',
+    pr: 92,
+    changes: [
+      {
+        id: 'validate-in-browser',
+        type: 'feat',
+        title: 'Validate data runs in your browser',
+        detail: 'Validate data now checks your data on your own device with sparq, as you type or as soon as you pick a file, in a few milliseconds. There is no Validate button, your data never leaves your device, and it keeps working if the connection drops once the page has loaded. The POST API at the ontology address still runs the same check for tools and agents.',
+        roles: ['contributor', 'member', 'agent'],
+        to: '{o}/validate',
+        ask: 'Does checking as you type feel instant, and is it clear that your data stays on your device?',
+      },
+      {
+        id: 'check-data-merged',
+        type: 'feat',
+        title: 'Check data is now part of Validate data',
+        detail: 'Query no longer has a Check data tab. Validate data starts with the sample records Query runs over, and in Turtle it underlines problems in the editor, lists them with their line (click one to jump there), autocompletes the ontology’s terms and can tidy the layout with Format. Query’s Edit sample data link opens it.',
+        roles: ['contributor', 'member'],
+        to: '{o}/validate',
+        ask: 'Is it clear where to check your data now, and do you miss anything from the old Check data tab?',
+      },
+      {
+        id: 'instant-term-browsing',
+        type: 'perf',
+        title: 'Clicking between terms is instant',
+        detail: 'Term details, what uses each term, and search now come from the ontology the page already holds, so following a link in Browse shows the term at once instead of waiting for the server.',
+        roles: [],
+        to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.38.0',
+    date: '2026-11-06',
+    title: 'Connect your app with GitHub, no token needed',
+    pr: 98,
+    changes: [
+      {
+        id: 'app-checks-github-app',
+        type: 'feat',
+        title: 'Connect an app for app checks with GitHub',
+        detail:
+          'On App checks, Connect with GitHub installs the Concord app on your app’s repository. There’s no token to store: Concord opens the pull request that adds the workflow, and starts a run as soon as a change is proposed or edited instead of every 30 minutes. The token route is still there for other CI.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
+        ask: 'Was connecting with GitHub clearer than copying a token and a workflow? Would you install a Concord app on your repository?',
+      },
+    ],
+  },
+  {
+    version: '0.37.0',
+    date: '2026-11-06',
+    title: 'Tidier Browse pages and plain type names',
+    pr: 93,
+    changes: [
+      {
+        id: 'browse-list-view',
+        type: 'feat',
+        title: 'Fold away the class list',
+        detail: 'In Browse, the class list now folds away like the property lists, and the view is called List (beside Diagram and Graph) instead of Classes.',
+        roles: [],
+        to: '{o}/browse',
+      },
+      {
+        id: 'plain-datatype-names',
+        type: 'fix',
+        title: 'Types like Boolean and String, not xsd:boolean',
+        detail: 'Property types now read as plain names (Boolean, String, Non-negative integer, Date and time). Hover over one to see the exact XSD type.',
+        roles: [],
+        to: '{o}/browse',
+      },
+      {
+        id: 'alignment-sweep',
+        type: 'fix',
+        title: 'Things line up again',
+        detail:
+          'A long property name that wraps onto two lines stays left-aligned instead of centring. The governance rules start in one column, every governance section has an icon, system events in the activity feed get a round icon, and the Concord name is no longer cut short on a phone.',
+        roles: [],
+        to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.36.0',
+    date: '2026-11-06',
+    title: 'Fewer technical details, everywhere',
+    changes: [
+      {
+        id: 'fewer-details',
+        type: 'feat',
+        title: 'Less about how Concord works, more about the standard',
+        detail:
+          'Lint is now "Quality checks", and style suggestions only show with Advanced features on. Only editors can open a competency question to its SPARQL. Change requests no longer restate their edits in the AI analysis, and say where they came from only when it isn’t the default. Fork pages lose the MCP tool names and list two formats up front. Source & export keeps Turtle, JSON-LD and SHACL up front, with the rest under More formats. "How many" on a class reads "Optional", "At least one" and so on. The ontology IRI moves into Ontology details, and meeting summaries count only what the call produced.',
+        roles: [],
+        to: '{o}',
+        ask: 'Is there anything you used to rely on that you can no longer find?',
+      },
+    ],
+  },
+  {
+    version: '0.35.1',
+    date: '2026-11-06',
+    title: 'Governance is always in the ontology nav',
+    pr: 95,
+    changes: [
+      {
+        id: 'governance-always-shown',
+        type: 'fix',
+        title: 'No more “Show all sections” toggle',
+        detail:
+          'Governance used to be hidden from the ontology nav unless you were an owner, steward or ODI oversight, with a “Show all sections (Governance)” button to bring it back. Every role now sees Governance, so anyone can read the policy and who holds which role. Only owners can still edit the policy.',
+        roles: [],
+        to: '{o}/governance',
+      },
+    ],
+  },
+  {
+    version: '0.35.0',
+    date: '2026-11-06',
+    title: 'Advanced features, and a diff on every change',
+    pr: 94,
+    changes: [
+      {
+        id: 'turtle-diff',
+        type: 'feat',
+        title: 'See a change as a diff of the Turtle file',
+        detail:
+          'Each change request has a Diff tab showing the ontology file before and after, line by line, like a code review on GitHub. It replaces the raw Triples view.',
+        roles: [],
+        to: '{o}/changes',
+        ask: 'Does the diff make it clearer what a change really does to the file?',
+      },
+      {
+        id: 'advanced-features',
+        type: 'feat',
+        title: 'Query is now an advanced feature',
+        detail:
+          'Settings has a new Advanced features switch, off by default. Turn it on to see Query under Explore. Links straight to a query page still work.',
+        roles: [],
+        to: '/settings',
+        ask: 'Is there anything else you would rather see only when you ask for it?',
+      },
+      {
+        id: 'fewer-geeky-details',
+        type: 'feat',
+        title: 'Fewer under-the-hood details',
+        detail:
+          'Reasoner details and Check again in this browser are gone. FAIR and quality check codes now appear when you hover over a tick or cross. Commit hashes on releases and forks, and the canned SPARQL examples menu, have been removed.',
+        roles: [],
+        to: '{o}#health',
+      },
+    ],
+  },
+  {
+    version: '0.34.0',
+    date: '2026-11-06',
+    title: 'See who runs an ontology at a glance',
+    pr: 91,
+    changes: [
+      {
+        id: 'role-rings',
+        type: 'feat',
+        title: 'Coloured rings for owners, stewards and ODI oversight',
+        detail:
+          'In the members list, owners, the steward (who chairs) and ODI oversight have a coloured ring round their picture, with a small key underneath. Hover over a picture to see their roles. Role chips on the Governance page use the same colours.',
+        roles: [],
+        to: '{o}',
+        ask: 'Could you tell who runs the working group from the rings? Are the colours clear in the look you use?',
+      },
+    ],
+  },
+  {
+    version: '0.33.0',
+    date: '2026-11-06',
+    title: 'Coloured workflow file for app checks',
+    pr: 90,
+    changes: [
+      {
+        id: 'app-checks-yaml-highlight',
+        type: 'feat',
+        title: 'The app checks workflow file is colour-coded',
+        detail:
+          'When you connect an app, the workflow file to add to its repository is now syntax-highlighted like the rest of Concord’s code, so its settings, values and comments are easier to tell apart.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
+      },
+    ],
+  },
+  {
+    version: '0.32.0',
+    date: '2026-11-05',
+    title: 'Less to read on every page',
+    pr: 86,
+    changes: [
+      {
+        id: 'simpler-wording',
+        type: 'feat',
+        title: 'Less text, and only what needs your attention',
+        detail:
+          'FAIR checks list only the failing ones until you choose Show all. Engine names and timings (which reasoner ran, how many milliseconds) are tucked under Reasoner details, and several page introductions are shorter.',
+        roles: [],
+        to: '{o}#health',
+        ask: 'Is there anything on the page you now miss, or anything else that still feels like too much to read?',
+      },
+    ],
+  },
+  {
+    version: '0.31.0',
+    date: '2026-11-05',
+    title: 'Profile pictures in the demo',
+    pr: 82,
+    changes: [
+      {
+        id: 'demo-avatars',
+        type: 'feat',
+        title: 'Profile pictures for everyone in the demo',
+        detail: 'The simulated working group and your demo account now have profile pictures instead of initials.',
+        roles: [],
+      },
+    ],
+  },
+  {
     version: '0.30.0',
     date: '2026-11-05',
     title: 'Feature clips on the welcome page',
@@ -488,7 +773,7 @@ export const APP_RELEASES: AppRelease[] = [
         detail:
           'Problems read as plain sentences using your own prefixes, are underlined in the editor (hover to read), and clicking one jumps to it. Typos and syntax errors are underlined as you type, and Format tidies the Turtle.',
         roles: [],
-        to: '{o}/query?view=check',
+        to: '{o}/validate',
         ask: 'When Check data finds a problem, can you tell what’s wrong and where to fix it?',
       },
     ],

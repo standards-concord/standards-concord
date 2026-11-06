@@ -56,7 +56,7 @@ export function mountAppChecks(r: Router) {
   const caller = async (req: Request, appId: unknown) => {
     if (req.get('authorization') || !req.user) {
       const app = await apps.appForToken(req.get('authorization'));
-      return { app, by: apps.byToken(app) };
+      return { app, by: apps.byToken(req.get('authorization')) };
     }
     return { app: await apps.appForOwner(appId, req.user), by: { trusted: true, ownerId: req.user.id } };
   };

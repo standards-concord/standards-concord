@@ -221,6 +221,17 @@ export const dbStore = {
     }
   },
 
+  async commitOf(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<{ parent?: string; subject: string }> {
+    if (!/^[0-9a-f]{40}$/.test(commit)) throw new HttpError(404, `No commit ${commit || '(empty)'}`);
+    let c: Commit;
+    try {
+      c = await readCommit(commit);
+    } catch {
+      throw new HttpError(404, `No commit ${commit}`);
+    }
+    return { parent: c.parents[0], subject: subject(c) };
+  },
+
   async graphAt(project: Pick<OntologyProject, 'slug'>, commit: string): Promise<OntologyGraph> {
     const key = `${project.slug}@${commit}`;
     let g = graphCache.get(key);

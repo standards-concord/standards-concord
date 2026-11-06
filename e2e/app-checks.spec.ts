@@ -1,5 +1,6 @@
 import { test, expect, expectNoCrash, settle, signIn, signInAsPersona, demoOntology, uniq } from './fixtures';
 import type { APIRequestContext } from '@playwright/test';
+import { workflowYaml } from '../packages/shared/src/workflowYaml';
 
 /**
  * App checks and autopilot: a member connects their app, its CI reports results against
@@ -73,7 +74,7 @@ test.describe('app checks', () => {
     await expect(page.getByText(name)).toHaveCount(0);
   });
 
-  test('connect an app, turn on autopilot, and see it approve when CI passes', async ({ page, request }) => {
+  test('connect an app, turn on autopilot, and see it approve when CI passes', async ({ page, context, request }) => {
     // An editor proposes a new term, so it is fresh for this test.
     await request.post('/api/auth/demo', { data: { name: 'Editor for app checks', role: 'editor' } });
     const created = await request.post(`/api/ontologies/${demo.id}/change-requests`, {
@@ -112,7 +113,20 @@ test.describe('app checks', () => {
     await page.getByRole('button', { name: 'Connect app' }).click();
     const token = (await page.getByTestId('app-token').innerText()).trim();
     expect(token).toMatch(/^cna_/);
-    await expect(page.getByText('standards-concord/standards-concord/actions/app-check@main')).toBeVisible();
+    // From the action's public home, so repositories anywhere can use it.
+    await expect(page.getByText('standards-concord/app-check@v1')).toBeVisible();
+    // The workflow is syntax-highlighted as YAML: keys, strings and comments get their own colours.
+    const workflow = page.getByRole('region', { name: 'Workflow file' });
+    await expect(workflow).toHaveAttribute('data-language', 'yaml');
+    // Highlighting must not change a character: what shows and what Copy copies are exactly the workflow.
+    const expectedYaml = workflowYaml(new URL(page.url()).origin);
+    expect(await workflow.evaluate((el) => el.textContent)).toBe(expectedYaml);
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await workflow.locator('xpath=..').getByRole('button', { name: 'Copy' }).click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(expectedYaml);
+    await expect(workflow.locator('.tok-attr', { hasText: /^jobs$/ })).toBeVisible();
+    await expect(workflow.locator('.tok-string', { hasText: '*/30 * * * *' })).toBeVisible();
+    await expect(workflow.locator('.tok-comment').first()).toBeVisible();
     await expect(page.getByRole('link', { name: /Create it in example\/family-finder/ })).toHaveAttribute('href', /github\.com\/example\/family-finder\/new\/main\?filename=/);
     await expect(page.getByRole('link', { name: /Open example\/family-finder’s secrets/ })).toBeVisible();
 

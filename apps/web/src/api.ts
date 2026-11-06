@@ -4,6 +4,7 @@
  * (with the server's `{error}` message when there is one).
  */
 import type {
+  GithubAppStatus,
   Publication,
   ActivityItem,
   AlphaMe,
@@ -260,15 +261,16 @@ export const api = {
     `/api/ontologies/${e(id)}/source${qs({ format, ref, download: download ? 1 : undefined })}`,
   source: (id: string, format: OutputFormat, ref = 'working') =>
     request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format, ref })}`, undefined, { raw: true }),
-  /** The working draft as Turtle, with the revision it is (to compare with a validation report). */
-  workingTurtle: async (id: string) => {
+  /** A version's source, with the working draft's revision when the server says it (signed in). */
+  sourceWithRevision: async (id: string, format: OutputFormat, ref = 'working') => {
     let revision: string | undefined;
-    const turtle = await request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format: 'turtle', ref: 'working' })}`, undefined, {
+    const text = await request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format, ref })}`, undefined, {
       raw: true,
       onHeaders: (h) => (revision = h.get('X-Concord-Revision') ?? undefined),
     });
-    return { turtle, revision };
+    return { text, revision };
   },
+  /** The working draft as Turtle, with the revision it is (to compare with a validation report). */
   validation: (id: string, ref = 'working') => get<ValidationReport>(`/api/ontologies/${e(id)}/validation${qs({ ref })}`),
   sparql: (id: string, query: string) => post<SparqlResult>(`/api/ontologies/${e(id)}/sparql`, { query }),
 
@@ -330,6 +332,7 @@ export const api = {
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
   proposeTermEdit: (id: string, body: TermEditInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/term-edits`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
+  turtleDiff: (id: string) => get<{ before: string; after: string } | { error: string }>(`/api/change-requests/${e(id)}/turtle-diff`),
   publicReports: (id: string) => get<PublicReport[]>(`/api/ontologies/${e(id)}/public-reports`),
   acceptPublicReport: (id: string, reportId: string) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/accept`),
   dismissPublicReport: (id: string, reportId: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-reports/${e(reportId)}/dismiss`),
@@ -393,6 +396,12 @@ export const api = {
   updateApp: (appId: string, body: { name?: string; repo?: string; autopilot?: Partial<AutopilotSettings> }) => patch<ConnectedApp>(`/api/apps/${e(appId)}`, body),
   rotateAppToken: (appId: string) => post<ConnectedApp>(`/api/apps/${e(appId)}/token`),
   deleteApp: (appId: string) => del<unknown>(`/api/apps/${e(appId)}`),
+  // Connecting an app through the Concord GitHub App instead of a token
+  githubApp: () => get<GithubAppStatus>('/api/github-app'),
+  startGithubInstall: (appId: string) => post<{ url: string }>(`/api/apps/${e(appId)}/github/install`),
+  unlinkGithub: (appId: string) => del<ConnectedApp>(`/api/apps/${e(appId)}/github`),
+  openWorkflowPr: (appId: string) => post<{ app: ConnectedApp; alreadyThere?: boolean }>(`/api/apps/${e(appId)}/github/workflow-pr`),
+  runGithubNow: (appId: string) => post<ConnectedApp>(`/api/apps/${e(appId)}/github/run`),
 
   // Simulation
   simulationStep: (ontologyId: string) => post<{ events: ActivityItem[] }>('/api/simulation/step', { ontologyId }),

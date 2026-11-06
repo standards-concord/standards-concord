@@ -126,15 +126,23 @@ export const featureActions: Record<string, Action> = {
     c.d.claim(v?.reasoner?.consistent === true, 'the reasoner reports the working draft consistent');
     await c.d.highlight(c.d.page.getByRole('group', { name: 'Health summary' }), 'the health summary');
   },
-  async 'f-recheck-browser'(c) {
-    await c.d.clearHighlight();
-    const btn = c.d.page.getByRole('button', { name: 'Check again in this browser' });
-    if (!(await c.d.click(btn, 'Check again in this browser', { settle: false }))) return;
-    await c.d.claimVisible(c.d.page.getByText('consistent, all classes satisfiable'), 'the in-browser reasoner finds every class satisfiable', 30_000);
-    await c.d.claimVisible(c.d.page.getByText('Same result as the server.'), 'the in-browser result agrees with the server');
-  },
   async 'f-show-fair'(c) {
-    await c.d.highlight(c.d.page.getByRole('button', { name: /^FAIR checks/ }), 'the FAIR checks');
+    // The narration says you can see which checks pass and which couldn't be run, but the group
+    // lists only failing checks until "Show all" is chosen, so open both before it is spoken.
+    await c.d.clearHighlight();
+    const page = c.d.page;
+    const group = page.getByRole('button', { name: /^FAIR checks/ });
+    if ((await group.getAttribute('aria-expanded').catch(() => null)) !== 'true') await c.d.click(group, 'the FAIR checks', { settle: false });
+    if (!(await c.d.click(page.getByRole('button', { name: /^Show all \d+ checks$/ }), 'Show all checks', { settle: false }))) return;
+    const v = (await apiJson(c, `/api/ontologies/${c.ontology.id}/validation`)) as { fair?: { checks?: { title: string; passed: boolean; status?: string }[] } } | undefined;
+    const checks = v?.fair?.checks ?? [];
+    const passing = checks.find((k) => k.passed);
+    const skipped = checks.find((k) => k.status === 'not-checked');
+    if (passing) await c.d.claimVisible(page.locator('#health').getByText(passing.title, { exact: true }), `a passing FAIR check is listed (${passing.title})`);
+    else c.d.claim(false, 'some FAIR checks pass');
+    if (skipped) await c.d.claimVisible(page.locator('#health').getByText(/could not be run here/), 'the checks that could not be run are named');
+    else c.d.claim(false, 'some FAIR checks could not be run here');
+    await c.d.highlight(page.locator('#health').getByRole('list').filter({ hasText: passing?.title ?? 'FAIR' }).first(), 'the FAIR checks');
   },
 
   /* ------------------------------ browse ------------------------------ */
@@ -186,15 +194,18 @@ export const featureActions: Record<string, Action> = {
     c.d.claim(level === 'patch', `the edit is classified as a patch (got ${level})`);
     await c.d.highlight(c.d.page.getByRole('button', { name: /^Level: / }), 'the level badge');
   },
-  async 'f-show-triples'(c) {
+  async 'f-show-diff'(c) {
     await c.d.clearHighlight();
-    if (await c.d.click(c.d.page.getByRole('button', { name: 'Triples' }), 'the Triples view')) {
-      await sleep(300);
-      await c.d.claimVisible(c.d.page.getByRole('tabpanel').getByText(/for example a volunteer in their role/).first(), 'the triples show the new definition');
-      await c.d.scroll(260, 1000);
-    }
+    if (!(await c.d.click(c.d.page.getByRole('tab', { name: /^Diff/ }), 'the Diff tab'))) return;
+    const diff = c.d.page.getByRole('table', { name: 'Turtle diff' });
+    // The new definition is an added line, and the old one a removed line.
+    await c.d.claimVisible(diff.locator('[data-diff="add"]').filter({ hasText: /for example a volunteer in their role/ }), 'the diff adds the new definition');
+    await c.d.claimVisible(diff.locator('[data-diff="del"]').first(), 'the diff removes the old definition');
+    await c.d.highlight(diff, 'the Turtle diff');
   },
   async 'f-show-checks'(c) {
+    // The Checks tab replaces the diff, so drop its highlight first.
+    await c.d.clearHighlight();
     await c.d.scroll(-2000, 500);
     await c.d.click(c.d.page.getByRole('tab', { name: /Checks/ }), 'the Checks tab');
     const v = (await cr(c))?.validation;
@@ -307,13 +318,13 @@ export const featureActions: Record<string, Action> = {
 
   /* ----------------------------- check data ----------------------------- */
   async 'f-open-check'(c) {
-    await c.d.goto(o(c, '/query?view=check'));
-    await c.d.page.getByTestId('sparq-ready').waitFor({ state: 'visible', timeout: 30_000 }).catch(() => c.d.warn('The in-browser engine never became ready'));
-    await ringAround(c, 'Check your data');
+    await c.d.goto(o(c, '/validate'));
+    await c.d.page.getByTestId('validate-status').getByText(/^Checked in/).waitFor({ state: 'visible', timeout: 30_000 }).catch(() => c.d.warn('The sample data was never checked'));
+    await ringAround(c, /^Check RDF data against/);
   },
   async 'f-paste-data'(c) {
     await c.d.clearHighlight();
-    const editor = c.d.page.getByTestId('data-editor');
+    const editor = c.d.page.getByTestId('validate-editor');
     if (!(await c.d.click(editor, 'the data editor', { settle: false }))) return;
     await c.d.page.keyboard.press('ControlOrMeta+a');
     await c.d.page.keyboard.insertText(SAMPLE);
@@ -321,14 +332,14 @@ export const featureActions: Record<string, Action> = {
   },
   async 'f-check'(c) {
     await c.d.clearHighlight();
-    if (!(await c.d.click(c.d.page.getByRole('button', { name: 'Check', exact: true }), 'Check'))) return;
+    // Checked as it was typed: no button to press.
     const list = c.d.page.getByRole('list', { name: /Problems found/ });
     await c.d.claimVisible(list.getByRole('button', { name: /"sixteen" is of type xsd:string but must be of type xsd:nonNegativeInteger/ }), 'the problem reads as a sentence');
     await c.d.highlight(list, 'the problems found');
   },
   async 'f-hover'(c) {
     await c.d.clearHighlight();
-    const squiggle = c.d.page.getByTestId('data-editor').locator('.cm-lintRange-error', { hasText: '"sixteen"' });
+    const squiggle = c.d.page.getByTestId('validate-editor').locator('.cm-lintRange-error', { hasText: '"sixteen"' });
     if (!(await c.d.pointAt(squiggle, 'the underlined value'))) return;
     await c.d.claimVisible(c.d.page.locator('.cm-tooltip-lint'), 'hovering shows the problem');
   },
@@ -344,15 +355,12 @@ export const featureActions: Record<string, Action> = {
     await sleep(300);
     await c.d.page.keyboard.insertText('"16"^^xsd:nonNegativeInteger');
     await sleep(600);
-    const again = c.d.page.getByTestId('report-stale').getByRole('button', { name: 'Check again' });
-    const btn = (await again.isVisible().catch(() => false)) ? again : c.d.page.getByRole('button', { name: 'Check', exact: true });
-    if (!(await c.d.click(btn, 'Check again', { settle: false }))) return;
-    const ok = c.d.page.getByTestId('shacl-report').getByText('Conforms', { exact: true });
+    // Checked again as it's typed.
+    const ok = c.d.page.getByTestId('validation-verdict').getByText('Conforms to the shapes', { exact: true });
     if (await c.d.claimVisible(ok, 'the fixed data conforms', 20_000)) await c.d.highlight(ok, 'Conforms');
   },
   async 'f-open-validate'(c) {
     await c.d.clearHighlight();
-    await c.d.goto(o(c, '/validate'));
     await sleep(500);
     await c.d.scroll(500, 1600);
   },
