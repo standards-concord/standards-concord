@@ -300,19 +300,31 @@ test.describe('Validate data', () => {
     await expect(page.getByRole('alert')).toBeVisible();
   });
 
-  // Used to go wrong: choosing a file over 5 MB showed why it was refused, then the check that the
-  // choice set off for the data already there finished and cleared the message.
-  test('a file over 5 MB is refused, and the message stays', async ({ page }) => {
-    await page.goto('/o/volunteering/validate');
+  // Used to go wrong: choosing a file over 5 MB showed why it was refused, then a check for the data
+  // already there (set off by the choice, or still running from an edit) finished and cleared the message.
+  test('a file over 5 MB is refused, and the message stays while a check finishes', async ({ page }) => {
+    await page.goto('/o/volunteering/validate?version=draft');
     await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    // Hold the next check (it downloads the draft again) so the file is refused while it runs.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/ontologies\/[^/]+\/source\?.*ref=working/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await setEditor(page, `@prefix vol: <${VOL}> .\n<https://example.org/r> a vol:Role .\n`);
+    await expect(page.getByTestId('validate-status')).toHaveText('Checking…');
     const buffer = Buffer.alloc(5 * 1024 * 1024 + 1, ' ');
     await page.getByTestId('validate-file').setInputFiles({ name: 'too-big.ttl', mimeType: 'text/turtle', buffer });
     const refused = page.getByRole('alert').filter({ hasText: 'too-big.ttl is larger than 5 MB' });
     await expect(refused).toBeVisible();
-    // A check takes milliseconds here, so one set off by the choice would have answered by now.
-    await page.waitForTimeout(1000);
-    await expect(refused).toBeVisible();
+    release();
     await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    await expect(page.getByTestId('validation-verdict')).toContainText('Conforms to the shapes');
+    await expect(refused).toBeVisible();
+    // Editing the data again is moving on: the message goes.
+    await setEditor(page, `@prefix vol: <${VOL}> .\n<https://example.org/r2> a vol:Role .\n`);
+    await expect(refused).toHaveCount(0);
   });
 
   // Query used to have a "Check data" workspace beside Validate data. It's gone: Query links here to edit its sample data.

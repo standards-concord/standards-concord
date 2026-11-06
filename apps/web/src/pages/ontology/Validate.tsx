@@ -180,6 +180,8 @@ export function ValidateTab() {
   // The version's ontology and shapes, for describing problems in Turtle.
   const [src, setSrc] = useState<Sources & { version: string }>();
   const [error, setError] = useState<unknown>();
+  // Why a chosen file wasn't taken: kept apart from the check's error, so a check finishing for the data already there doesn't clear it.
+  const [uploadError, setUploadError] = useState<Error>();
   const [checking, setChecking] = useState(false);
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -268,6 +270,7 @@ export function ValidateTab() {
     nextCheck.current = when;
     setGeneration((g) => g + 1);
     if (replaced) setReport(null);
+    setUploadError(undefined);
   };
 
   // Check automatically, and again in the background whenever the data, format or version changes.
@@ -322,8 +325,8 @@ export function ValidateTab() {
   };
 
   const load = async (f: File) => {
-    // Refused before anything changes, so no new check comes along and clears the message.
-    if (f.size > MAX_BYTES) return setError(new Error(`${f.name} is larger than 5 MB, the most the validator accepts.`));
+    // Refused before anything changes: the data already there, and its check, stay as they were.
+    if (f.size > MAX_BYTES) return setUploadError(new Error(`${f.name} is larger than 5 MB, the most the validator accepts.`));
     setError(undefined);
     invalidate(true);
     const token = loads.current;
@@ -334,7 +337,7 @@ export function ValidateTab() {
     } catch (e) {
       if (token === loads.current) {
         setReading(false);
-        setError(e);
+        setUploadError(e instanceof Error ? e : new Error(`${f.name} couldn't be read.`));
       }
       return;
     }
@@ -503,6 +506,7 @@ export function ValidateTab() {
               ))}
             </ol>
           )}
+          {uploadError ? <InlineError error={uploadError} /> : null}
           {showError ? <InlineError error={error} /> : null}
         </div>
       </Card>
