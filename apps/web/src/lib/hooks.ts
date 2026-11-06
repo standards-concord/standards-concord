@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { finishLoad, keepChange, keptKey, keptValue, startLoad, supersedeLoads } from './kept';
+import { finishLoad, forgetKept, keptKey, keptValue, startLoad } from './kept';
 
 export interface AsyncState<T> {
   data: T | undefined;
@@ -23,8 +23,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
   fnRef.current = fn;
   const keepRef = useRef(opts?.keep);
   keepRef.current = opts?.keep;
-  // The key (account included) the data shown was loaded under, so a change made through setData after
-  // the account changed isn't kept for the new account.
+  // The key (account included) the page last loaded, forgotten along with the current one on setData.
   const loadedKey = useRef(keptKey(opts?.keep));
 
   const run = useCallback(async () => {
@@ -59,21 +58,12 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
+  // A page's own change (after an edit) isn't kept: what was kept for it is forgotten instead, and the
+  // next load keeps afresh. As before, a load already on its way still replaces the page's data when it
+  // answers; pages that edit call reload() afterwards, which supersedes it.
   const setData = useCallback((d: T | ((prev: T | undefined) => T)) => {
-    // With `keep`, a change made here is newer than any load still on its way, so their answers are
-    // dropped, both here and in what is kept. (Without it, loads behave as they always have.)
-    if (keepRef.current) {
-      seq.current++;
-      setLoading(false);
-    }
-    const keep = keepRef.current;
-    const loaded = loadedKey.current;
-    supersedeLoads(keep);
-    setDataState((prev) => {
-      const next = typeof d === 'function' ? (d as (p: T | undefined) => T)(prev) : d;
-      keepChange(keep, loaded, next);
-      return next;
-    });
+    forgetKept(keepRef.current, loadedKey.current);
+    setDataState((prev) => (typeof d === 'function' ? (d as (p: T | undefined) => T)(prev) : d));
   }, []);
 
   return { data, error, loading, reload: run, setData };

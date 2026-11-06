@@ -42,7 +42,10 @@ function store(key: string, value: unknown) {
 export function startLoad(key: string | undefined): { key: string; load: number; token: ReturnType<typeof accountToken> } | undefined {
   if (!key) return undefined;
   const load = ++lastLoad;
+  loads.delete(key);
   loads.set(key, load);
+  // A load that never settles mustn't stay for ever: past the cap the oldest is dropped (its answer just isn't kept).
+  if (loads.size > KEEP_MAX) loads.delete(loads.keys().next().value!);
   return { key, load, token: accountToken() };
 }
 
@@ -56,21 +59,18 @@ export function finishLoad(started: ReturnType<typeof startLoad>, answer?: { val
 }
 
 /**
- * The page changed its data itself (after an edit): kept as the newest, and loads on their way are
- * dropped. `loadedKey` is the key the page's data was loaded under; if the account has changed since,
- * nothing is kept, so a late change from one account never lands in the next one's copy.
+ * The page changed its data itself (after an edit). What was kept for it may no longer be true, so it is
+ * forgotten, and loads on their way for it won't be kept: the next load keeps afresh. Nothing is written
+ * here, so a change that lands late (after the page moved to other data, or the account changed) can
+ * never end up kept under the wrong key. `loadedKey` is the key the page last loaded; both it and the
+ * current key are forgotten.
  */
-export function keepChange(keep: string | undefined, loadedKey: string | undefined, value: unknown) {
-  const key = keptKey(keep);
-  if (!key) return;
-  loads.delete(key);
-  if (key === loadedKey) store(key, value);
-}
-
-/** Drops the loads on their way for `keep` (called as soon as the page changes its data, before React applies it). */
-export function supersedeLoads(keep: string | undefined) {
-  const key = keptKey(keep);
-  if (key) loads.delete(key);
+export function forgetKept(keep: string | undefined, loadedKey: string | undefined) {
+  for (const key of new Set([keptKey(keep), loadedKey])) {
+    if (!key) continue;
+    kept.delete(key);
+    loads.delete(key);
+  }
 }
 
 /** For tests: how many keys are kept and how many loads are tracked. */
