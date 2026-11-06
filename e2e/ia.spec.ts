@@ -429,9 +429,13 @@ test.describe('progressive disclosure', () => {
       await page.keyboard.press('Escape');
     }
 
-    // Changes, Checks and Discussion are separate views.
+    // Changes, Checks and Discussion are separate views, with a Diff of the Turtle when the request has edits.
     const tabs = page.getByRole('tablist', { name: 'Change request views' });
-    await expect(tabs.getByRole('tab')).toHaveCount(3);
+    const crId = new URL(page.url()).pathname.split('/').pop()!;
+    const shown = (await (await page.request.get(`/api/change-requests/${crId}`)).json()) as { ops: unknown[]; withheld?: boolean };
+    const views = shown.ops.length && !shown.withheld ? ['Changes', 'Diff', 'Checks', 'Discussion'] : ['Changes', 'Checks', 'Discussion'];
+    await expect(tabs.getByRole('tab')).toHaveCount(views.length);
+    for (const [i, v] of views.entries()) await expect(tabs.getByRole('tab').nth(i)).toHaveText(new RegExp(`^${v}`));
     await expect(tabs.getByRole('tab', { name: /Changes/ })).toHaveAttribute('aria-selected', 'true');
     await expect(page.getByText(/Proposed changes \(\d+\)/)).toBeVisible();
     const rationale = page.getByRole('button', { name: /Rationale and risks/ });
