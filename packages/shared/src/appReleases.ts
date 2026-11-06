@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.41.1',
     date: '2026-11-06',
     title: 'App checks work from any repository',
+    pr: 108,
     changes: [
       {
         id: 'app-check-action-public',
