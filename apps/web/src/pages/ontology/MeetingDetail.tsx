@@ -355,7 +355,7 @@ export function MeetingDetailPage() {
               ),
             }))}
           />
-          {view === 'summary' && <SummaryView a={a} prompts={mt.facilitatorPrompts.length} lines={mt.transcript.length} onOpen={setView} />}
+          {view === 'summary' && <SummaryView a={a} onOpen={setView} />}
           {view === 'transcript' && transcriptCard}
           {view === 'prompts' && promptsCard}
           {view === 'extracted' && <ExtractedView a={a} />}
@@ -366,7 +366,7 @@ export function MeetingDetailPage() {
           <div className="space-y-4">
             {promptsCard}
             {a ? (
-              <SummaryView a={a} prompts={mt.facilitatorPrompts.length} lines={mt.transcript.length} />
+              <SummaryView a={a} />
             ) : (
               <EmptyState icon={ScanSearch} title={live ? 'Analysis runs when the call ends' : processing ? 'Analysing…' : 'Not analysed yet'}>
                 {live ? 'Keep watching — the transcript and bot prompts update live.' : 'Run the analysis to extract use cases, terms and questions.'}
@@ -392,15 +392,16 @@ function Section({ title, icon: Icon, children }: { title: string; icon?: typeof
 }
 
 /** What a finished call came to: the summary, decisions and open disagreements, with counts of what was extracted. */
-function SummaryView({ a, prompts, lines, onOpen }: { a: MeetingAnalysis; prompts: number; lines: number; onOpen?: (v: View) => void }) {
-  const counts: [string, number, View][] = [
-    ['use cases', a.useCases.length, 'extracted'],
-    ['terms', a.terms.length, 'extracted'],
-    ['competency questions', a.competencyQuestions.length, 'extracted'],
-    ['open questions', a.openQuestions.length, 'extracted'],
-    ['bot prompts', prompts, 'prompts'],
-    ['transcript lines', lines, 'transcript'],
-  ];
+function SummaryView({ a, onOpen }: { a: MeetingAnalysis; onOpen?: (v: View) => void }) {
+  // What the call produced. Counts of the machinery (bot prompts, transcript lines) are left out.
+  const counts: [string, number, View][] = (
+    [
+      ['use case', a.useCases.length],
+      ['term', a.terms.length],
+      ['competency question', a.competencyQuestions.length],
+      ['open question', a.openQuestions.length],
+    ] as const
+  ).map(([word, n]) => [n === 1 ? word : `${word}s`, n, 'extracted']);
   return (
     <Card>
       <CardHeader icon={ScanSearch} title="Summary" />

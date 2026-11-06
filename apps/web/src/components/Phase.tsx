@@ -252,7 +252,7 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
               <HealthRow
                 ok={h.errors === 0 && h.warnings === 0}
                 warn={h.errors === 0 && h.warnings > 0}
-                label="Lint (OWL best practice)"
+                label="Quality checks"
                 value={h.errors ? plural(h.errors, 'error') : h.warnings ? plural(h.warnings, 'warning') : 'No errors or warnings'}
               />
               <HealthRow ok={h.passed} label="Overall validation" value={h.passed ? 'Passed' : 'Failing'} />
@@ -268,7 +268,7 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
           {detailsHref && (
             <div className="mt-3 border-t border-line pt-3 text-xs">
               <Link to={detailsHref} onClick={close} className="font-medium text-accent hover:underline">
-                See the full report, including every lint finding
+                See the full report, including every quality check
               </Link>
             </div>
           )}

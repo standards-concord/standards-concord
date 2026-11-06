@@ -15,6 +15,8 @@ const FORMATS: {
   label: string;
   ext: string;
   note: string;
+  /** Listed under "More formats" rather than up front. */
+  more?: true;
 }[] = [
   {
     id: 'turtle',
@@ -23,34 +25,10 @@ const FORMATS: {
     note: 'The canonical, human-readable RDF serialisation. This is what’s stored in git.',
   },
   {
-    id: 'rdfxml',
-    label: 'RDF/XML',
-    ext: 'owl',
-    note: 'For Protégé and older OWL tools.',
-  },
-  {
     id: 'jsonld',
     label: 'JSON-LD',
     ext: 'jsonld',
     note: 'Linked data as JSON, convenient for web developers.',
-  },
-  {
-    id: 'ntriples',
-    label: 'N-Triples',
-    ext: 'nt',
-    note: 'One triple per line — ideal for diffs and bulk loading.',
-  },
-  {
-    id: 'manchester',
-    label: 'Manchester',
-    ext: 'omn',
-    note: 'OWL Manchester syntax: the most readable form of the logical axioms.',
-  },
-  {
-    id: 'linkml',
-    label: 'LinkML',
-    ext: 'yaml',
-    note: 'LinkML describes the model as YAML, from which schemas, validators and documentation can be generated.',
   },
   {
     id: 'shacl',
@@ -59,16 +37,46 @@ const FORMATS: {
     note: 'Shapes generated from the ontology to validate instance data.',
   },
   {
+    id: 'rdfxml',
+    label: 'RDF/XML',
+    ext: 'owl',
+    note: 'For Protégé and older OWL tools.',
+    more: true,
+  },
+  {
+    id: 'ntriples',
+    label: 'N-Triples',
+    ext: 'nt',
+    note: 'One triple per line — ideal for diffs and bulk loading.',
+    more: true,
+  },
+  {
+    id: 'manchester',
+    label: 'Manchester',
+    ext: 'omn',
+    note: 'OWL Manchester syntax: the most readable form of the logical axioms.',
+    more: true,
+  },
+  {
+    id: 'linkml',
+    label: 'LinkML',
+    ext: 'yaml',
+    note: 'LinkML describes the model as YAML, from which schemas, validators and documentation can be generated.',
+    more: true,
+  },
+  {
     id: 'shaclc',
     label: 'SHACLC',
     ext: 'shaclc',
     note: 'The same shapes in SHACL compact syntax, which is much easier to read.',
+    more: true,
   },
   {
     id: 'typescript',
     label: 'Classes',
     ext: 'ts',
     note: 'A class for every SHACL shape, generated with the ODI SHACL converter over @rdfjs/wrapper, so apps can work with the data as objects.',
+    more: true,
   },
 ];
 
@@ -95,11 +103,18 @@ export function SourceTab() {
         <label className="flex items-center gap-2 text-sm">
           <span className="font-medium">Format</span>
           <Select value={format} onChange={(e) => set('format', e.target.value)} className="w-auto!" aria-label="Format">
-            {FORMATS.map((f) => (
+            {FORMATS.filter((f) => !f.more).map((f) => (
               <option key={f.id} value={f.id}>
                 {f.label}
               </option>
             ))}
+            <optgroup label="More formats">
+              {FORMATS.filter((f) => f.more).map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.label}
+                </option>
+              ))}
+            </optgroup>
           </Select>
         </label>
         <div className="flex items-center gap-2">
