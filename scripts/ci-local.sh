@@ -6,6 +6,7 @@
 #   scripts/ci-local.sh test e2e-dev        # just these jobs
 #   scripts/ci-local.sh --report            # also record the result (see below)
 #   scripts/ci-local.sh --parallel 6 --shards 4
+#   scripts/ci-local.sh --update-timings    # refresh e2e/timings.json from this run
 #
 # Why: while the organisation has no Actions minutes, threads and people run the checks
 # themselves. --report records the result where a reviewer can see it, only for a clean
@@ -13,8 +14,9 @@
 # ci-local-logs/<commit>/summary.md, which a Claude thread (whose GitHub proxy doesn't allow
 # posting statuses) posts on the pull request as a comment instead.
 #
-# Speed: the jobs run side by side (--parallel, default one per CPU), and the browser suite is
-# split into --shards pieces (default 3), each with its own API server, web server, data
+# Speed: the jobs run side by side (--parallel, default two per CPU: browser tests mostly
+# wait), and the browser suite is split into --shards pieces (default 6) of similar length by
+# e2e/timings.json (scripts/e2e-shards.mjs), each with its own API server, web server, data
 # directory and ports, so no two pieces share state. The web app is built once up front. As
 # in CI, the dev server gets a smoke test and the production build the whole suite.
 #
@@ -26,12 +28,14 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 
 report=false
-parallel=$(nproc 2>/dev/null || echo 4)
-shards=3
+update_timings=false
+parallel=$(( $(nproc 2>/dev/null || echo 4) * 2 ))
+shards=6
 jobs=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --report) report=true ;;
+    --update-timings) update_timings=true ;;
     --parallel) parallel=$2; shift ;;
     --shards) shards=$2; shift ;;
     -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
@@ -135,7 +139,14 @@ e2e_env() { # n
   export E2E_API_PORT=$base E2E_WEB_PORT=$((base + 1)) E2E_GITHUB_STUB_PORT=$((base + 2)) E2E_DATA_DIR="$(mktemp -d)"
 }
 # The whole suite against the production build (what Vercel serves), in shards.
-piece_e2e-preview() { e2e_env "$1"; E2E_MODE=preview pnpm exec playwright test -c e2e --project=local --shard="$1/$shards" --output "test-results/preview-$1"; }
+piece_e2e-preview() {
+  e2e_env "$1"
+  local files; files=$(node scripts/e2e-shards.mjs "$shards" | sed -n "${1}p")
+  [ -n "$files" ] || { echo "shard $1 has no files"; return 0; }
+  # shellcheck disable=SC2086 # one argument per spec file
+  E2E_MODE=preview PLAYWRIGHT_JSON_OUTPUT_NAME="$logdir/preview-$1.json" \
+    pnpm exec playwright test -c e2e --project=local --reporter=list,json --output "test-results/preview-$1" $files
+}
 # A smoke test against the Vite dev server (what `pnpm dev` runs), as CI does.
 piece_e2e-dev() { e2e_env 0; E2E_MODE=dev pnpm test:e2e:smoke --output test-results/dev; }
 piece_e2e-solid() { pnpm test:e2e:solid; }
@@ -155,6 +166,10 @@ want e2e-solid && pieces+=(e2e-solid:all)
 
 run_piece() { # job:part
   local job=${1%%:*} part=${1#*:}
+  # The unit tests include timing checks ("answers within 5 s", "doesn't block the main
+  # thread"), so they keep normal priority; the browser pieces, which mostly wait anyway,
+  # run at low priority and soak up whatever CPU is left.
+  [ "$job" = test ] || renice -n 10 -p $BASHPID >/dev/null 2>&1
   case "$job" in
     test) "piece_test-$part" ;;
     e2e-preview) piece_e2e-preview "$part" ;;
@@ -194,6 +209,7 @@ for p in "${pieces[@]}"; do
 done
 while [ "$running" -gt 0 ]; do finish_one; done
 total=$(( $(date +%s) - started ))
+if $update_timings && ls "$logdir"/preview-*.json >/dev/null 2>&1; then node scripts/e2e-shards.mjs --update "$logdir"/preview-*.json; fi
 
 printf '### Local CI run\n\nCommit `%s`, run by `%s` with `scripts/ci-local.sh`, %s, in %dm%02ds.\n\n| Job | Result |\n| --- | --- |\n' \
   "$sha" "$runner" "$(date -u +'%Y-%m-%d %H:%M UTC')" $((total / 60)) $((total % 60)) >"$logdir/summary.md"
