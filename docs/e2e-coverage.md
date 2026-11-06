@@ -70,7 +70,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | Voting member (Gareth, once given the role) | Vote, change a vote | Contributors can't vote | governance-flow |
 | Steward without ownership | Sees Governance and Manage members | Edit policy hidden; policy PUT is 403 | roles |
 | ODI (Daniel) | Sees Governance in the nav | | ❌ no flow yet exercises ODI veto or final say through the UI (policy summary only, in ia); nav in roles |
-| Every demo tester role | Account button shows the role in brackets; nav shows that role's sections, with "Show all sections" for the rest | Governance hidden from the nav (not locked) for roles other than owner, steward and ODI | roles |
+| Every demo tester role | Account button shows the role in brackets; every section, Governance included, is in the nav, with no "Show all sections" toggle; reading the policy | Edit policy for anyone but owners | roles |
 | Platform admin | | Non-admins can't read feedback, and the menu hides it | security |
 | Agent (token or OAuth) | Every MCP tool | Revoked or missing token | agents, oauth |
 

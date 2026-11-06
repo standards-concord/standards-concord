@@ -1,8 +1,8 @@
 import { test, expect, settle, signIn, demoOntology } from './fixtures';
 
 /**
- * Role-based views for alpha testers: the account menu says which role you're trying Concord as,
- * and the ontology nav shows the sections that role needs. Hidden sections are never locked away.
+ * Role-based views for alpha testers: the account menu says which role you're trying Concord as.
+ * The ontology nav is the same for every role.
  */
 test.describe('role-based views', () => {
   let demo: { id: string };
@@ -38,62 +38,31 @@ test.describe('role-based views', () => {
     await expect(page.getByRole('button', { name: /Phone tester.*\(Voting member\)/ })).toBeVisible();
   });
 
-  test('stewards and ODI oversight see Governance in the nav', async ({ page }) => {
-    for (const role of ['steward', 'odi']) {
+  // Governance used to be hidden from every role but owner, steward and ODI, behind a
+  // "Show all sections (Governance)" toggle that testers found confusing. Every role now sees it.
+  for (const role of ['steward', 'member', 'contributor', 'odi', 'agent'] as const)
+    test(`Governance is always in the nav, with no "Show all sections" toggle: ${role}`, async ({ page }) => {
       await signIn(page, { name: `${role} tester`, role });
       await page.goto(`/o/${demo.id}`);
       await settle(page);
       expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes', 'Governance']);
       await expect(page.getByRole('button', { name: /Show all sections/ })).toHaveCount(0);
-    }
-  });
+    });
 
-  test('other roles don’t see Governance, but “All sections” and direct links still reach it', async ({ page }) => {
+  test('a voting member opens Governance from the nav and reads the policy', async ({ page }) => {
     await signIn(page, { name: 'Voter', role: 'member' });
     await page.goto(`/o/${demo.id}`);
     await settle(page);
-    expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes']);
-
-    // "Show all sections" names what it adds, brings it back, and is remembered.
-    const toggle = page.getByRole('button', { name: 'Show all sections (Governance)' });
-    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
-    await toggle.focus();
-    await page.keyboard.press('Enter');
-    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
-    // Focus moves to the section it revealed, which appears before the button.
-    await expect(page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Governance' })).toBeFocused();
-    expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes', 'Governance']);
-    await page.reload();
-    await settle(page);
-    expect(await sectionNames(page)).toContain('Governance');
-    await page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Governance' }).click();
-    await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance$`));
-    await expect(page.getByRole('heading', { name: 'Governance', exact: true, level: 2 })).toBeVisible();
-
-    // Pressing it again goes back to the role's view.
-    await page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Overview' }).click();
-    await page.getByRole('button', { name: /Show all sections/ }).click();
-    await expect(page.getByRole('button', { name: /Show all sections/ })).toHaveAttribute('aria-pressed', 'false');
-    expect(await sectionNames(page)).toEqual(['Overview', 'Explore', 'Requirements', 'Changes']);
-
-    // A link straight to Governance opens it, and the nav shows where you are.
-    await page.goto(`/o/${demo.id}/governance`);
-    await settle(page);
     const nav = page.getByRole('navigation', { name: 'Ontology sections' });
+    await nav.getByRole('link', { name: 'Governance' }).click();
+    await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance$`));
     await expect(nav.getByRole('link', { name: 'Governance' })).toHaveAttribute('aria-current', 'page');
     await expect(page.getByRole('heading', { name: 'Governance', exact: true, level: 2 })).toBeVisible();
+    // Reading the policy isn't editing it: only owners and stewards get Edit policy.
+    await expect(page.getByRole('button', { name: /Edit policy/ })).toHaveCount(0);
   });
 
-  test('contributors and agent developers get the same focused nav', async ({ page }) => {
-    for (const role of ['contributor', 'agent']) {
-      await signIn(page, { name: `${role} tester`, role });
-      await page.goto(`/o/${demo.id}`);
-      await settle(page);
-      expect(await sectionNames(page)).not.toContain('Governance');
-    }
-  });
-
-  test('people without the Governance tab read the policy where they review and vote', async ({ page }) => {
+  test('the policy is also summarised where people review and vote', async ({ page }) => {
     await signIn(page, { name: 'Reader', role: 'member' });
     const crs = (await (await page.request.get(`/api/ontologies/${demo.id}/change-requests`)).json()) as { id: string }[];
     await page.goto(`/o/${demo.id}/changes/${crs[0].id}`);

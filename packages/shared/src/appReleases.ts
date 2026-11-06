@@ -70,6 +70,23 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
+    version: '0.35.1',
+    date: '2026-11-06',
+    title: 'Governance is always in the ontology nav',
+    pr: 95,
+    changes: [
+      {
+        id: 'governance-always-shown',
+        type: 'fix',
+        title: 'No more “Show all sections” toggle',
+        detail:
+          'Governance used to be hidden from the ontology nav unless you were an owner, steward or ODI oversight, with a “Show all sections (Governance)” button to bring it back. Every role now sees Governance, so anyone can read the policy and who holds which role. Only owners can still edit the policy.',
+        roles: [],
+        to: '{o}/governance',
+      },
+    ],
+  },
+  {
     version: '0.35.0',
     date: '2026-11-06',
     title: 'Advanced features, and a diff on every change',
