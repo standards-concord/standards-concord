@@ -5,6 +5,7 @@ import { api } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { formatDate, relativeTime } from '../lib/format';
+import { AgentLogo, agentAppFor } from './AgentLogos';
 import { Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Input, Loading } from './ui';
 
 /** The signed-in person's agent access, shown under the connect instructions: OAuth connections and personal tokens. */
@@ -49,19 +50,24 @@ export function ConnectedAgents() {
           <Loading />
         ) : (
           <ul className="divide-y divide-line border-t border-line" data-testid="connections">
-            {connections.data.map((c) => (
-              <li key={c.id} className="flex items-center gap-3 px-5 py-3 text-sm">
-                <div className="min-w-0 flex-1">
-                  <div className="font-medium">{c.clientName}</div>
-                  <div className="text-xs text-muted">
-                    Connected {formatDate(c.createdAt)} · {c.lastUsedAt ? `last used ${relativeTime(c.lastUsedAt, now())}` : 'not used yet'}
+            {connections.data.map((c) => {
+              const app = agentAppFor(c.clientName);
+              return (
+                <li key={c.id} className="flex items-center gap-3 px-5 py-3 text-sm">
+                  {/* The app's logo when its name is one we know, otherwise a generic agent mark. */}
+                  {app ? <AgentLogo app={app} /> : <Bot className="size-5 shrink-0 text-muted" aria-hidden data-logo="agent" />}
+                  <div className="min-w-0 flex-1">
+                    <div className="font-medium">{c.clientName}</div>
+                    <div className="text-xs text-muted">
+                      Connected {formatDate(c.createdAt)} · {c.lastUsedAt ? `last used ${relativeTime(c.lastUsedAt, now())}` : 'not used yet'}
+                    </div>
                   </div>
-                </div>
-                <Button size="sm" variant="ghost" icon={Unplug} aria-label={`Disconnect ${c.clientName}`} disabled={disconnect.pending} onClick={() => confirm(`Disconnect “${c.clientName}”? It will need to sign in again.`) && void disconnect.run(c.id)}>
-                  Disconnect
-                </Button>
-              </li>
-            ))}
+                  <Button size="sm" variant="ghost" icon={Unplug} aria-label={`Disconnect ${c.clientName}`} disabled={disconnect.pending} onClick={() => confirm(`Disconnect “${c.clientName}”? It will need to sign in again.`) && void disconnect.run(c.id)}>
+                    Disconnect
+                  </Button>
+                </li>
+              );
+            })}
             {!connections.data.length && <li className="px-5 py-4 text-sm text-muted">No agents connected yet.</li>}
           </ul>
         )}
