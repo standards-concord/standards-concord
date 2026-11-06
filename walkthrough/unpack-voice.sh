@@ -23,15 +23,40 @@ while IFS= read -r name; do
   esac
 done < <(tar -tzPf "$archive")
 
+# The cache is a path inside the working directory (walkthrough.yml passes
+# walkthrough/.cache/voice). None of its parts may be a link, or the copy below would land
+# wherever that link points, so they are checked before anything is created.
+case "/$cache/" in
+  //*|*/../*) fail "The cache must be a relative path without '..': $cache" ;;
+esac
+IFS=/ read -r -a parts <<<"$cache"
+part=.
+for p in "${parts[@]}"; do
+  if [ -z "$p" ] || [ "$p" = . ]; then continue; fi
+  part="$part/$p"
+  [ ! -L "$part" ] || fail "$part is a link"
+  [ ! -e "$part" ] || [ -d "$part" ] || fail "$part is not a folder"
+done
 mkdir -p "$cache"
-# The cache holds only what this script and the recorder put there, never links.
-if [ -n "$(find "$cache" ! -type f ! -type d -print -quit)" ]; then fail "$cache holds something other than plain files and folders"; fi
 
-stage=$(mktemp -d)
-trap 'rm -rf "$stage"' EXIT
+# Fails if anything under $1 isn't a plain file or folder. A scan that can't read everything fails,
+# rather than passing over what it couldn't see.
+odd() {
+  local found
+  found=$(find "$1" ! -type f ! -type d -print -quit) || fail "Couldn't check everything in $1"
+  [ -z "$found" ] || fail "$1 holds something other than plain files and folders: $found"
+}
+# The cache holds only what this script and the recorder put there, never links.
+odd "$cache"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+stage="$work/stage"
+mkdir "$stage"
 tar -xzf "$archive" -C "$stage" --no-same-owner --no-same-permissions
 # Checked again on what was actually unpacked, then only plain files are copied across.
-if [ -n "$(find "$stage" ! -type f ! -type d -print -quit)" ]; then fail "$archive unpacked to something other than plain files and folders"; fi
+odd "$stage"
+find "$stage" -type f -print0 > "$work/files" || fail "Couldn't list everything $archive unpacked to"
 added=0 kept=0
 while IFS= read -r -d '' f; do
   rel="${f#"$stage"/}"
@@ -40,5 +65,5 @@ while IFS= read -r -d '' f; do
   mkdir -p "$(dirname "$target")"
   cp -- "$f" "$target"
   added=$((added + 1))
-done < <(find "$stage" -type f -print0)
+done < "$work/files"
 echo "Added $added narration file(s) to $cache ($kept already there)"

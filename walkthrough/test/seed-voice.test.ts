@@ -7,7 +7,7 @@
  * redirect that write outside the cache.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -17,7 +17,7 @@ const here = path.resolve(import.meta.dirname, '..');
 const unpackScript = path.join(here, 'unpack-voice.sh');
 const seedScript = path.join(here, 'seed-voice.sh');
 
-type Entry = { name: string; type?: 'file' | 'dir' | 'symlink' | 'hardlink'; body?: string; link?: string };
+type Entry = { name: string; type?: 'file' | 'dir' | 'symlink' | 'hardlink' | 'chardev' | 'blockdev' | 'fifo'; body?: string; link?: string };
 
 /** A gzipped tar holding exactly these entries, written by hand so any name or type can be tried. */
 function tarball(entries: Entry[]): Buffer {
@@ -33,7 +33,7 @@ function tarball(entries: Entry[]): Buffer {
     octal(0, 116, 8);
     octal(body.length, 124, 12);
     octal(1_700_000_000, 136, 12);
-    put({ file: '0', dir: '5', symlink: '2', hardlink: '1' }[e.type ?? 'file'], 156, 1);
+    put({ file: '0', hardlink: '1', symlink: '2', chardev: '3', blockdev: '4', dir: '5', fifo: '6' }[e.type ?? 'file'], 156, 1);
     if (e.link) put(e.link, 157, 100);
     put('ustar\0', 257, 6);
     put('00', 263, 2);
@@ -71,7 +71,8 @@ const archive = (entries: Entry[]) => {
   writeFileSync(file, tarball(entries));
   return file;
 };
-const unpack = (file: string) => spawnSync('bash', [unpackScript, file, cache], { encoding: 'utf8' });
+/** Runs unpack-voice.sh from root, as walkthrough.yml does from the checkout, into a relative cache path. */
+const unpack = (file: string, to = 'cache', env: NodeJS.ProcessEnv = process.env) => spawnSync('bash', [unpackScript, file, to], { encoding: 'utf8', cwd: root, env });
 
 describe('unpack-voice.sh', () => {
   it('adds plain files and keeps the ones already in the cache', () => {
@@ -96,6 +97,9 @@ describe('unpack-voice.sh', () => {
     ['a symlink pointing out of the cache', (o) => [{ name: 'elevenlabs/k.mp3.part.mp3', type: 'symlink', link: `${o}/target` }]],
     ['a symlink pointing inside it', () => [{ name: 'elevenlabs/a.mp3', type: 'symlink', link: 'b.mp3' }]],
     ['a hard link', (o) => [{ name: 'elevenlabs/h.mp3', type: 'hardlink', link: `${o}/target` }]],
+    ['a character device', () => [{ name: 'elevenlabs/c.mp3', type: 'chardev' }]],
+    ['a block device', () => [{ name: 'elevenlabs/b.mp3', type: 'blockdev' }]],
+    ['a named pipe', () => [{ name: 'elevenlabs/p.mp3', type: 'fifo' }]],
   ];
   for (const [what, entries] of refused) {
     it(`refuses a whole archive holding ${what}, writing nothing`, () => {
@@ -111,10 +115,62 @@ describe('unpack-voice.sh', () => {
 
   it('refuses to add to a cache that already holds a link', () => {
     mkdirSync(path.join(cache, 'elevenlabs'), { recursive: true });
-    spawnSync('ln', ['-s', outside, path.join(cache, 'elevenlabs', 'sub')]);
+    symlinkSync(outside, path.join(cache, 'elevenlabs', 'sub'));
     const r = unpack(archive([{ name: 'elevenlabs/sub/evil.mp3', body: 'x' }]));
     expect(r.status).not.toBe(0);
     expect(tree(outside)).toEqual([]);
+  });
+
+  // r2 review: the cache was created and scanned through a link in its own path, so the
+  // copy followed it out of the checkout.
+  it('refuses a cache that is itself a link, creating nothing', () => {
+    symlinkSync(outside, cache);
+    const r = unpack(archive([{ name: 'elevenlabs/a.mp3', body: 'x' }]));
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/is a link/);
+    expect(tree(outside)).toEqual([]);
+  });
+
+  it('refuses a cache with a link among its parents, creating nothing', () => {
+    symlinkSync(outside, path.join(root, 'walkthrough'));
+    const r = unpack(archive([{ name: 'elevenlabs/a.mp3', body: 'x' }]), 'walkthrough/.cache/voice');
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/is a link/);
+    expect(tree(outside)).toEqual([]);
+  });
+
+  it('refuses a cache path that is absolute or has ..', () => {
+    for (const to of [cache, '../cache', 'a/../cache']) {
+      const r = unpack(archive([{ name: 'elevenlabs/a.mp3', body: 'x' }]), to);
+      expect(r.status, to).not.toBe(0);
+    }
+    expect(tree(cache)).toEqual([]);
+  });
+
+  // r2 review: a folder the scan couldn't read could hide a link, and the scan's failure was ignored.
+  it('fails closed when it cannot check everything in the cache', () => {
+    const bin = path.join(root, 'bin');
+    mkdirSync(bin);
+    // A find that reads nothing and reports a failure, as one does on an unreadable folder.
+    writeFileSync(path.join(bin, 'find'), '#!/usr/bin/env bash\necho "find: Permission denied" >&2\nexit 1\n', { mode: 0o755 });
+    const r = unpack(archive([{ name: 'elevenlabs/a.mp3', body: 'x' }]), 'cache', { ...process.env, PATH: `${bin}:${process.env.PATH}` });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/Couldn't check everything/);
+    expect(tree(cache)).toEqual([]);
+  });
+
+  it('refuses a cache with a link hidden in a folder it cannot read', () => {
+    const hidden = path.join(cache, 'elevenlabs', 'hidden');
+    mkdirSync(hidden, { recursive: true });
+    symlinkSync(outside, path.join(hidden, 'out'));
+    chmodSync(hidden, 0o311);
+    try {
+      const r = unpack(archive([{ name: 'elevenlabs/hidden/out/evil.mp3', body: 'x' }]));
+      expect(r.status).not.toBe(0);
+      expect(tree(outside)).toEqual([]);
+    } finally {
+      chmodSync(hidden, 0o755);
+    }
   });
 });
 
@@ -141,7 +197,7 @@ exit 1
 `,
       { mode: 0o755 },
     );
-    const r = spawnSync('bash', [seedScript, runId, cache], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REPO } });
+    const r = spawnSync('bash', [seedScript, runId, 'cache'], { encoding: 'utf8', cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, REPO } });
     return { ...r, calls: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [] };
   }
 
