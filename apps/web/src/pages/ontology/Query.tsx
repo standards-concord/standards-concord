@@ -1,18 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { ChevronLeft, ChevronRight, Code2, Cpu, Database, Download, Loader2, Play, RotateCcw, Sparkles, Square, Table2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Code2, Cpu, Database, Download, Keyboard, Loader2, Play, RotateCcw, Sparkles, Square, Table2 } from 'lucide-react';
 import type { SparqStore } from '@sparq-org/sparq';
 import type { ChatMessage, QueryChatResponse, QueryTarget } from '@concord/shared';
 import { api } from '../../api';
 import { useAsync, useLocalStorage } from '../../lib/hooks';
 import { makeLabeler } from '../../lib/ontology';
-import { useSampleData } from '../../lib/sampleData';
+import { hasSampleRecords, useSampleData } from '../../lib/sampleData';
 import { termCompletions } from '../../lib/termCompletions';
 import { toCsv } from '../../lib/csv';
 import { queryForm, sparqlExamples } from '../../lib/sparql-examples';
 import { QueryRunner, QueryStopped, type RunResult } from '../../lib/queryRunner';
 import { limitOf, withoutLimit } from '../../lib/sparqlLimit';
-import { Button, Card, CardHeader, ErrorCard, InlineError, Loading, Select, cx } from '../../components/ui';
+import { Button, Card, CardHeader, ErrorCard, InlineError, Loading, cx } from '../../components/ui';
+import { Popover } from '../../components/Disclosure';
 import { CodeEditor } from '../../components/code/CodeEditor';
 import { CodeView } from '../../components/code/CodeView';
 import { ChatView } from '../../components/ChatView';
@@ -34,6 +35,16 @@ const sparqModule = () => import('@sparq-org/sparq');
 type Result = (RunResult & { kind: 'ask' | 'graph' }) | (Extract<RunResult, { kind: 'rows' }> & { headings?: (string | undefined)[] });
 
 type Target = QueryTarget;
+
+/** The Query page's keyboard shortcuts, in the Keyboard shortcuts pop-up rather than under each box. */
+const KEYS: [string, string][] = [
+  ['Ctrl/⌘-Space', 'Suggest terms in the query'],
+  ['Ctrl/⌘-Enter', 'Run the query'],
+  ['Ctrl/⌘-] and Ctrl/⌘-[', 'Indent and outdent'],
+  ['Tab', 'Move to the next control'],
+  ['Enter', 'Send your message to the assistant'],
+  ['Shift+Enter', 'Start a new line in your message'],
+];
 type Columns = { variable: string; label: string }[];
 
 function short(v: string, prefixes: Record<string, string>) {
@@ -135,12 +146,12 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const examples = useMemo(() => sparqlExamples(ontology.prefix, ontology.namespace), [ontology.prefix, ontology.namespace]);
   // Drafts survive leaving the page, per ontology and per browser.
   const [query, setQuery] = useLocalStorage(`${storageKey}.sparql`, examples[0].query);
-  // The dataset is part of the draft: a restored instance query must still run against the data.
-  const [target, setTarget] = useLocalStorage<Target>(`${storageKey}.target`, 'ontology');
   const [result, setResultState] = useState<Result | null>(null);
   const [queryError, setQueryError] = useState<unknown>();
   // The sample data is edited and checked on Validate data; queries can run over it.
   const [data] = useSampleData(id, ontology);
+  // Queries run over the sample data whenever there is some, so there is no choice to make.
+  const target: Target = hasSampleRecords(data) ? 'data' : 'ontology';
 
   const setResult = (r: Result | null) => {
     setResultState(r);
@@ -288,12 +299,11 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         // The editor is read-only while the assistant works, so its answer never replaces newer edits.
         // It isn't run until the person has looked at it and pressed Run.
         if (!r.unchanged) {
-          current = { query: r.query, target: r.target, offlineState: r.offlineState ?? null };
+          current = { query: r.query, target: current.target, offlineState: r.offlineState ?? null };
           setOfflineState(r.offlineState ?? null);
           setQuery(r.query);
-          setTarget(r.target);
           setColumns(r.columns);
-          setWroteKey(keyFor(r.query, r.target));
+          setWroteKey(keyFor(r.query, current.target));
         }
       }
     } catch (e) {
@@ -317,7 +327,6 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
     setOfflineState(null);
     setChatError(undefined);
     setQuery(examples[0].query);
-    setTarget('ontology');
     setResult(null);
     setQueryError(undefined);
   };
@@ -393,6 +402,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                 placeholder="Describe what you want to find…"
                 error={chatError}
                 plainText
+                keyHint={false}
                 quickReplies={
                   chat.length === 0 && !unsent.length && suggestions.length ? (
                     <div className="flex flex-wrap gap-1.5" data-testid="query-suggestions">
@@ -418,7 +428,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
           <Card className="min-w-0">
             <CardHeader
               title="SPARQL"
-              subtitle="The assistant writes here, and you can edit it too: Ctrl/⌘-Space suggests terms, Ctrl/⌘-Enter runs."
+              subtitle="The assistant writes here, and you can edit it too."
               icon={Code2}
               actions={
                 running ? (
@@ -433,15 +443,6 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
               }
             />
             <div className="space-y-3 p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="ml-auto flex items-center gap-2 text-sm">
-                  <span className="text-muted">Run against</span>
-                  <Select value={target} onChange={(e) => setTarget(e.target.value as Target)} aria-label="Run against" className="w-auto!" disabled={asking}>
-                    <option value="ontology">The ontology</option>
-                    <option value="data">The ontology + sample data</option>
-                  </Select>
-                </label>
-              </div>
               {asking && (
                 <p role="status" className="text-xs text-muted" data-testid="editor-locked">
                   The assistant is writing the query, so the editor is locked until it answers.
@@ -459,7 +460,32 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
                 maxHeight={420}
                 testId="sparql-editor"
               />
-              <p className="text-xs text-muted">Tab moves to the next control. Ctrl/⌘-] and Ctrl/⌘-[ indent.</p>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
+                {/* Kept in view: people using a keyboard need to know Tab leaves the editor. */}
+                <p>Tab moves to the next control.</p>
+                <Popover
+                  label="Keyboard shortcuts"
+                  align="right"
+                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted hover:text-fg"
+                  trigger={
+                    <>
+                      <Keyboard className="size-3.5" aria-hidden /> Keyboard shortcuts
+                    </>
+                  }
+                >
+                  <h4 className="mb-2 text-sm font-semibold">Keyboard shortcuts</h4>
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
+                    {KEYS.map(([k, what]) => (
+                      <Fragment key={k}>
+                        <dt>
+                          <kbd className="rounded border border-line bg-surface-2 px-1 font-mono">{k}</kbd>
+                        </dt>
+                        <dd className="text-muted">{what}</dd>
+                      </Fragment>
+                    ))}
+                  </dl>
+                </Popover>
+              </div>
             </div>
           </Card>
         </div>
@@ -467,7 +493,7 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
         <Card>
           <CardHeader title="Results" icon={Table2} />
           <div className="space-y-3 p-4">
-            {target === 'data' && recordTotal !== undefined && (
+            {recordTotal !== undefined && (
               <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted" data-testid="dataset-summary">
                 <Database className="size-3.5" />
                 {recordTotal > 0 ? (
