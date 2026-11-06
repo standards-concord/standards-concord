@@ -51,4 +51,25 @@ describe('the recording workflow', () => {
   it('keys the narration cache on every script, the features video’s and the clips’ included', () => {
     for (const s of [step(/actions\/cache\/restore@/), step(/actions\/cache\/save@/)]) for (const f of [/walkthrough\/features\.md/, /walkthrough\/clips\.md/]) expect(s).toMatch(f);
   });
+
+  // The features video is only recorded on demand, so its narration (about 3,600 characters)
+  // was kept only in that run's artifact, and the next features run would have paid for all
+  // of it again. seed_voice_run reuses it.
+  it('can reuse narration kept in an earlier run’s artifact before recording', () => {
+    const seed = steps.findIndex((s) => /name: Seed narration from an earlier run/.test(s));
+    const record = steps.findIndex((s) => /name: Record\b/.test(s));
+    expect(seed).toBeGreaterThan(-1);
+    expect(seed).toBeLessThan(record);
+    const s = steps[seed];
+    expect(yml).toMatch(/\n {6}seed_voice_run:\n/);
+    expect(s).toMatch(/if: .*inputs\.seed_voice_run != ''/);
+    // The run id comes in through the environment, is checked to be digits, and isn't pasted into the script.
+    expect(s).toMatch(/RUN: \$\{\{ inputs\.seed_voice_run \}\}/);
+    expect(s.slice(s.indexOf('run: |'))).not.toMatch(/\$\{\{/);
+    expect(s).toMatch(/\*\[!0-9\]\*\) .*exit 1/);
+    expect(s).toMatch(/gh run download "\$RUN" .*--name concord-walkthrough/);
+    expect(s).toMatch(/tar -xzf .*walkthrough-voice\.tar\.gz"? -C walkthrough\/\.cache\/voice --skip-old-files/);
+    const job = yml.slice(yml.indexOf('\n  record:'), yml.indexOf('\n    steps:', yml.indexOf('\n  record:')));
+    expect(job).toMatch(/\n {6}actions: read\n/);
+  });
 });
