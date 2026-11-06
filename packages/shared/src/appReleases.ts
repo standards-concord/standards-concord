@@ -56,7 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.39.1',
     date: '2026-11-06',
     title: 'Sections you have opened come back at once',
-    pr: 101,
+    pr: 102,
     changes: [
       {
         id: 'instant-sections',
