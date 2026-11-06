@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import type { ValidationReport } from '@concord/shared';
-import type { IssueSeverity, ReasonerResult as ReasonerReport } from '@concord/core/types';
+import type { IssueSeverity } from '@concord/core/types';
 import { Brain, ChevronDown, ChevronRight, CircleCheck, CircleX, Info, TriangleAlert } from 'lucide-react';
 import type { Labeler } from '../lib/ontology';
 import { pct, plural } from '../lib/format';

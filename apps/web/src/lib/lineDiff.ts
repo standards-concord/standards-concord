@@ -13,7 +13,7 @@ export interface Hunk {
 }
 
 /** Every line of `a` and `b`, in order, marked as kept, removed or added (a shortest edit script). */
-export function diffLines(a: string[], b: string[]): DiffLine[] {
+export function diffLines(a: string[], b: string[], budget = MYERS_BUDGET): DiffLine[] {
   // Common prefix and suffix first: a change touches a few lines of a long file.
   let start = 0;
   while (start < a.length && start < b.length && a[start] === b[start]) start++;
@@ -23,7 +23,7 @@ export function diffLines(a: string[], b: string[]): DiffLine[] {
     endA--;
     endB--;
   }
-  const mid = myers(a.slice(start, endA), b.slice(start, endB));
+  const mid = myers(a.slice(start, endA), b.slice(start, endB), budget);
   const out: DiffLine[] = [];
   let i = 0;
   let j = 0;
@@ -40,18 +40,32 @@ export function diffLines(a: string[], b: string[]): DiffLine[] {
   return out;
 }
 
-/** Myers' O(ND) diff: the edit script turning `a` into `b`. */
-function myers(a: string[], b: string[]): ('same' | 'del' | 'add')[] {
+/**
+ * Most frontier entries Myers may keep before giving up (about 16 MB). Each edit step keeps only the
+ * diagonals it can reach, so this is plenty for any change request, which edits a handful of lines.
+ */
+export const MYERS_BUDGET = 4_000_000;
+
+/**
+ * Myers' O(ND) diff: the edit script turning `a` into `b`. Past MYERS_BUDGET (two big, unrelated
+ * files) it stops and calls the whole stretch removed and then added: still a correct diff, just
+ * not the shortest, rather than holding up the page or running out of memory.
+ */
+function myers(a: string[], b: string[], budget = MYERS_BUDGET): ('same' | 'del' | 'add')[] {
   const n = a.length;
   const m = b.length;
-  if (!n) return Array<'add'>(m).fill('add');
-  if (!m) return Array<'del'>(n).fill('del');
+  const replaceAll = () => [...Array<'del'>(n).fill('del'), ...Array<'add'>(m).fill('add')];
+  if (!n || !m) return replaceAll();
   const max = n + m;
   const offset = max;
-  let v: Int32Array = new Int32Array(2 * max + 2);
+  const v = new Int32Array(2 * max + 2);
+  // trace[d] holds the frontier before step d, diagonals -d..d only (index k + d).
   const trace: Int32Array[] = [];
+  let kept = 0;
   outer: for (let d = 0; d <= max; d++) {
-    trace.push(v.slice());
+    kept += 2 * d + 1;
+    if (kept > budget) return replaceAll();
+    trace.push(v.slice(offset - d, offset + d + 1));
     for (let k = -d; k <= d; k += 2) {
       let x = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1]) ? v[offset + k + 1] : v[offset + k - 1] + 1;
       let y = x - k;
@@ -60,21 +74,19 @@ function myers(a: string[], b: string[]): ('same' | 'del' | 'add')[] {
         y++;
       }
       v[offset + k] = x;
-      if (x >= n && y >= m) {
-        trace.push(v.slice());
-        break outer;
-      }
+      if (x >= n && y >= m) break outer;
     }
   }
   // Walk back through the saved frontiers to recover the path.
   const ops: ('same' | 'del' | 'add')[] = [];
   let x = n;
   let y = m;
-  for (let d = trace.length - 2; d >= 0 && (x > 0 || y > 0); d--) {
-    v = trace[d];
+  for (let d = trace.length - 1; d >= 0 && (x > 0 || y > 0); d--) {
+    const f = trace[d];
+    const at = (k: number) => f[k + d];
     const k = x - y;
-    const prevK = k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1]) ? k + 1 : k - 1;
-    const prevX = v[offset + prevK];
+    const prevK = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
+    const prevX = d === 0 ? 0 : at(prevK);
     const prevY = prevX - prevK;
     while (x > prevX && y > prevY) {
       ops.push('same');
@@ -96,6 +108,16 @@ function myers(a: string[], b: string[]): ('same' | 'del' | 'add')[] {
     y--;
   }
   return ops.reverse();
+}
+
+/**
+ * A file's lines, without the line break that ends the last one: "a\n" is one line, as is "a",
+ * and "" none. `finalNewline` says whether the file ended with a line break.
+ */
+export function splitLines(text: string): { lines: string[]; finalNewline: boolean } {
+  if (!text) return { lines: [], finalNewline: false };
+  const finalNewline = text.endsWith('\n');
+  return { lines: (finalNewline ? text.slice(0, -1) : text).split('\n'), finalNewline };
 }
 
 /** The changed lines with `context` unchanged lines around each, merged where they overlap. */

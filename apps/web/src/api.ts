@@ -261,14 +261,6 @@ export const api = {
   source: (id: string, format: OutputFormat, ref = 'working') =>
     request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format, ref })}`, undefined, { raw: true }),
   /** The working draft as Turtle, with the revision it is (to compare with a validation report). */
-  workingTurtle: async (id: string) => {
-    let revision: string | undefined;
-    const turtle = await request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format: 'turtle', ref: 'working' })}`, undefined, {
-      raw: true,
-      onHeaders: (h) => (revision = h.get('X-Concord-Revision') ?? undefined),
-    });
-    return { turtle, revision };
-  },
   validation: (id: string, ref = 'working') => get<ValidationReport>(`/api/ontologies/${e(id)}/validation${qs({ ref })}`),
   sparql: (id: string, query: string) => post<SparqlResult>(`/api/ontologies/${e(id)}/sparql`, { query }),
 

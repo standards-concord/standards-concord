@@ -766,7 +766,10 @@ export function apiRouter(): Router {
   r.get('/change-requests/:id/turtle-diff', async (req, res) => {
     const c = await cr(req);
     if (await useCases.crWithheld(c, req.user)) throw new HttpError(404, 'No such change request');
-    res.json(await turtleDiff(c));
+    const diff = await turtleDiff(c);
+    // Building the diff takes a while: a source use case may have been withdrawn or made private meanwhile.
+    if (await useCases.crWithheld(await cr(req), req.user)) throw new HttpError(404, 'No such change request');
+    res.json(diff);
   });
   r.patch('/change-requests/:id', async (req, res) => res.json(await crOut(await crs.updateOps(await cr(req), requireUser(req), req.body ?? {}), req)));
   r.post('/change-requests/:id/submit', async (req, res) => res.json(await crOut(await crs.submit(await cr(req), requireUser(req)), req)));

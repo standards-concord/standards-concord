@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { diffLines, hunks, type DiffLine } from '../../lib/lineDiff';
+import { diffLines, hunks, splitLines, type DiffLine } from '../../lib/lineDiff';
 import { highlightSegments } from './highlight';
 import { cx } from '../ui';
 
@@ -8,12 +8,20 @@ import { cx } from '../ui';
  * removed lines in red, added in green, with three lines of context around each change.
  */
 export function TurtleDiff({ before, after }: { before: string; after: string }) {
-  const hs = useMemo(() => hunks(diffLines(before.split('\n'), after.split('\n'))), [before, after]);
+  const { hs, newlineNote } = useMemo(() => {
+    const a = splitLines(before);
+    const b = splitLines(after);
+    // The line break at the very end isn't a line of its own: say so if only that changes, as git does.
+    const note = a.finalNewline === b.finalNewline ? undefined : b.finalNewline ? 'Adds a line break at the end of the file.' : 'Removes the line break at the end of the file.';
+    return { hs: hunks(diffLines(a.lines, b.lines)), newlineNote: note };
+  }, [before, after]);
   const added = hs.reduce((n, h) => n + h.lines.filter((l) => l.kind === 'add').length, 0);
   const removed = hs.reduce((n, h) => n + h.lines.filter((l) => l.kind === 'del').length, 0);
-  if (!hs.length) return <p className="text-sm text-muted">This change doesn’t alter the Turtle.</p>;
+  if (!hs.length && !newlineNote) return <p className="text-sm text-muted">This change doesn’t alter the Turtle.</p>;
+  if (!hs.length) return <p className="text-sm text-muted">{newlineNote}</p>;
   return (
     <div className="space-y-2">
+      {newlineNote && <p className="text-xs text-muted">{newlineNote}</p>}
       <p className="text-xs text-muted" data-testid="turtle-diff-summary">
         <span className="font-medium text-ok">+{added}</span> <span className="font-medium text-danger">−{removed}</span> lines
       </p>

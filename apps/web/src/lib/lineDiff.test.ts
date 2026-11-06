@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { diffLines, hunks } from './lineDiff';
+import { diffLines, hunks, splitLines } from './lineDiff';
 
 const apply = (a: string[], d: ReturnType<typeof diffLines>) => {
   // Rebuilding both sides from the script proves it is a valid edit of a into b.
@@ -39,9 +39,46 @@ describe('diffLines', () => {
       const r = apply(a, d);
       expect(r.old).toEqual(a);
       expect(r.neu).toEqual(b);
-      // Never worse than deleting everything and adding everything.
-      expect(d.filter((l) => l.kind !== 'same').length).toBeLessThanOrEqual(a.length + b.length);
+      // Shortest: as many kept lines as the longest common subsequence.
+      expect(d.filter((l) => l.kind === 'same').length).toBe(lcs(a, b));
     }
+  });
+
+  // Two big unrelated files used to keep a copy of the whole frontier per edit step (gigabytes for
+  // 10,000 lines each side). Past the budget it now gives up on the shortest diff and replaces the lot.
+  it('falls back to remove-all, add-all past its memory budget, and is still a valid diff', () => {
+    const a = Array.from({ length: 10_000 }, (_, i) => `a${i}`);
+    const b = Array.from({ length: 10_000 }, (_, i) => `b${i}`);
+    const d = diffLines(['head', ...a, 'tail'], ['head', ...b, 'tail']);
+    const r = apply(['head', ...a, 'tail'], d);
+    expect(r.old).toEqual(['head', ...a, 'tail']);
+    expect(r.neu).toEqual(['head', ...b, 'tail']);
+    expect(d.map((l) => l.kind).join('')).toBe(`same${'del'.repeat(10_000)}${'add'.repeat(10_000)}same`);
+    // A small budget forces the fallback even on a tiny diff.
+    expect(diffLines(['x', 'y'], ['y', 'z'], 1).map((l) => l.kind)).toEqual(['del', 'del', 'add', 'add']);
+  });
+});
+
+function lcs(a: string[], b: string[]) {
+  const t = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) t[i][j] = a[i - 1] === b[j - 1] ? t[i - 1][j - 1] + 1 : Math.max(t[i - 1][j], t[i][j - 1]);
+  return t[a.length][b.length];
+}
+
+// "a\n".split('\n') is ['a', ''], which showed a phantom unchanged empty last line and two-line hunks for one-line files.
+describe('splitLines', () => {
+  it("doesn't count the final line break as a line", () => {
+    expect(splitLines('a\n')).toEqual({ lines: ['a'], finalNewline: true });
+    expect(splitLines('a')).toEqual({ lines: ['a'], finalNewline: false });
+    expect(splitLines('')).toEqual({ lines: [], finalNewline: false });
+    expect(splitLines('\n')).toEqual({ lines: [''], finalNewline: true });
+    expect(splitLines('a\n\nb\n')).toEqual({ lines: ['a', '', 'b'], finalNewline: true });
+  });
+
+  it('gives a one-line hunk for a one-line file that changes', () => {
+    const hs = hunks(diffLines(splitLines('a\n').lines, splitLines('b\n').lines));
+    expect(hs).toHaveLength(1);
+    expect(hs[0]).toMatchObject({ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1 });
   });
 });
 
