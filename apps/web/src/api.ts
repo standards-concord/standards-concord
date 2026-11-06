@@ -4,6 +4,7 @@
  * (with the server's `{error}` message when there is one).
  */
 import type {
+  GithubAppStatus,
   Publication,
   ActivityItem,
   AlphaMe,
@@ -395,6 +396,12 @@ export const api = {
   updateApp: (appId: string, body: { name?: string; repo?: string; autopilot?: Partial<AutopilotSettings> }) => patch<ConnectedApp>(`/api/apps/${e(appId)}`, body),
   rotateAppToken: (appId: string) => post<ConnectedApp>(`/api/apps/${e(appId)}/token`),
   deleteApp: (appId: string) => del<unknown>(`/api/apps/${e(appId)}`),
+  // Connecting an app through the Concord GitHub App instead of a token
+  githubApp: () => get<GithubAppStatus>('/api/github-app'),
+  startGithubInstall: (appId: string) => post<{ url: string }>(`/api/apps/${e(appId)}/github/install`),
+  unlinkGithub: (appId: string) => del<ConnectedApp>(`/api/apps/${e(appId)}/github`),
+  openWorkflowPr: (appId: string) => post<{ app: ConnectedApp; alreadyThere?: boolean }>(`/api/apps/${e(appId)}/github/workflow-pr`),
+  runGithubNow: (appId: string) => post<ConnectedApp>(`/api/apps/${e(appId)}/github/run`),
 
   // Simulation
   simulationStep: (ontologyId: string) => post<{ events: ActivityItem[] }>('/api/simulation/step', { ontologyId }),

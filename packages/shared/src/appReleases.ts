@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.38.0',
+    version: '0.39.0',
     date: '2026-11-06',
     title: 'Instant term browsing, and data checked in your browser',
     pr: 92,
@@ -83,6 +83,24 @@ export const APP_RELEASES: AppRelease[] = [
         detail: 'Term details, what uses each term, and search now come from the ontology the page already holds, so following a link in Browse shows the term at once instead of waiting for the server.',
         roles: [],
         to: '{o}/browse',
+      },
+    ],
+  },
+  {
+    version: '0.38.0',
+    date: '2026-11-06',
+    title: 'Connect your app with GitHub, no token needed',
+    pr: 98,
+    changes: [
+      {
+        id: 'app-checks-github-app',
+        type: 'feat',
+        title: 'Connect an app for app checks with GitHub',
+        detail:
+          'On App checks, Connect with GitHub installs the Concord app on your app’s repository. There’s no token to store: Concord opens the pull request that adds the workflow, and starts a run as soon as a change is proposed or edited instead of every 30 minutes. The token route is still there for other CI.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
+        ask: 'Was connecting with GitHub clearer than copying a token and a workflow? Would you install a Concord app on your repository?',
       },
     ],
   },

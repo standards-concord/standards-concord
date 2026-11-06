@@ -37,6 +37,7 @@ import { CHANGE_DRAFTER, REVISER, TRIAGE, UNTRUSTED_TEXT } from '../llm/prompts.
 import { llm } from '../llm/provider.js';
 import { AnalysisSchema, ProposalSchema, type Proposal } from '../llm/schemas.js';
 import { applyAutopilot, autopilotStands, checksFor, onStatusChanged, revisionOf } from './appChecks.js';
+import { nudgeRunsSoon } from './appGithub.js';
 import { decisionOrder, evaluate, reviewsInRound, votesOnEdits } from './governance.js';
 import { triageBudgetAvailable, withTriageBudget } from './budget.js';
 import { assertStillHeld, withWorkingDraftLock } from './repoLock.js';
@@ -631,6 +632,8 @@ export async function submit(cr: ChangeRequest, actor: User) {
       return advanceNow(c, actor);
     });
     if (after.status !== 'review') return after;
+    // Apps connected through GitHub get a run started for this version of the change.
+    nudgeRunsSoon(after.ontologyId);
     // Connected apps may already have results for this version of the change.
     await onStatusChanged(after);
     return refresh(after);
@@ -696,6 +699,8 @@ async function updateOpsNow(
     await save(c);
   });
   await triage(cr);
+  // New edits on an open change: apps connected through GitHub get a run for them.
+  nudgeRunsSoon(cr.ontologyId);
   return advance(cr, actor);
 }
 
@@ -970,6 +975,8 @@ export async function merge(cr: ChangeRequest, actor: User | undefined, chargeTo
       for (const other of (await listCRs(cr.ontologyId)).filter((o) => o.id !== cr.id && ['review', 'voting', 'needs-work'].includes(o.status))) {
         await triage(other, { analyse: false });
       }
+      // The working draft moved, so every open change is a new version for connected apps.
+      nudgeRunsSoon(cr.ontologyId);
     }
     return cr;
   };

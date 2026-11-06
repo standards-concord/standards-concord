@@ -12,6 +12,7 @@ import { filterAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
 import { mountAppChecks } from './appChecks.js';
+import { mountGithubApp } from './githubApp.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import { reconcile as reconcileAutopilot, turtleDiff } from '../services/appChecks.js';
 import * as crs from '../services/changeRequests.js';
@@ -126,11 +127,15 @@ const PUBLIC_READS = [
   /^\/oauth\/requests\/[^/]+$/,
   // An app's CI signs in with its app token, which the route itself checks.
   /^\/app-checks\/pending$/,
+  // Whether this Concord has a GitHub App; and where GitHub sends the installer back (it checks who they are).
+  /^\/github-app$/,
+  /^\/github-app\/setup$/,
 ];
 
 /** An app's CI also reads the ontology each proposed change would produce, with its app token. */
 const APP_TOKEN_READS = [/^\/change-requests\/[^/]+\/proposed$/];
-const hasAppToken = (req: Request) => /^Bearer\s+cna_\S+$/i.test(req.get('authorization') ?? '');
+/** The app token, or a run token a run of an app connected through GitHub got for GitHub's proof. */
+const hasAppToken = (req: Request) => /^Bearer\s+cn[ar]_\S+$/i.test(req.get('authorization') ?? '');
 
 export function apiRouter(): Router {
   const r = Router();
@@ -866,6 +871,7 @@ export function apiRouter(): Router {
 
   /* ---------------------- connected apps and autopilot ---------------- */
   mountAppChecks(r);
+  mountGithubApp(r);
 
   /* ------------------------------ simulation ------------------------- */
   r.post('/simulation/step', async (req, res) => {

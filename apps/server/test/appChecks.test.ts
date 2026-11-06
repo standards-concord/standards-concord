@@ -897,7 +897,7 @@ describe('autopilot', () => {
       const a = await connect(ivy, 'Ivy’s app');
       const seen = await appForToken(`Bearer ${a.token}`);
       await ivy.post(`/api/apps/${a.id}/token`);
-      await expect(startRun(seen, true, undefined, byToken(seen))).rejects.toThrow(/replaced/);
+      await expect(startRun(seen, true, undefined, byToken(`Bearer ${a.token}`))).rejects.toThrow(/replaced/);
     });
 
     it('a database held by another writer for too long is reported as busy, to retry', async () => {
