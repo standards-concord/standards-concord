@@ -202,3 +202,23 @@ test.describe('lists that line up', () => {
     await expect(home).toBeVisible();
   });
 });
+
+test('feedback rating numbers sit in the middle of their buttons', async ({ page }) => {
+  // The square 1-5 buttons had no flex centring, so making buttons follow their surroundings'
+  // text alignment pushed each number against the left edge (review of #93).
+  await signIn(page, { name: 'Alignment feedback tester', role: 'contributor' });
+  await page.goto('/feedback');
+  await page.getByRole('button', { name: /Guided feedback/ }).click();
+  await settle(page);
+  await page.getByRole('main').getByRole('button', { name: 'Developer or implementer', exact: true }).first().click();
+  const three = page.getByRole('main').getByRole('button', { name: '3', exact: true });
+  await expect(three).toBeVisible({ timeout: 20_000 });
+  const [outer, text] = [await box(three), await three.evaluate((el) => {
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    const b = r.getBoundingClientRect();
+    return { x: b.x, width: b.width };
+  })];
+  const centre = (b: { x: number; width: number }) => b.x + b.width / 2;
+  expect(Math.abs(centre(outer) - centre(text)), `button centre ${centre(outer)}, number centre ${centre(text)}`).toBeLessThanOrEqual(TOLERANCE);
+});

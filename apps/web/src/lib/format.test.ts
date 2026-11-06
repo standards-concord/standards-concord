@@ -10,7 +10,14 @@ describe('datatypeName', () => {
     expect(datatypeName(`${XSD}string`)).toBe('String');
     expect(datatypeName(`${XSD}nonNegativeInteger`)).toBe('Non-negative integer');
     expect(datatypeName(`${XSD}dateTime`)).toBe('Date and time');
-    expect(datatypeName('http://www.w3.org/2000/01/rdf-schema#Literal')).toBe('Any value');
+    expect(datatypeName('http://www.w3.org/2000/01/rdf-schema#Literal')).toBe('Any literal');
+    expect(datatypeName(`${XSD}anyURI`)).toBe('URI reference');
+  });
+
+  it('never gives two types the same name, so the diagram keeps every constraint', () => {
+    const local = ['string', 'boolean', 'integer', 'int', 'long', 'short', 'byte', 'nonNegativeInteger', 'nonPositiveInteger', 'positiveInteger', 'negativeInteger', 'unsignedInt', 'unsignedLong', 'unsignedShort', 'unsignedByte', 'decimal', 'double', 'float', 'date', 'dateTime', 'dateTimeStamp', 'time', 'duration', 'dayTimeDuration', 'yearMonthDuration', 'gYear', 'gYearMonth', 'gMonth', 'gMonthDay', 'gDay', 'anyURI', 'language', 'normalizedString', 'token', 'base64Binary', 'hexBinary', 'NCName', 'Name', 'NMTOKEN'];
+    const names = local.map((l) => datatypeName(`${XSD}${l}`));
+    expect(new Set(names).size).toBe(names.length);
   });
 
   it('spells out other XSD types from their local name', () => {

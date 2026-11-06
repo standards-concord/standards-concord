@@ -70,39 +70,43 @@ const XSD_NS = 'http://www.w3.org/2001/XMLSchema#';
 const RDF_NS = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const RDFS_NS = 'http://www.w3.org/2000/01/rdf-schema#';
 
-/** Plain names for the datatypes people meet most; anything else is spelled out from its local name. */
+/**
+ * Plain names for the datatypes people meet most, one per type so no constraint is lost (int is
+ * "Integer (32-bit)", not "Integer"); anything else is spelled out from its local name.
+ */
 const DATATYPE_NAMES: Record<string, string> = {
   [`${XSD_NS}string`]: 'String',
   [`${XSD_NS}boolean`]: 'Boolean',
   [`${XSD_NS}integer`]: 'Integer',
-  [`${XSD_NS}int`]: 'Integer',
-  [`${XSD_NS}long`]: 'Integer',
-  [`${XSD_NS}short`]: 'Integer',
+  [`${XSD_NS}int`]: 'Integer (32-bit)',
+  [`${XSD_NS}long`]: 'Integer (64-bit)',
+  [`${XSD_NS}short`]: 'Integer (16-bit)',
+  [`${XSD_NS}byte`]: 'Integer (8-bit)',
   [`${XSD_NS}nonNegativeInteger`]: 'Non-negative integer',
   [`${XSD_NS}nonPositiveInteger`]: 'Non-positive integer',
   [`${XSD_NS}decimal`]: 'Decimal',
-  [`${XSD_NS}double`]: 'Number',
-  [`${XSD_NS}float`]: 'Number',
+  [`${XSD_NS}double`]: 'Double',
+  [`${XSD_NS}float`]: 'Float',
   [`${XSD_NS}date`]: 'Date',
   [`${XSD_NS}dateTime`]: 'Date and time',
-  [`${XSD_NS}dateTimeStamp`]: 'Date and time',
+  [`${XSD_NS}dateTimeStamp`]: 'Date and time with time zone',
   [`${XSD_NS}time`]: 'Time',
   [`${XSD_NS}duration`]: 'Duration',
-  [`${XSD_NS}dayTimeDuration`]: 'Duration',
-  [`${XSD_NS}yearMonthDuration`]: 'Duration',
+  [`${XSD_NS}dayTimeDuration`]: 'Duration in days and time',
+  [`${XSD_NS}yearMonthDuration`]: 'Duration in years and months',
   [`${XSD_NS}gYear`]: 'Year',
   [`${XSD_NS}gYearMonth`]: 'Year and month',
   [`${XSD_NS}gMonth`]: 'Month',
   [`${XSD_NS}gMonthDay`]: 'Month and day',
   [`${XSD_NS}gDay`]: 'Day of the month',
-  [`${XSD_NS}anyURI`]: 'URL',
+  [`${XSD_NS}anyURI`]: 'URI reference',
   [`${XSD_NS}language`]: 'Language tag',
   [`${RDF_NS}langString`]: 'Text with a language',
   [`${RDF_NS}HTML`]: 'HTML',
   [`${RDF_NS}XMLLiteral`]: 'XML',
   [`${RDF_NS}JSON`]: 'JSON',
   [`${RDF_NS}PlainLiteral`]: 'Text',
-  [`${RDFS_NS}Literal`]: 'Any value',
+  [`${RDFS_NS}Literal`]: 'Any literal',
 };
 
 /**
