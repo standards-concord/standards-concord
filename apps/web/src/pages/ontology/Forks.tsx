@@ -110,7 +110,7 @@ function ForkRow({ f, sameName }: { f: ForkSummary; sameName?: boolean }) {
 export function ForksTab() {
   const { id } = useOntology();
   const { session } = useSession();
-  const list = useAsync(() => api.forks(id), [id]);
+  const list = useAsync(() => api.forks(id), [id], { keep: `forks|${id}` });
   const [open, setOpen] = useState(false);
   const mine = (list.data ?? []).filter((f) => f.ownerId === session?.user?.id);
   const others = (list.data ?? []).filter((f) => f.ownerId !== session?.user?.id);

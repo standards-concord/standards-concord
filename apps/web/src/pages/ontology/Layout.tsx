@@ -138,8 +138,9 @@ function SectionNav({ id }: { id: string }) {
 export function OntologyLayout() {
   const { id = '' } = useParams();
   const { session } = useSession();
-  const state = useAsync(() => api.ontology(id), [id]);
-  const view = useAsync(() => api.view(id, 'working'), [id]);
+  // Opening an ontology again shows what it showed last time at once, while the current copy loads.
+  const state = useAsync(() => api.ontology(id), [id], { keep: `ontology|${id}` });
+  const view = useAsync(() => api.view(id, 'working'), [id], { keep: `view|${id}|working` });
   // Pages read terms from this view rather than asking the server each time, so it is refreshed in
   // the background (the page keeps showing the copy it has meanwhile): when you move to another
   // section, since a change may have been merged there, and when you come back to the tab.

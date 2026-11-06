@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.40.0',
+    date: '2026-11-06',
+    title: 'Sections you have opened come back at once',
+    pr: 101,
+    changes: [
+      {
+        id: 'instant-sections',
+        type: 'perf',
+        title: 'Going back to a section is instant',
+        detail: 'Change requests, releases, meetings, forks, use cases, app checks, agent reports and the overview show what they showed last time straight away when you come back to them, and quietly bring it up to date. Nothing is kept for the next person after you sign out.',
+        roles: [],
+        to: '{o}/changes',
+        ask: 'Does moving between sections feel instant now? Did you ever see out-of-date information that confused you?',
+      },
+    ],
+  },
+  {
     version: '0.39.0',
     date: '2026-11-06',
     title: 'Instant term browsing, and data checked in your browser',
