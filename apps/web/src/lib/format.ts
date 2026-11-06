@@ -74,7 +74,7 @@ const RDFS_NS = 'http://www.w3.org/2000/01/rdf-schema#';
  * Plain names for the datatypes people meet most, one per type so no constraint is lost (int is
  * "Integer (32-bit)", not "Integer"); anything else is spelled out from its local name.
  */
-const DATATYPE_NAMES: Record<string, string> = {
+export const DATATYPE_NAMES: Readonly<Record<string, string>> = {
   [`${XSD_NS}string`]: 'String',
   [`${XSD_NS}boolean`]: 'Boolean',
   [`${XSD_NS}integer`]: 'Integer',

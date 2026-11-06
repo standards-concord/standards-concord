@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { datatypeName } from './format';
+import { DATATYPE_NAMES, datatypeName } from './format';
 import { makeLabeler } from './ontology';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -16,7 +16,10 @@ describe('datatypeName', () => {
 
   it('never gives two types the same name, so the diagram keeps every constraint', () => {
     const local = ['string', 'boolean', 'integer', 'int', 'long', 'short', 'byte', 'nonNegativeInteger', 'nonPositiveInteger', 'positiveInteger', 'negativeInteger', 'unsignedInt', 'unsignedLong', 'unsignedShort', 'unsignedByte', 'decimal', 'double', 'float', 'date', 'dateTime', 'dateTimeStamp', 'time', 'duration', 'dayTimeDuration', 'yearMonthDuration', 'gYear', 'gYearMonth', 'gMonth', 'gMonthDay', 'gDay', 'anyURI', 'language', 'normalizedString', 'token', 'base64Binary', 'hexBinary', 'NCName', 'Name', 'NMTOKEN'];
-    const names = local.map((l) => datatypeName(`${XSD}${l}`));
+    // Every mapped IRI (XSD, rdf: and rdfs: alike) plus XSD types that are spelled out from their local name.
+    const iris = [...new Set([...Object.keys(DATATYPE_NAMES), ...local.map((l) => `${XSD}${l}`)])];
+    const names = iris.map((iri) => datatypeName(iri));
+    expect(names.every(Boolean)).toBe(true);
     expect(new Set(names).size).toBe(names.length);
   });
 
