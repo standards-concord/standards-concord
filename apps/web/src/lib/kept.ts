@@ -58,19 +58,40 @@ export function finishLoad(started: ReturnType<typeof startLoad>, answer?: { val
   if (answer && token.account && stillCurrent(token, token.account)) store(key, answer.value);
 }
 
+function forget(key: string) {
+  kept.delete(key);
+  loads.delete(key);
+}
+
 /**
- * The page changed its data itself (after an edit). What was kept for it may no longer be true, so it is
- * forgotten, and loads on their way for it won't be kept: the next load keeps afresh. Nothing is written
- * here, so a change that lands late (after the page moved to other data, or the account changed) can
- * never end up kept under the wrong key. `loadedKey` is the key the page last loaded; both it and the
- * current key are forgotten.
+ * What one page (one useAsync) has loaded, so that a change it makes itself (after an edit) can forget
+ * everything that change may have made untrue. An edit can finish after the page has moved on to other
+ * data, so it isn't known which key it was made against: every key the page loaded is forgotten, along
+ * with the current one, and loads on their way for them won't be kept. Forgetting too much only costs a
+ * wait next time. Nothing is written, so a late change can never end up kept under the wrong key.
  */
-export function forgetKept(keep: string | undefined, loadedKey: string | undefined) {
-  for (const key of new Set([keptKey(keep), loadedKey])) {
-    if (!key) continue;
-    kept.delete(key);
-    loads.delete(key);
-  }
+export function keptOwner() {
+  const loaded = new Set<string>();
+  return {
+    /** The page starts loading `key` (account included). */
+    loading(key: string | undefined) {
+      if (!key) return;
+      loaded.delete(key);
+      loaded.add(key);
+      // A page that has loaded very many keys stops tracking the oldest, and forgets it now instead.
+      if (loaded.size > KEEP_MAX) {
+        const oldest = loaded.keys().next().value!;
+        loaded.delete(oldest);
+        forget(oldest);
+      }
+    },
+    /** The page changed its data itself; `keep` is its current key. */
+    changed(keep: string | undefined) {
+      const current = keptKey(keep);
+      if (current) forget(current);
+      for (const key of loaded) forget(key);
+    },
+  };
 }
 
 /** For tests: how many keys are kept and how many loads are tracked. */

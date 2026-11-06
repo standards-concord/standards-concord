@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { finishLoad, forgetKept, keptKey, keptValue, startLoad } from './kept';
+import { finishLoad, keptKey, keptOwner, keptValue, startLoad } from './kept';
 
 export interface AsyncState<T> {
   data: T | undefined;
@@ -23,15 +23,15 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
   fnRef.current = fn;
   const keepRef = useRef(opts?.keep);
   keepRef.current = opts?.keep;
-  // The key (account included) the page last loaded, forgotten along with the current one on setData.
-  const loadedKey = useRef(keptKey(opts?.keep));
+  // Every key this page has loaded, all forgotten when it changes its data itself.
+  const [owner] = useState(keptOwner);
 
   const run = useCallback(async () => {
     const id = ++seq.current;
     setLoading(true);
     const key = keptKey(keepRef.current);
+    owner.loading(key);
     const started = startLoad(key);
-    loadedKey.current = key;
     const shown = keptValue<T>(key);
     if (shown) {
       setDataState(shown.value);
@@ -51,20 +51,21 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
       finishLoad(started, answer);
       if (id === seq.current) setLoading(false);
     }
-  }, []);
+  }, [owner]);
 
   useEffect(() => {
     void run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
-  // A page's own change (after an edit) isn't kept: what was kept for it is forgotten instead, and the
-  // next load keeps afresh. As before, a load already on its way still replaces the page's data when it
-  // answers; pages that edit call reload() afterwards, which supersedes it.
+  // A page's own change (after an edit) isn't kept: what was kept for anything the page loaded is
+  // forgotten instead (see keptOwner), and the next load keeps afresh. As before, a load already on its
+  // way still replaces the page's data when it answers; pages that edit call reload() afterwards, which
+  // supersedes it.
   const setData = useCallback((d: T | ((prev: T | undefined) => T)) => {
-    forgetKept(keepRef.current, loadedKey.current);
+    owner.changed(keepRef.current);
     setDataState((prev) => (typeof d === 'function' ? (d as (p: T | undefined) => T)(prev) : d));
-  }, []);
+  }, [owner]);
 
   return { data, error, loading, reload: run, setData };
 }

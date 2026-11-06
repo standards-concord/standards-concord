@@ -49,45 +49,80 @@ describe('kept answers', () => {
     expect(k.keptValue(key)).toEqual({ value: 'new' });
   });
 
+  /** One page as useAsync drives it: each load is recorded by the page's owner before it starts. */
+  function page(k: Awaited<ReturnType<typeof load>>) {
+    const owner = k.keptOwner();
+    return {
+      owner,
+      start(keep: string) {
+        const key = k.keptKey(keep);
+        owner.loading(key);
+        return k.startLoad(key);
+      },
+    };
+  }
+
   // Used to go wrong: a load that started before the page changed its data (after an edit) answered
   // afterwards and put the older list back in what was kept.
   it('after the page changes its data, nothing kept stands for it, and loads on their way are not kept', async () => {
     const k = await load();
+    const p = page(k);
     const key = k.keptKey('changes|vol');
-    k.finishLoad(k.startLoad(key), { value: 'before the edit' });
-    const onItsWay = k.startLoad(key);
-    k.forgetKept('changes|vol', key);
+    k.finishLoad(p.start('changes|vol'), { value: 'before the edit' });
+    const onItsWay = p.start('changes|vol');
+    p.owner.changed('changes|vol');
     expect(k.keptValue(key)).toBeUndefined();
     k.finishLoad(onItsWay, { value: 'stale' });
     expect(k.keptValue(key)).toBeUndefined();
     // The next load keeps afresh.
-    k.finishLoad(k.startLoad(key), { value: 'after the edit' });
+    k.finishLoad(p.start('changes|vol'), { value: 'after the edit' });
     expect(k.keptValue(key)).toEqual({ value: 'after the edit' });
   });
 
-  // Used to go wrong: a change that finished after the page had moved on (to other data, or after the
-  // account changed) was kept under the new key. A change now writes nothing, and both the key the page
-  // last loaded and the current one are forgotten.
-  it('a change that lands after the page moved on writes nothing under either key', async () => {
+  // Used to go wrong (twice): an edit made on one list that finished after the page had started loading
+  // another was put down to the new list only. The first list's kept copy, and a load still on its way
+  // for it, survived the edit, so going back showed the list from before it.
+  it('an edit that finishes after the page moved to other data forgets the data it was made on', async () => {
     const k = await load();
+    const p = page(k);
     const a = k.keptKey('changes|vol|open');
     const b = k.keptKey('changes|vol|merged');
-    k.finishLoad(k.startLoad(a), { value: 'open list' });
-    k.finishLoad(k.startLoad(b), { value: 'merged list' });
-    const loadingB = k.startLoad(b);
-    k.forgetKept('changes|vol|merged', a);
+    k.finishLoad(p.start('changes|vol|open'), { value: 'open list' });
+    const loadingA = p.start('changes|vol|open'); // the edit starts on A while A reloads
+    const loadingB = p.start('changes|vol|merged'); // the page moves to B
+    p.owner.changed('changes|vol|merged'); // ...and then the edit on A finishes
     expect(k.keptValue(a)).toBeUndefined();
+    k.finishLoad(loadingA, { value: 'open list, from before the edit' });
+    expect(k.keptValue(a)).toBeUndefined();
+    k.finishLoad(loadingB, { value: 'merged list' });
     expect(k.keptValue(b)).toBeUndefined();
-    k.finishLoad(loadingB, { value: 'merged list again' });
-    expect(k.keptValue(b)).toBeUndefined();
-    // After an account change: the old account's key is gone already, and the new one's isn't written.
-    const asAlice = k.keptKey('changes|vol|open');
+    // Another page's copies are its own business... unless this page loaded them too.
+    const other = page(k);
+    k.finishLoad(other.start('releases|vol'), { value: 'releases' });
+    p.owner.changed('changes|vol|merged');
+    expect(k.keptValue(k.keptKey('releases|vol'))).toEqual({ value: 'releases' });
+  });
+
+  it('a change after the account changed writes nothing for the new account', async () => {
+    const k = await load();
+    const p = page(k);
+    k.finishLoad(p.start('changes|vol|open'), { value: 'alice’s list' });
     switchTo('bob');
     const bobs = k.keptKey('changes|vol|open');
-    k.finishLoad(k.startLoad(bobs), { value: 'bob’s list' });
-    k.forgetKept('changes|vol|open', asAlice);
+    k.finishLoad(p.start('changes|vol|open'), { value: 'bob’s list' });
+    p.owner.changed('changes|vol|open');
     expect(k.keptValue(bobs)).toBeUndefined();
-    expect(k.keptValue(asAlice)).toBeUndefined();
+    expect(k.keptSizesForTests()).toEqual({ kept: 0, loads: 0 });
+  });
+
+  it('a page that has loaded very many keys forgets the oldest rather than losing track of it', async () => {
+    const k = await load();
+    const p = page(k);
+    const first = k.keptKey('page|first');
+    k.finishLoad(p.start('page|first'), { value: 'first' });
+    // Still kept (nothing pushed it out), but this page has since loaded too many keys to track it.
+    for (let i = 0; i < k.KEEP_MAX; i++) p.start(`hangs|${i}`);
+    expect(k.keptValue(first)).toBeUndefined();
   });
 
   it('an answer that arrives after the account changed is not kept', async () => {
@@ -143,8 +178,12 @@ describe('kept answers', () => {
   // Loads that never settle (a request that hangs) used to stay recorded for ever.
   it('loads that never settle are capped too', async () => {
     const k = await load();
+    const first = k.startLoad(k.keptKey('hangs|first'));
     for (let i = 0; i < k.KEEP_MAX * 3; i++) k.startLoad(k.keptKey(`hangs|${i}`));
     expect(k.keptSizesForTests().loads).toBe(k.KEEP_MAX);
+    // A load dropped from the record that does answer in the end is not kept.
+    k.finishLoad(first, { value: 'late' });
+    expect(k.keptValue(k.keptKey('hangs|first'))).toBeUndefined();
   });
 
   it('keeps nothing before the account is known', async () => {
