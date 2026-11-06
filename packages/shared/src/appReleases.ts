@@ -53,9 +53,10 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.34.0',
+    version: '0.35.0',
     date: '2026-11-06',
     title: 'Advanced features, and a diff on every change',
+    pr: 94,
     changes: [
       {
         id: 'turtle-diff',
@@ -85,6 +86,24 @@ export const APP_RELEASES: AppRelease[] = [
           'Reasoner details and Check again in this browser are gone. FAIR and quality check codes now appear when you hover over a tick or cross. Commit hashes on releases and forks, and the canned SPARQL examples menu, have been removed.',
         roles: [],
         to: '{o}#health',
+      },
+    ],
+  },
+  {
+    version: '0.34.0',
+    date: '2026-11-06',
+    title: 'See who runs an ontology at a glance',
+    pr: 91,
+    changes: [
+      {
+        id: 'role-rings',
+        type: 'feat',
+        title: 'Coloured rings for owners, stewards and ODI oversight',
+        detail:
+          'In the members list, owners, the steward (who chairs) and ODI oversight have a coloured ring round their picture, with a small key underneath. Hover over a picture to see their roles. Role chips on the Governance page use the same colours.',
+        roles: [],
+        to: '{o}',
+        ask: 'Could you tell who runs the working group from the rings? Are the colours clear in the look you use?',
       },
     ],
   },
