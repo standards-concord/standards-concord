@@ -1,5 +1,6 @@
 import request from 'supertest';
 import { config as storeConfig } from '../src/config.js';
+import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -330,6 +331,15 @@ describe('agents over MCP', () => {
     };
     const init = await call(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-agent', version: '1' } });
     expect(init.status).toBe(200);
+    // Claude showed a generic plug for the connector: the server sent no icon. It now names
+    // Concord's plane, and every icon it names is a file the web app serves.
+    const info = parse(init).result.serverInfo;
+    expect(info).toMatchObject({ name: 'concord', title: 'Concord' });
+    expect(info.icons.map((i: { mimeType: string }) => i.mimeType)).toEqual(['image/png', 'image/png', 'image/svg+xml']);
+    for (const icon of info.icons as { src: string }[]) {
+      expect(icon.src.startsWith(`${storeConfig.webUrl}/`), icon.src).toBe(true);
+      expect(fs.existsSync(path.join(storeConfig.webDist, '..', 'public', new URL(icon.src).pathname)), icon.src).toBe(true);
+    }
     const tools = parse(await call(2, 'tools/list', {}));
     expect(tools.result.tools.map((t: { name: string }) => t.name)).toEqual(expect.arrayContaining(['list_ontologies', 'get_ontology', 'search_terms', 'report_gap', 'validate_data']));
     const search = parse(await call(3, 'tools/call', { name: 'search_terms', arguments: { ontology: 'volunteering', query: 'skill' } }));
