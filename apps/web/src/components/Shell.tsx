@@ -233,7 +233,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <OdiLogo className="brand-odi h-6 shrink-0" />
             <span className="brand-odi h-6 w-px shrink-0 bg-line-strong" aria-hidden />
             <Logo className="shrink-0" />
-            <span className="truncate text-sm font-semibold tracking-tight">
+            <span className="app-brand-name truncate text-sm font-semibold tracking-tight">
               Concord<span className="app-brand-sub hidden sm:inline"></span>
             </span>
             <span className="rounded bg-warn-soft px-1.5 py-0.5 text-xs font-semibold text-warn">Alpha</span>

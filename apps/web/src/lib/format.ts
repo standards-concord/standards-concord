@@ -66,6 +66,61 @@ export function compactIri(iri: string, prefixes: Record<string, string> = {}): 
   return iri;
 }
 
+const XSD_NS = 'http://www.w3.org/2001/XMLSchema#';
+const RDF_NS = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+const RDFS_NS = 'http://www.w3.org/2000/01/rdf-schema#';
+
+/**
+ * Plain names for the datatypes people meet most, one per type so no constraint is lost (int is
+ * "Integer (32-bit)", not "Integer"); anything else is spelled out from its local name.
+ */
+export const DATATYPE_NAMES: Readonly<Record<string, string>> = {
+  [`${XSD_NS}string`]: 'String',
+  [`${XSD_NS}boolean`]: 'Boolean',
+  [`${XSD_NS}integer`]: 'Integer',
+  [`${XSD_NS}int`]: 'Integer (32-bit)',
+  [`${XSD_NS}long`]: 'Integer (64-bit)',
+  [`${XSD_NS}short`]: 'Integer (16-bit)',
+  [`${XSD_NS}byte`]: 'Integer (8-bit)',
+  [`${XSD_NS}nonNegativeInteger`]: 'Non-negative integer',
+  [`${XSD_NS}nonPositiveInteger`]: 'Non-positive integer',
+  [`${XSD_NS}decimal`]: 'Decimal',
+  [`${XSD_NS}double`]: 'Double',
+  [`${XSD_NS}float`]: 'Float',
+  [`${XSD_NS}date`]: 'Date',
+  [`${XSD_NS}dateTime`]: 'Date and time',
+  [`${XSD_NS}dateTimeStamp`]: 'Date and time with time zone',
+  [`${XSD_NS}time`]: 'Time',
+  [`${XSD_NS}duration`]: 'Duration',
+  [`${XSD_NS}dayTimeDuration`]: 'Duration in days and time',
+  [`${XSD_NS}yearMonthDuration`]: 'Duration in years and months',
+  [`${XSD_NS}gYear`]: 'Year',
+  [`${XSD_NS}gYearMonth`]: 'Year and month',
+  [`${XSD_NS}gMonth`]: 'Month',
+  [`${XSD_NS}gMonthDay`]: 'Month and day',
+  [`${XSD_NS}gDay`]: 'Day of the month',
+  [`${XSD_NS}anyURI`]: 'URI reference',
+  [`${XSD_NS}language`]: 'Language tag',
+  [`${RDF_NS}langString`]: 'Text with a language',
+  [`${RDF_NS}HTML`]: 'HTML',
+  [`${RDF_NS}XMLLiteral`]: 'XML',
+  [`${RDF_NS}JSON`]: 'JSON',
+  [`${RDF_NS}PlainLiteral`]: 'Text',
+  [`${RDFS_NS}Literal`]: 'Any literal',
+};
+
+/**
+ * A well-known datatype's plain name ("Boolean" for xsd:boolean), or undefined for any other IRI.
+ * Unlisted XSD types are spelled out from their local name ("unsignedByte" → "Unsigned byte").
+ */
+export function datatypeName(iri: string): string | undefined {
+  const known = DATATYPE_NAMES[iri];
+  if (known) return known;
+  if (!iri.startsWith(XSD_NS)) return undefined;
+  const local = iri.slice(XSD_NS.length).replace(/([a-z])([A-Z])/g, (_, a: string, b: string) => `${a} ${b.toLowerCase()}`);
+  return local ? local[0].toUpperCase() + local.slice(1) : undefined;
+}
+
 export function roleLabel(r: Role | string): string {
   return (ROLE_INFO as Record<string, { label: string }>)[r]?.label ?? r;
 }

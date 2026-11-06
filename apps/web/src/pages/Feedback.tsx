@@ -49,7 +49,7 @@ function QuickReplies({ q, onPick, current }: { q: FeedbackQuestion; onPick: (te
             <button
               key={n}
               onClick={() => onPick(String(n), n)}
-              className={cx('size-9 rounded-lg border text-sm font-medium transition-colors', current === n ? 'border-accent bg-accent text-accent-fg' : 'border-line-strong bg-surface hover:border-accent')}
+              className={cx('size-9 rounded-lg border text-center text-sm font-medium transition-colors', current === n ? 'border-accent bg-accent text-accent-fg' : 'border-line-strong bg-surface hover:border-accent')}
             >
               {n}
             </button>

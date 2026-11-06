@@ -20,6 +20,46 @@ test.describe('browse basics', () => {
     await expect(page.getByRole('heading', { level: 2, name: 'volunteer' })).toBeVisible();
   });
 
+  test('the list view folds away classes like it folds away properties', async ({ page, request }) => {
+    // Jesse: Object and Datatype properties could be collapsed but Classes couldn't, and the view was called "Classes".
+    const demo = await demoOntology(request);
+    await signInAsPersona(page, 'Aisha Rahman');
+    await page.goto(`/o/${demo.id}/browse`);
+    await settle(page);
+    const views = page.getByRole('radiogroup', { name: 'View' });
+    await expect(views.getByRole('radio', { name: 'List' })).toHaveAttribute('aria-checked', 'true');
+    await expect(views.getByRole('radio', { name: 'Classes' })).toHaveCount(0);
+
+    const classes = page.getByRole('button', { name: /^Classes \(\d+\)$/ });
+    const tree = page.getByRole('tree', { name: /Classes/ });
+    await expect(classes).toHaveAttribute('aria-expanded', 'true');
+    await expect(tree).toBeVisible();
+    await classes.click();
+    await expect(classes).toHaveAttribute('aria-expanded', 'false');
+    await expect(tree).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Expand all classes' })).toBeHidden();
+    // The property lists still work while classes are folded away.
+    await page.getByRole('button', { name: /^Object properties \(\d+\)$/ }).click();
+    await page.getByRole('button', { name: 'has role', exact: true }).click();
+    await expect(page.getByRole('heading', { level: 2, name: 'has role' })).toBeVisible();
+    await classes.click();
+    await expect(tree).toBeVisible();
+  });
+
+  test('a folded class list opens again to show a class picked elsewhere on the page', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    await signInAsPersona(page, 'Priya Shah');
+    await page.goto(`/o/${demo.id}/browse?term=${encodeURIComponent('https://w3id.org/odi/volunteering#hasRole')}`);
+    await settle(page);
+    const classes = page.getByRole('button', { name: /^Classes \(\d+\)$/ });
+    await classes.click();
+    await expect(classes).toHaveAttribute('aria-expanded', 'false');
+    // Following the property's domain opens a class, which the list shows again.
+    await page.getByText('Domain', { exact: true }).locator('xpath=following-sibling::dd[1]').getByRole('button', { name: 'volunteering opportunity' }).click();
+    await expect(classes).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByRole('tree', { name: /Classes/ }).getByRole('treeitem', { name: /^volunteering opportunity\b/, selected: true })).toBeVisible();
+  });
+
   test('search narrows the terms', async ({ page, request }) => {
     const demo = await demoOntology(request);
     await signInAsPersona(page, 'Gareth Lewis');

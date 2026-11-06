@@ -4,6 +4,7 @@ import type { OntologyView } from '@concord/shared';
 import type { Labeler } from '../../lib/ontology';
 import { cardText, isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
 import { downloadPng, downloadSvg } from '../../lib/exportSvg';
+import { datatypeName } from '../../lib/format';
 import { clearTextWidths, svgTextWidth as textWidth } from '../../lib/measureText';
 import { wrapRows } from '../../lib/wrapText';
 import { cx } from '../ui';
@@ -85,7 +86,7 @@ function wrapText(text: string, font: string, max: number, maxRows: number) {
 }
 
 function typeName(iris: string[], exprs: string[], label: Labeler) {
-  const parts = [...iris.map((i) => (isDatatype(i) ? i.replace(/^.*[#/]/, '') : label(i))), ...exprs];
+  const parts = [...iris.map((i) => datatypeName(i) ?? label(i)), ...exprs];
   return parts.length ? parts.join(' and ') : 'Literal';
 }
 
