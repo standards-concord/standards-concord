@@ -1,5 +1,7 @@
 # Concord app check
 
+> **Maintainers:** this folder is the source. It is published to the public repository [standards-concord/app-check](https://github.com/standards-concord/app-check), which workflows use as `standards-concord/app-check@v1`, so repositories anywhere can use it whether or not Concord's own repository is public. After changing it here, run `scripts/publish-action.sh` (it copies the folder there and moves the `v1` tag; a breaking change to the inputs needs `v2`).
+
 Test your application against every change proposed to an ontology on Concord, before the change is merged.
 
 Each run:
@@ -62,7 +64,7 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - uses: standards-concord/standards-concord/actions/app-check@main
+      - uses: standards-concord/app-check@v1
         with:
           concord-url: https://standards-concord.vercel.app
           token: ${{ secrets.CONCORD_APP_TOKEN }}
