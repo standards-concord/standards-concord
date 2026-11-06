@@ -7,6 +7,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb, put } from '../src/db.js';
 import { getCR, MAX_EDITS } from '../src/services/changeRequests.js';
+import { llm } from '../src/llm/provider.js';
 import { getProject, members, updateProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -266,6 +267,37 @@ describe('change request lifecycle', () => {
     const patched = await editor.patch(`/api/change-requests/${created.body.id}`).send({ ops: edits(MAX_EDITS + 1, 'Patched') });
     expect(patched.status).toBe(413);
     expect((await editor.get(`/api/change-requests/${created.body.id}`)).body.ops[0].localName).toBe('AtLimit0');
+  });
+
+  it('refuses edits over the limit drafted from plain language or by an AI revision', async () => {
+    const editor = await login('editor', 'Editor Gen');
+    const before = (await editor.get(`/api/ontologies/${demoId}/change-requests`)).body.length;
+    // The offline drafter turns each "Add a class called …" into an edit.
+    const naturalLanguage = Array.from({ length: MAX_EDITS + 1 }, (_, i) => `Add a class called Gen${i}.`).join(' ');
+    const drafted = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({ title: 'Drafted too many', description: '', kind: 'feature', naturalLanguage });
+    expect(drafted.status).toBe(413);
+    expect((await editor.get(`/api/ontologies/${demoId}/change-requests`)).body).toHaveLength(before);
+
+    const small = await editor.post(`/api/ontologies/${demoId}/change-requests`).send({
+      title: 'Revised into too many',
+      description: '',
+      kind: 'feature',
+      ops: [{ op: 'addClass', localName: 'RevisedSeed', label: 'revised seed', definition: 'A class that an AI revision tries to turn into too many edits.' }],
+    });
+    expect(small.status).toBe(201);
+    const original = llm.json;
+    llm.json = (async (...args: Parameters<typeof original>) => {
+      if (args[0].task !== 'revise') return original(...args);
+      const terms = Array.from({ length: MAX_EDITS + 1 }, (_, i) => ({ action: 'add', kind: 'class', localName: `Revised${i}`, label: `revised ${i}`, definition: `A class from a revision (${i}).` }));
+      return { value: { title: 'Revised', summary: '', rationale: 'More edits.', terms, competencyQuestionTests: [], conflicts: [], risks: [] } } as Awaited<ReturnType<typeof original>>;
+    }) as typeof original;
+    try {
+      const revised = await editor.post(`/api/change-requests/${small.body.id}/revise`).send({ instruction: 'Split every concept into many classes' });
+      expect(revised.status).toBe(413);
+    } finally {
+      llm.json = original;
+    }
+    expect((await editor.get(`/api/change-requests/${small.body.id}`)).body.ops.map((o: { localName: string }) => o.localName)).toEqual(['RevisedSeed']);
   });
 
   it('drafts edits from plain language offline', async () => {

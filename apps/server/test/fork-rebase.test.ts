@@ -9,7 +9,7 @@ import { createApp } from '../src/app.js';
 import { clock } from '../src/clock.js';
 import { config } from '../src/config.js';
 import { get, HttpError, list, openDb, put, putIf, withFence } from '../src/db.js';
-import { addReview, createChangeRequest, getCR, triage, updateOps } from '../src/services/changeRequests.js';
+import { addReview, changeCR, createChangeRequest, getCR, governanceFor, MAX_EDITS, triage, updateOps } from '../src/services/changeRequests.js';
 import { llm } from '../src/llm/provider.js';
 import { triageBudget } from '../src/services/budget.js';
 import { getUser } from '../src/services/users.js';
@@ -996,16 +996,15 @@ describe('saves that race a slow step', () => {
     expect(timeline).toContain('Given on an old copy');
   });
 
-  it('two overlapping simulation steps record each member reaction once', async () => {
-    // Used to (#72): whether a member had already reacted was checked before the slow LLM call, so a
-    // second step that ran meanwhile recorded the same member's reaction a second time.
-    const { crId } = await proposeFork('Overlapping steps', 'OverlappingSteps');
-    expect((await getCR(crId)).status).toBe('review');
+  /**
+   * Runs a simulation step during which, while a member thinks about this request (the LLM call), a second step runs
+   * to completion. Only on this request: an earlier request the nested step merges would be refused anyway.
+   */
+  const overlappingSteps = async (marker: string) => {
     const original = llm.json;
     let nested = false;
     llm.json = (async (...args: Parameters<typeof original>) => {
-      // Only on this test's own request: an earlier request a nested step merges is refused anyway.
-      if (!nested && args[0].task === 'persona' && JSON.stringify(args[0].messages).includes('OverlappingSteps')) {
+      if (!nested && args[0].task === 'persona' && JSON.stringify(args[0].messages).includes(marker)) {
         nested = true;
         await step(p().id, undefined, 50);
       }
@@ -1017,15 +1016,41 @@ describe('saves that race a slow step', () => {
       llm.json = original;
     }
     expect(nested).toBe(true);
-    for (const cr of await list<ChangeRequest>('changeRequests', p().id)) {
-      const since = cr.opsUpdatedAt ?? '';
-      for (const kind of ['reviews', 'votes'] as const) {
-        const by = new Map<string, number>();
-        for (const r of await list<{ userId: string; at: string }>(kind, cr.id))
-          if (r.at >= since && r.userId !== cr.authorId) by.set(r.userId, (by.get(r.userId) ?? 0) + 1);
-        expect([...by.values()].filter((n) => n > 1), `${kind} on #${cr.number}`).toEqual([]);
-      }
-    }
+  };
+  /** Each member's reactions of this kind on the request's current edits, by member. */
+  const reactionsBy = async (crId: string, kind: 'reviews' | 'votes') => {
+    const cr = await getCR(crId);
+    const by = new Map<string, number>();
+    for (const r of await list<{ userId: string; at: string }>(kind, cr.id)) if (r.at >= (cr.opsUpdatedAt ?? '') && r.userId !== cr.authorId) by.set(r.userId, (by.get(r.userId) ?? 0) + 1);
+    return by;
+  };
+
+  it('two overlapping simulation steps record each member review once', async () => {
+    // Used to (#72): whether a member had already reacted was checked before the slow LLM call, so a
+    // second step that ran meanwhile recorded the same member's reaction a second time.
+    const { crId } = await proposeFork('Overlapping steps', 'OverlappingSteps');
+    expect((await getCR(crId)).status).toBe('review');
+    await overlappingSteps('OverlappingSteps');
+    const by = await reactionsBy(crId, 'reviews');
+    // Members did react, each once.
+    expect(by.size).toBeGreaterThan(0);
+    expect([...by.values()].filter((n) => n > 1)).toEqual([]);
+  });
+
+  it('two overlapping simulation steps record each member vote once', async () => {
+    // Used to (#72), as above, for votes.
+    const { crId } = await proposeFork('Overlapping votes', 'OverlappingVotes');
+    // A vote open on it, as a major change gets (the request's own edits are a minor one).
+    await changeCR(crId, (c) => {
+      c.classification = { ...c.classification!, level: 'major' };
+      c.status = 'voting';
+      c.statusSince = clock.iso();
+    });
+    expect((await governanceFor(await getCR(crId))).rule.vote).toBeTruthy();
+    await overlappingSteps('OverlappingVotes');
+    const by = await reactionsBy(crId, 'votes');
+    expect(by.size).toBeGreaterThan(0);
+    expect([...by.values()].filter((n) => n > 1)).toEqual([]);
   });
 
   it('an older re-check never replaces the results of a newer one made against a later draft', async () => {
@@ -1055,6 +1080,98 @@ describe('saves that race a slow step', () => {
     // The newer check's result stands: against the current draft the edit can't be applied.
     expect(cr.validation?.passed).toBe(false);
     expect(cr.validation?.lint.some((l) => l.code === 'change-not-applicable')).toBe(true);
+  });
+
+  it('a draft that moves during every re-check leaves the request not validated, rather than validated against an old draft', async () => {
+    // Review of #73: the last try used to save its results even though the draft had moved again, so governance
+    // could act on a verdict from an older draft.
+    const { crId } = await proposeFork('Draft keeps moving', 'DraftKeepsMoving');
+    const stored = await getCR(crId);
+    expect(stored.validation?.passed).toBe(true);
+    const original = ontologyStore.workingAt;
+    let reads = 0;
+    let inside = false;
+    // Each time a check reads the draft, an unrelated change lands upstream straight after.
+    ontologyStore.workingAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
+      const g = await original.apply(this, args);
+      if (!inside) {
+        inside = true;
+        try {
+          reads++;
+          await upstream([addClass(`KeepsMoving${reads}`, `keeps moving ${reads}`)]);
+        } finally {
+          inside = false;
+        }
+      }
+      return g;
+    };
+    try {
+      await triage(await getCR(crId));
+    } finally {
+      ontologyStore.workingAt = original;
+    }
+    // Every check, and every read within one, saw the draft move.
+    expect(reads).toBeGreaterThanOrEqual(3);
+    const cr = await getCR(crId);
+    expect(cr.validation?.passed).toBe(false);
+    expect(cr.validation?.lint.map((l) => l.code)).toEqual(['draft-kept-moving']);
+    expect(cr.triagedHead).toBeUndefined();
+    // What was stored before is kept, apart from the verdict.
+    expect(cr.classification).toEqual(stored.classification);
+    expect(cr.kgcl).toEqual(stored.kgcl);
+    expect((await governanceFor(cr)).validationOk).toBe(false);
+    // Once the draft holds still, a re-check validates it against the latest draft.
+    const rechecked = await triage(cr);
+    expect(rechecked.validation?.passed).toBe(true);
+    expect(rechecked.triagedHead).toBe(await ontologyStore.head(p()));
+  });
+
+  it('a check that fails records the draft it failed on', async () => {
+    // Review of #73: the draft was noted before the check read it, so if the draft moved in between and the check
+    // then failed, the failure was recorded against the earlier draft (and checked again needlessly).
+    const { crId } = await proposeFork('Failed on a later draft', 'FailedOnLaterDraft');
+    const original = ontologyStore.workingAt;
+    let moved = false;
+    // Just before the check reads the draft, the request's own class lands upstream, so its edit can't be applied.
+    ontologyStore.workingAt = async function (this: typeof ontologyStore, ...args: Parameters<typeof original>) {
+      if (!moved) {
+        moved = true;
+        await upstream([addClass('FailedOnLaterDraft', 'failed on later draft added upstream')]);
+      }
+      return original.apply(this, args);
+    };
+    try {
+      await triage(await getCR(crId));
+    } finally {
+      ontologyStore.workingAt = original;
+    }
+    expect(moved).toBe(true);
+    const cr = await getCR(crId);
+    expect(cr.validation?.lint.map((l) => l.code)).toEqual(['change-not-applicable']);
+    // The failure names the draft it was found on, the latest.
+    expect(cr.triagedHead).toBe(await ontologyStore.head(p()));
+  });
+
+  it('a fork holds no more edits than a change request may, and one that does (from before the limit) is refused when proposed', async () => {
+    // Review of #56: a fork's edits become one change request, and checking (or planning) a list that long blocked
+    // the server too, so the limit applies to a fork's edits as well.
+    const path = await newFork('Too many to propose');
+    const edits = (n: number, tag: string) => Array.from({ length: n }, (_, i) => addClass(`${tag}${i}`, `${tag.toLowerCase()} ${i}`));
+    expect((await dev.post(`${path}/edits`).send({ ops: edits(2, 'ForkSeed') })).status).toBe(200);
+    const tooMany = await dev.post(`${path}/edits`).send({ ops: edits(MAX_EDITS - 1, 'ForkOver') });
+    expect(tooMany.status).toBe(413);
+    expect(tooMany.body.error).toMatch(new RegExp(`at most ${MAX_EDITS} edits`));
+    const slug = path.split('/').pop()!;
+    const fork = (await list<OntologyFork>('forks', vol.id)).find((f) => f.slug === slug)!;
+    expect(fork.ops).toHaveLength(2);
+
+    // A fork stored with more edits than that, as one could be before the limit.
+    await put('forks', { ...fork, ops: [...fork.ops, ...edits(MAX_EDITS - 1, 'ForkLegacy')] }, vol.id);
+    const before = (await list<ChangeRequest>('changeRequests', p().id)).length;
+    const res = await dev.post(`${path}/propose`).send({});
+    expect(res.status).toBe(413);
+    expect(res.body.error).toMatch(new RegExp(`this fork has ${MAX_EDITS + 1}`));
+    expect(await list<ChangeRequest>('changeRequests', p().id)).toHaveLength(before);
   });
 });
 
