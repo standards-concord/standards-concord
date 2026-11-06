@@ -70,10 +70,14 @@ test.describe('Sections you have opened', () => {
   test('show their list the first time too, once the ontology has been open a moment', async ({ page }) => {
     await signIn(page, { name: 'E2E instant first visit', role: 'reviewer' });
     // Opening the ontology loads the main sections' lists in the background.
-    const forksLoaded = page.waitForResponse((r) => /\/api\/ontologies\/[^/]+\/forks$/.test(r.url()) && r.ok());
-    const releasesLoaded = page.waitForResponse((r) => /\/api\/ontologies\/[^/]+\/releases$/.test(r.url()) && r.ok());
+    // Waits for each whole answer (not just its headers), then for the page to go idle, by which time
+    // it has read them and kept them.
+    const finished = (list: string) =>
+      page.waitForEvent('requestfinished', (r) => new RegExp(`/api/ontologies/[^/]+/${list}$`).test(r.url()));
+    const loaded = Promise.all([finished('forks'), finished('releases')]);
     await page.goto('/o/volunteering');
-    await Promise.all([forksLoaded, releasesLoaded]);
+    await loaded;
+    await page.evaluate(() => new Promise<void>((r) => requestIdleCallback(() => r(), { timeout: 2000 })));
     // From now on the server is slow to answer, yet neither section has been opened before.
     let release: () => void = () => {};
     const held = new Promise<void>((r) => (release = r));
