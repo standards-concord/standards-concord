@@ -27,7 +27,7 @@ done < <(tar -tzPf "$archive")
 # walkthrough/.cache/voice). None of its parts may be a link, or the copy below would land
 # wherever that link points, so they are checked before anything is created.
 case "/$cache/" in
-  //*|*/../*) fail "The cache must be a relative path without '..': $cache" ;;
+  //*|*/../*|*$'\n'*) fail "The cache must be a relative path without '..' or line breaks: $cache" ;;
 esac
 IFS=/ read -r -a parts <<<"$cache"
 part=.
@@ -55,6 +55,10 @@ stage="$work/stage"
 mkdir "$stage"
 tar -xzf "$archive" -C "$stage" --no-same-owner --no-same-permissions
 # Checked again on what was actually unpacked, then only plain files are copied across.
+# Accepted limit: nothing stops another process swapping a checked folder for a link between
+# these checks and the copy. The job runs on a fresh runner with nothing else writing to
+# the checkout, so this guards against what the archive and the cache hold, not against a
+# process racing it.
 odd "$stage"
 find "$stage" -type f -print0 > "$work/files" || fail "Couldn't list everything $archive unpacked to"
 added=0 kept=0

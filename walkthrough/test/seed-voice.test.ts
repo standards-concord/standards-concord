@@ -139,8 +139,9 @@ describe('unpack-voice.sh', () => {
     expect(tree(outside)).toEqual([]);
   });
 
-  it('refuses a cache path that is absolute or has ..', () => {
-    for (const to of [cache, '../cache', 'a/../cache']) {
+  it('refuses a cache path that is absolute, has .. or a line break', () => {
+    // A line break would hide the rest of the path from the check of each part (r3 review).
+    for (const to of [cache, '../cache', 'a/../cache', 'cache\n../../outside', 'cache\n']) {
       const r = unpack(archive([{ name: 'elevenlabs/a.mp3', body: 'x' }]), to);
       expect(r.status, to).not.toBe(0);
     }
