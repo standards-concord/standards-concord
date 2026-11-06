@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.36.0',
+    version: '0.35.0',
     date: '2026-11-06',
     title: 'Instant term browsing, and data checked in your browser',
     pr: 92,
