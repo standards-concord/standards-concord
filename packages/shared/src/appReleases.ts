@@ -53,6 +53,22 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.32.1',
+    date: '2026-11-06',
+    title: 'The ODI look for early testers too',
+    changes: [
+      {
+        id: 'old-saved-look-reset',
+        type: 'fix',
+        title: 'The ODI look and logo show for everyone again',
+        detail:
+          'If you picked a visual style before the ODI style existed, your browser kept it, so you never saw the ODI look or logo. That old choice is now cleared once. You can still pick any style under Visual style.',
+        roles: [],
+        to: '/appearance',
+      },
+    ],
+  },
+  {
     version: '0.32.0',
     date: '2026-11-05',
     title: 'Less to read on every page',

@@ -39,19 +39,33 @@ export const LOOKS = [
 export type LookId = (typeof LOOKS)[number]['id'];
 export const DEFAULT_LOOK: LookId = 'odi';
 // Only an explicit choice is saved, so people who picked a look keep it; everyone else gets the default.
-const KEY = 'concord-look';
+const KEY = 'concord-style';
 
 export function isLook(v: unknown): v is LookId {
   return LOOKS.some((l) => l.id === v);
 }
 
-// A preview build briefly saved choices under this key; carry them over (index.html does the same).
+// Before the ODI look existed, choices were saved under concord-look. Those were picked when ODI
+// wasn't on offer, and they hid the ODI default (and its logo) from early testers, so they're
+// dropped once (index.html ignores them too).
+const OLD_KEY = 'concord-look';
+// A preview build of the ODI look briefly saved choices under this key, with ODI on offer, so
+// carry them over (index.html does the same).
 const INTERIM_KEY = 'concord-look-2';
+
+function forget(key: string) {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* storage is read-only here: the old value is ignored anyway */
+  }
+}
 
 export function storedLook(): LookId {
   try {
     const v = localStorage.getItem(KEY);
     if (isLook(v)) return v;
+    if (localStorage.getItem(OLD_KEY) !== null) forget(OLD_KEY);
     const interim = localStorage.getItem(INTERIM_KEY);
     if (!isLook(interim)) return DEFAULT_LOOK;
     try {

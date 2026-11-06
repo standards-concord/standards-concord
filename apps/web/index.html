@@ -14,8 +14,9 @@
         var looks = ['odi', 'spec', 'civic', 'workbench', 'classic'];
         var look = 'odi';
         try {
-          var stored = localStorage.getItem('concord-look');
-          // A preview build briefly saved choices under concord-look-2 (see src/lib/look.ts).
+          // Choices saved under concord-look predate the ODI look and are ignored (see src/lib/look.ts);
+          // a preview build briefly saved choices under concord-look-2.
+          var stored = localStorage.getItem('concord-style');
           if (looks.indexOf(stored) < 0) stored = localStorage.getItem('concord-look-2');
           if (looks.indexOf(stored) >= 0) look = stored;
         } catch (e) {}

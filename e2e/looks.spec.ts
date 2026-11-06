@@ -171,17 +171,24 @@ test.describe('looks', () => {
     });
   }
 
-  test('a look someone chose before the ODI default arrived is kept', async ({ page }) => {
+  // Jesse's browser kept a look he had picked on 4 November, before the ODI look existed, so the
+  // live site showed no ODI logo while the recorded videos (fresh browsers) did. Choices saved
+  // under the old key were made when ODI wasn't on offer, so they now give way to the default.
+  test('a look saved before the ODI look existed gives way to the ODI default and its logo', async ({ page }) => {
     await page.addInitScript(() => {
       if (!sessionStorage.getItem('seeded')) {
         localStorage.setItem('concord-look', 'civic');
         sessionStorage.setItem('seeded', '1');
       }
+      document.addEventListener('DOMContentLoaded', () => ((window as unknown as { bootLook?: string }).bootLook = document.documentElement.dataset.look));
     });
-    await page.goto('/login');
-    expect(await look(page)).toBe('civic');
+    await page.goto('/welcome');
+    expect(await page.evaluate(() => (window as unknown as { bootLook?: string }).bootLook)).toBe('odi');
+    expect(await look(page)).toBe('odi');
+    await expect(page.locator('.app-header').getByRole('img', { name: 'Open Data Institute' })).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem('concord-look'))).toBeNull();
     await page.reload();
-    expect(await look(page)).toBe('civic');
+    expect(await look(page)).toBe('odi');
   });
 
   test('a look saved under the interim key is carried over, before paint and in the app', async ({ page }) => {
@@ -196,12 +203,12 @@ test.describe('looks', () => {
     await page.goto('/login');
     expect(await page.evaluate(() => (window as unknown as { bootLook?: string }).bootLook)).toBe('workbench');
     expect(await look(page)).toBe('workbench');
-    expect(await page.evaluate(() => [localStorage.getItem('concord-look'), localStorage.getItem('concord-look-2')])).toEqual(['workbench', null]);
+    expect(await page.evaluate(() => [localStorage.getItem('concord-style'), localStorage.getItem('concord-look-2')])).toEqual(['workbench', null]);
     await page.reload();
     expect(await look(page)).toBe('workbench');
   });
 
-  test('a valid original choice wins over an interim one', async ({ page }) => {
+  test('an interim choice, made while the ODI look was on offer, wins over an old saved one', async ({ page }) => {
     await page.addInitScript(() => {
       if (!sessionStorage.getItem('seeded')) {
         localStorage.setItem('concord-look', 'civic');
@@ -210,7 +217,7 @@ test.describe('looks', () => {
       }
     });
     await page.goto('/login');
-    expect(await look(page)).toBe('civic');
+    expect(await look(page)).toBe('workbench');
   });
 
   for (const scheme of ['light', 'dark'] as const)
