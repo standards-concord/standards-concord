@@ -56,7 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.33.0',
     date: '2026-11-06',
     title: 'Coloured workflow file for app checks',
-    pr: PRNUM,
+    pr: 90,
     changes: [
       {
         id: 'app-checks-yaml-highlight',
