@@ -54,3 +54,14 @@ export function useSampleData(ontologyId: string, o: Pick<OntologySummary, 'demo
   const account = session?.user?.id ?? 'guest';
   return useLocalStorage(sampleDataKey(account, ontologyId), defaultSampleData(o));
 }
+
+/**
+ * Whether sample data holds anything beyond prefixes and comments (the starting template has none), read without
+ * parsing so Query can decide at once whether to run over it.
+ */
+export function hasSampleRecords(data: string): boolean {
+  return data.split('\n').some((line) => {
+    const t = line.trim();
+    return t !== '' && !t.startsWith('#') && !/^(@prefix|@base|prefix|base)\b/i.test(t);
+  });
+}

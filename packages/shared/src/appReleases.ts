@@ -67,6 +67,16 @@ export const APP_RELEASES: AppRelease[] = [
         to: '{o}/browse?view=diagram',
         ask: 'Did you use the Graph view for anything the Diagram doesn’t do?',
       },
+      {
+        id: 'query-no-dataset-choice',
+        type: 'feat',
+        title: 'Query runs over your sample data without asking',
+        detail:
+          'There is no “Run against” choice any more: when your sample data has records, queries run over the ontology plus those records, and the results say so. The keyboard hints moved into a Keyboard shortcuts pop-up beside the editor; “Tab moves to the next control” stays in view.',
+        roles: [],
+        to: '{o}/query',
+        ask: 'Did you ever need to run a query over the ontology alone while you had sample data?',
+      },
     ],
   },
   {
