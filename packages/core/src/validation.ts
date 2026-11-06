@@ -28,6 +28,7 @@ const SH = NS.sh;
 import { DATA_FORMATS, type DataFormat } from './dataFormats.js';
 import { allTerms, searchTerms } from './termIndex.js';
 import type { TermView } from './types.js';
+import { storeRevision } from './storeRevision.js';
 
 export { DATA_FORMATS, DATA_MEDIA_TYPES, dataFormatForFile, dataFormatForMediaType, sniffDataFormat } from './dataFormats.js';
 export type { DataFormat } from './dataFormats.js';
@@ -770,12 +771,13 @@ export interface TermIssue {
 
 /**
  * What checkTerms needs from an ontology, worked out once per graph rather than on every check
- * (the in-browser validator checks again on each pause in typing). Rebuilt if the store changes size.
+ * (the in-browser validator checks again on each pause in typing). Rebuilt whenever the store changes.
  */
-const termIndexes = new WeakMap<OntologyGraph, { size: number; known: Set<string>; terms: () => TermView[]; term: (iri: string) => TermView | undefined }>();
+const termIndexes = new WeakMap<OntologyGraph, { revision: number; known: Set<string>; terms: () => TermView[]; term: (iri: string) => TermView | undefined }>();
 function termIndexOf(graph: OntologyGraph) {
+  const revision = storeRevision(graph.store);
   let hit = termIndexes.get(graph);
-  if (!hit || hit.size !== graph.store.size) {
+  if (!hit || hit.revision !== revision) {
     const known = new Set<string>();
     for (const q of graph.store.getQuads(null, null, null, null)) known.add(q.subject.value);
     let list: TermView[] | undefined;
@@ -783,7 +785,7 @@ function termIndexOf(graph: OntologyGraph) {
     const terms = () => (list ??= allTerms(graph.view()));
     // The first of each IRI, which is the kind graph.term() picks for a punned IRI.
     const term = (iri: string) => (byIri ??= new Map([...terms()].reverse().map((t) => [t.iri, t]))).get(iri);
-    hit = { size: graph.store.size, known, terms, term };
+    hit = { revision, known, terms, term };
     termIndexes.set(graph, hit);
   }
   return hit;

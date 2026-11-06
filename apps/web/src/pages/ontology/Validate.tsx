@@ -3,7 +3,8 @@ import { Link, useSearchParams } from 'react-router';
 import { CheckCircle2, Download, FileUp, ListChecks, LoaderCircle, RotateCcw, ShieldCheck, Terminal, TriangleAlert, WandSparkles } from 'lucide-react';
 import { DATA_FORMATS, dataFormatForFile, sniffDataFormat, type DataFormat } from '@concord/core/data-formats';
 import { DATA_CHECK_LIMITS, DEFAULT_DATA_BASE } from '@concord/core/data-check';
-import { checkDataInBrowser, warmDataCheck } from '../../lib/checkDataInBrowser';
+import { DataCheckError, checkDataInBrowser, resetDataCheck, warmDataCheck } from '../../lib/checkDataInBrowser';
+import { accountToken, onSignOut, stillCurrent } from '../../lib/session';
 import { api, type DataValidation } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { Badge, Button, Card, CardHeader, CopyButton, InlineError, Select, cx } from '../../components/ui';
@@ -32,13 +33,38 @@ type Sources = { key: string; turtle: string; shapes: string };
 /**
  * A version's ontology and shapes. A release never changes, so it is fetched once. The working
  * draft can change at any time, so each check fetches it again, except that a check made soon
- * after the page prefetched it uses that copy.
+ * after the page prefetched it uses that copy. What is kept is what this account could read: it
+ * is forgotten when the account changes or anyone signs out (in any tab), along with what the
+ * checker parsed, so the next account goes through the server's access check again.
  */
 const sources = new Map<string, { at: number; sources: Promise<Sources> }>();
 const DRAFT_FRESH_MS = 30_000;
+let cachedFor = accountToken();
+function forgetSources() {
+  sources.clear();
+  resetDataCheck();
+}
+onSignOut(forgetSources);
+
+/** The draft's Turtle and shapes from the same revision: read again if a merge landed between the two downloads. */
+async function draftSources(id: string): Promise<{ turtle: string; shapes: string }> {
+  for (let attempt = 0; ; attempt++) {
+    const [turtle, shapes] = await Promise.all([api.sourceWithRevision(id, 'turtle'), api.sourceWithRevision(id, 'shacl')]);
+    if (turtle.revision === shapes.revision || attempt >= 3) {
+      if (turtle.revision !== shapes.revision) throw new DataCheckError('The working draft kept changing while it was downloaded. Try again in a moment.');
+      return { turtle: turtle.text, shapes: shapes.text };
+    }
+  }
+}
+
 function versionSources(id: string, version: string, prefetch = false): Promise<Sources> {
+  const token = accountToken();
+  if (!token.account || !stillCurrent(cachedFor, token.account)) {
+    forgetSources();
+    cachedFor = token;
+  }
   const ref = version === 'draft' ? 'working' : version;
-  const key = `${id}|${ref}`;
+  const key = `${token.account ?? ''}|${id}|${ref}`;
   const draft = ref === 'working';
   const hit = sources.get(key);
   if (hit && (!draft || (!prefetch && Date.now() - hit.at < DRAFT_FRESH_MS))) {
@@ -46,12 +72,16 @@ function versionSources(id: string, version: string, prefetch = false): Promise<
     if (draft) sources.delete(key);
     return hit.sources;
   }
-  const fetched = Promise.all([api.source(id, 'turtle', ref), api.source(id, 'shacl', ref)]).then(([turtle, shapes]) => ({
-    // The worker reuses a parsed version only for exactly the same text.
-    key: draft ? `${key}|${hash(turtle)}|${hash(shapes)}` : key,
-    turtle,
-    shapes,
-  }));
+  const fetched = (draft ? draftSources(id) : Promise.all([api.source(id, 'turtle', ref), api.source(id, 'shacl', ref)]).then(([turtle, shapes]) => ({ turtle, shapes }))).then(({ turtle, shapes }) => {
+    // Downloaded for an account that has since signed out or changed: not for this session's eyes.
+    if (!token.account || !stillCurrent(token, token.account)) throw new DOMException('Cancelled', 'AbortError');
+    return {
+      // The worker reuses a parsed version only for exactly the same text.
+      key: draft ? `${key}|${hash(turtle)}|${hash(shapes)}` : key,
+      turtle,
+      shapes,
+    };
+  });
   if (!draft || prefetch) {
     sources.set(key, { at: Date.now(), sources: fetched });
     fetched.catch(() => sources.get(key)?.sources === fetched && sources.delete(key));
@@ -159,9 +189,10 @@ export function ValidateTab() {
   const [reading, setReading] = useState(false);
   // When the next automatic check runs: at once after a new version, format, file or example; after a pause in typing otherwise.
   const nextCheck = useRef<'now' | 'soon'>('now');
-  // Bumped by Ctrl/⌘-Enter to check straight away.
-  const [checkNow, setCheckNow] = useState(0);
-  const inFlight = useRef<{ controller: AbortController; started: number }>(undefined);
+  // Bumped by every invalidation and by Ctrl/⌘-Enter, so a check is always scheduled after one (even when the inputs end up the same).
+  const [generation, setGeneration] = useState(0);
+  // Checks still running, so a superseded long one can be stopped.
+  const inFlight = useRef(new Set<{ controller: AbortController; started: number }>());
 
   const text = file?.text ?? data;
   const format: DataFormat = picked === 'auto' ? (file && dataFormatForFile(file.name)) || sniffDataFormat(text) : picked;
@@ -221,6 +252,7 @@ export function ValidateTab() {
     loads.current++;
     setReading(false);
     nextCheck.current = when;
+    setGeneration((g) => g + 1);
     if (replaced) setReport(null);
   };
 
@@ -240,16 +272,16 @@ export function ValidateTab() {
     const t = setTimeout(() => void run(), delay);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run reads this render's inputs
-  }, [text, format, version, reading, checkNow]);
+  }, [text, format, version, reading, generation]);
 
   const run = async () => {
     const id = ++request.current;
     const snapshot = { text, format, version };
     // A long check for older inputs (a large file) is stopped; a quick one finishes and its answer is dropped.
-    const previous = inFlight.current;
-    if (previous && Date.now() - previous.started > 500) previous.controller.abort();
+    for (const previous of inFlight.current) if (Date.now() - previous.started > 500) previous.controller.abort();
     const controller = new AbortController();
-    inFlight.current = { controller, started: Date.now() };
+    const mine = { controller, started: Date.now() };
+    inFlight.current.add(mine);
     try {
       const { ms, ...result } = await checkHere(snapshot, false, controller.signal);
       if (id !== request.current) return;
@@ -261,7 +293,7 @@ export function ValidateTab() {
       // Data that can't be read yet (half typed) keeps the last report, faded, rather than losing it.
       if ((e as { status?: number }).status !== 400) setReport(null);
     } finally {
-      if (inFlight.current?.controller === controller) inFlight.current = undefined;
+      inFlight.current.delete(mine);
       if (id === request.current) setChecking(false);
     }
   };
@@ -422,7 +454,7 @@ export function ValidateTab() {
                 language={LANGUAGE[format]}
                 onRun={() => {
                   nextCheck.current = 'now';
-                  setCheckNow((n) => n + 1);
+                  setGeneration((g) => g + 1);
                 }}
                 ariaLabel="Data to validate"
                 placeholder="Paste Turtle, JSON-LD, N-Triples, N-Quads, TriG or RDF/XML, or drop a file here"

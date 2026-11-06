@@ -1,5 +1,6 @@
 import type { DataCheckOutcome } from '@concord/core/data-check';
 import type { DataFormat } from '@concord/core/data-formats';
+import { onSignOut } from './session';
 
 export interface DataCheckJob {
   /** Names the ontology version (and its exact text), so the worker can reuse what it parsed. */
@@ -25,14 +26,39 @@ let worker: Worker | undefined;
 let nextId = 0;
 /** An outcome, with how long the check itself took in the worker (parsing and checking, not the ontology download). */
 export type TimedOutcome = DataCheckOutcome & { ms: number };
-const pending = new Map<number, { resolve: (o: TimedOutcome) => void; reject: (e: Error) => void }>();
+type Pending = { job: DataCheckJob & { id: number }; resolve: (o: TimedOutcome) => void; reject: (e: Error) => void };
+const pending = new Map<number, Pending>();
 
+/** Stops the worker (and what it has parsed) and fails every check still waiting. */
 function stop(reason: Error) {
   worker?.terminate();
   worker = undefined;
   for (const p of pending.values()) p.reject(reason);
   pending.clear();
 }
+
+/**
+ * Ends one check. A worker can't be interrupted part way through a job, so if it is still busy the
+ * worker is replaced and the other checks waiting on it are sent to the new one; they never fail
+ * because of another check's time limit or cancellation.
+ */
+function cancel(id: number, reason: Error) {
+  const p = pending.get(id);
+  if (!p) return;
+  pending.delete(id);
+  p.reject(reason);
+  worker?.terminate();
+  worker = undefined;
+  if (!pending.size) return;
+  worker = start();
+  for (const other of pending.values()) worker.postMessage(other.job);
+}
+
+/** Forgets every parsed ontology: on signing out, so nothing one account could read stays in memory for the next. */
+export function resetDataCheck() {
+  stop(new DOMException('Cancelled', 'AbortError') as unknown as Error);
+}
+onSignOut(resetDataCheck);
 
 function start(): Worker {
   const w = new Worker(new URL('./dataCheckWorker.ts', import.meta.url), { type: 'module', name: 'sparq-data-check' });
@@ -49,25 +75,27 @@ function start(): Worker {
 
 /**
  * Checks data on this device, in a Web Worker kept between checks (so a version's ontology is
- * parsed once). Aborting, or running past `timeoutMs`, stops the worker; the next check starts a new one.
+ * parsed once). Aborting, or running past `timeoutMs`, ends this check alone (see cancel).
  */
 export function checkDataInBrowser(job: DataCheckJob, { signal, timeoutMs = 60_000 }: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<TimedOutcome> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(new DOMException('Cancelled', 'AbortError'));
     worker ??= start();
     const id = ++nextId;
-    const timer = setTimeout(() => stop(new DataCheckError(`Checking took longer than ${Math.round(timeoutMs / 1000)} s and was stopped. Try smaller data.`, 422)), timeoutMs);
-    const onAbort = () => stop(new DOMException('Cancelled', 'AbortError') as unknown as Error);
+    const timer = setTimeout(() => cancel(id, new DataCheckError(`Checking took longer than ${Math.round(timeoutMs / 1000)} s and was stopped. Try smaller data.`, 422)), timeoutMs);
+    const onAbort = () => cancel(id, new DOMException('Cancelled', 'AbortError') as unknown as Error);
     signal?.addEventListener('abort', onAbort, { once: true });
     const settle = () => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
     };
+    const message = { ...job, id };
     pending.set(id, {
+      job: message,
       resolve: (o) => (settle(), resolve(o)),
       reject: (e) => (settle(), reject(e)),
     });
-    worker.postMessage({ ...job, id });
+    worker.postMessage(message);
   });
 }
 

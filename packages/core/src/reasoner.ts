@@ -20,6 +20,7 @@ import type { OntologyGraph } from './graph.js';
 import { cloneStore, literal, nn, objects, readList } from './rdf.js';
 import type { Literal, Quad, Store, Term } from 'n3';
 import { writeNTriples } from './turtle.js';
+import { storeRevision } from './storeRevision.js';
 
 /** The ontology-only half of the structural reasoner: its classes, hierarchy, disjointness and unsatisfiable classes. */
 interface TBoxAnalysis {
@@ -248,8 +249,10 @@ export function dataConsistency(graph: OntologyGraph, data: Quad[]): Pick<Reason
     merged.store.addQuads(data);
     return structuralReasoner(merged);
   }
+  // Worked out again whenever the ontology changes at all (a replaced triple keeps the size the same).
+  const revision = storeRevision(graph.store);
   let hit = tboxes.get(graph);
-  if (!hit || hit.size !== graph.store.size) tboxes.set(graph, (hit = { size: graph.store.size, analysis: analyseTBox(graph) }));
+  if (!hit || hit.revision !== revision) tboxes.set(graph, (hit = { revision, analysis: analyseTBox(graph) }));
   const t = hit.analysis;
   // A triple in both counts as one either way: types and functional values are collected into sets.
   const all = [...graph.store.getQuads(null, null, null, null), ...data];
@@ -257,7 +260,7 @@ export function dataConsistency(graph: OntologyGraph, data: Quad[]): Pick<Reason
   notes.push(...t.tboxNotes);
   return { consistent, explanation: notes.length ? notes.join('\n') : undefined };
 }
-const tboxes = new WeakMap<OntologyGraph, { size: number; analysis: TBoxAnalysis }>();
+const tboxes = new WeakMap<OntologyGraph, { revision: number; analysis: TBoxAnalysis }>();
 
 /* ------------------------------------------------------------------------ */
 /* OWL 2 DL reasoner: sparq (WebAssembly)                                     */

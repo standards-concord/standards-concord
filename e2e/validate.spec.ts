@@ -244,6 +244,50 @@ test.describe('Validate data', () => {
     await expect(page.getByTestId('validate-editor')).not.toContainText('only-in-the-file');
   });
 
+  // Used to go wrong: the version's ontology, once downloaded, was kept for the rest of the visit, even
+  // after signing out, so the next account to sign in on this tab checked against it without the server
+  // being asked whether they may read it (a version held for review is readable only by its group).
+  test('after signing out, the next account downloads the ontology again', async ({ page }) => {
+    await page.goto('/o/volunteering/validate');
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    // Sign out from the account menu, without reloading the page.
+    await page.getByRole('button', { name: /E2E validator/ }).click();
+    await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
+    await expect(page).toHaveURL(/\/login/);
+    const downloads: string[] = [];
+    page.on('request', (r) => {
+      if (/\/api\/ontologies\/[^/]+\/source\?.*ref=1\.0\.0/.test(r.url())) downloads.push(r.url());
+    });
+    await page.evaluate(() => {
+      history.pushState({}, '', '/o/volunteering/validate');
+      dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await page.getByRole('button', { name: 'Try the demo' }).click();
+    await expect(page).toHaveURL(/\/o\/volunteering\/validate$/);
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    expect(downloads.length).toBeGreaterThan(0);
+  });
+
+  // Used to go wrong: choosing "Turtle" when the format was already detected as Turtle dropped the
+  // check under way and never started another, so the page said "Checking…" for good.
+  test('choosing the format it already detected still checks', async ({ page }) => {
+    await page.goto('/o/volunteering/validate?version=draft');
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    // Hold the next check (it downloads the draft again) so the choice is made while it runs.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(/\/api\/ontologies\/[^/]+\/source\?.*ref=working/, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await setEditor(page, `@prefix vol: <${VOL}> .\n<https://example.org/r> a vol:Role .\n`);
+    await expect(page.getByTestId('validate-status')).toHaveText('Checking…');
+    await page.getByLabel('Data format').selectOption('turtle');
+    release();
+    await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);
+    await expect(page.getByTestId('validation-verdict')).toContainText('Conforms to the shapes');
+  });
+
   test('explains data it cannot read', async ({ page }) => {
     await page.goto('/o/volunteering/validate');
     await expect(page.getByTestId('validate-status')).toHaveText(/^Checked in/);

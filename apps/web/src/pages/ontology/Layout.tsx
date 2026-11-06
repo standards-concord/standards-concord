@@ -174,6 +174,24 @@ export function OntologyLayout() {
   const { session } = useSession();
   const state = useAsync(() => api.ontology(id), [id]);
   const view = useAsync(() => api.view(id, 'working'), [id]);
+  // Pages read terms from this view rather than asking the server each time, so it is refreshed in
+  // the background (the page keeps showing the copy it has meanwhile): when you move to another
+  // section, since a change may have been merged there, and when you come back to the tab.
+  const { pathname } = useLocation();
+  const section = pathname.split('/')[3] ?? '';
+  const reloadView = view.reload;
+  const seenSection = useRef(section);
+  useEffect(() => {
+    if (seenSection.current === section) return;
+    seenSection.current = section;
+    void reloadView();
+  }, [section, reloadView]);
+  useEffect(() => {
+    const onFocus = () => void reloadView();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [reloadView]);
+  const reloadAll = useMemo(() => async () => void (await Promise.all([state.reload(), reloadView()])), [state.reload, reloadView]);
 
   const ctx = useMemo<OntologyCtx | undefined>(() => {
     const o = state.data;
@@ -186,14 +204,14 @@ export function OntologyLayout() {
     return {
       id,
       ontology: o,
-      reload: state.reload,
+      reload: reloadAll,
       view,
       label: makeLabeler(view.data),
       myRoles,
       userById: (uid2?: string) => (uid2 ? users.get(uid2) : undefined),
       hasRole: (...roles: Role[]) => roles.some((r) => myRoles.includes(r)) || !!session?.user?.isPlatformAdmin,
     };
-  }, [state.data, state.reload, view, id, session?.user?.id, session?.user?.isPlatformAdmin]);
+  }, [state.data, reloadAll, view, id, session?.user?.id, session?.user?.isPlatformAdmin]);
 
   // No context for this ontology and its request has failed (even if a previous ontology's data
   // is still held): show the error with Retry rather than loading forever.

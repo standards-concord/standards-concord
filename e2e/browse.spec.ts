@@ -196,6 +196,26 @@ test.describe('moving around the ontology is instant', () => {
     expect(asked).toEqual([]);
     await expectNoCrash(page);
   });
+
+  // Term details come from the page's copy of the ontology. A change merged elsewhere (say on
+  // Changes) used to stay invisible in Browse until a full reload, because that copy was only
+  // fetched when the ontology was opened. Now moving to another section refreshes it.
+  test('after visiting another section, Browse shows the current draft', async ({ page }) => {
+    await page.goto(`${base}?term=${encodeURIComponent(`${VOL}Skill`)}`);
+    await settle(page);
+    await expect(page.getByRole('heading', { level: 2, name: 'skill' })).toBeVisible();
+    // Stand in for a merge: from now on the draft's view names Skill differently.
+    await page.route(/\/api\/ontologies\/[^/]+\/view(\?|$)/, async (route) => {
+      const res = await route.fetch();
+      const v = (await res.json()) as { classes: { iri: string; label?: string }[] };
+      for (const c of v.classes) if (c.iri === `${VOL}Skill`) c.label = 'competence';
+      await route.fulfill({ response: res, json: v });
+    });
+    await page.getByRole('navigation', { name: 'Explore pages' }).getByRole('link', { name: 'Validate data' }).click();
+    await expect(page.getByTestId('validate-status')).toBeVisible();
+    await page.goBack();
+    await expect(page.getByRole('heading', { level: 2, name: 'competence' })).toBeVisible();
+  });
 });
 
 test.describe('class diagram', () => {

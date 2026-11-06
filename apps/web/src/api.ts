@@ -260,6 +260,15 @@ export const api = {
     `/api/ontologies/${e(id)}/source${qs({ format, ref, download: download ? 1 : undefined })}`,
   source: (id: string, format: OutputFormat, ref = 'working') =>
     request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format, ref })}`, undefined, { raw: true }),
+  /** A version's source, with the working draft's revision when the server says it (signed in). */
+  sourceWithRevision: async (id: string, format: OutputFormat, ref = 'working') => {
+    let revision: string | undefined;
+    const text = await request<string>('GET', `/api/ontologies/${e(id)}/source${qs({ format, ref })}`, undefined, {
+      raw: true,
+      onHeaders: (h) => (revision = h.get('X-Concord-Revision') ?? undefined),
+    });
+    return { text, revision };
+  },
   /** The working draft as Turtle, with the revision it is (to compare with a validation report). */
   workingTurtle: async (id: string) => {
     let revision: string | undefined;

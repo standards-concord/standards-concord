@@ -163,12 +163,24 @@ export function useSession() {
  * signed out at once rather than asking the server while it may still say
  * otherwise. The query drafts and assistant chats are what is cleared.
  */
+/** Called on signing out, in this tab, to drop anything kept in memory that only the account signing out could read. */
+const signOutListeners = new Set<() => void>();
+export function onSignOut(fn: () => void): () => void {
+  signOutListeners.add(fn);
+  return () => signOutListeners.delete(fn);
+}
+function notifySignOut() {
+  for (const fn of signOutListeners) fn();
+}
+
 export function beginSignOut(userId: string) {
   activeAccount = undefined;
   clearDrafts(userId);
+  notifySignOut();
 }
 export function finishSignOut(userId: string) {
   activeAccount = undefined;
+  notifySignOut();
   try {
     localStorage.setItem(SIGN_OUTS, String(Number(signOuts()) + 1));
   } catch {
