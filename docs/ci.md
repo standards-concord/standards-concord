@@ -7,9 +7,9 @@ GitHub Actions minutes are free and unlimited on a public repository, but metere
 | Event | What runs | Roughly |
 | --- | --- | --- |
 | Push to a branch with no PR | nothing | 0 min |
-| Push to a draft PR | `test` (typecheck, unit tests, build, listing checks) | 4 min |
-| PR marked ready for review, and every push after | `test`, `e2e` (dev and preview), `walkthrough` | 20 min |
-| Push to `main` | all of the above, then `image` (backend deploy) | 25 min |
+| Push to a draft PR | `test` (typecheck, unit tests, build, listing checks) | 14 min |
+| PR marked ready for review, and every push after | `test`, `e2e` (dev and preview), `walkthrough` | 25 min |
+| Push to `main` | all of the above, then `image` (backend deploy) | 30 min |
 | Vercel production deploy | `Live site` smoke test | 2 min |
 | Only `docs/`, `deploy/` or Markdown changed (outside `walkthrough/`) | nothing | 0 min |
 | `deploy/azure/set-key*` changed | `Deploy scripts` (checks the key never reaches a command line) | under 1 min |
@@ -20,7 +20,7 @@ Other savings:
 
 - **Concurrency.** A newer push to a PR cancels the run it replaces. `main` never cancels, so the backend image always reaches the server (see the comment in [ci.yml](../.github/workflows/ci.yml)).
 - **Caches.** pnpm's store, Playwright's Chromium (per Playwright version), the Python toolkit's virtualenv and the MCP Registry publisher binary are cached, so a job spends its minutes on tests rather than downloads. The shared steps live in [.github/actions/setup](../.github/actions/setup/action.yml).
-- **Timeouts.** Every job has one, so a hung server can't burn hours.
+- **Timeouts.** Every job has one, so a hung server can't burn hours. Each leaves about half again the job's usual time (`test` 25 min, `e2e` 40, `walkthrough` 25), so a slow runner doesn't cancel a run whose tests all pass. Raise them when a job's usual time creeps up.
 - **Vercel.** Only `main` deploys (`git.deploymentEnabled`), and [scripts/vercel-ignore-build.sh](../scripts/vercel-ignore-build.sh) skips the build when nothing the web app or the routing middleware uses has changed since the last deployment. Server-only changes reach the backend through the CI image, not Vercel. CI tests the production build of every ready PR (`E2E_MODE=preview`), so preview links aren't needed; to get one anyway, use **Redeploy** or **Deploy** from the Vercel dashboard.
 
 ## Working with it

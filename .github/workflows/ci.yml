@@ -48,9 +48,12 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Timeouts leave about half again the usual run time, so a slow runner doesn't cancel a
+  # passing run (test takes about 14 minutes, e2e (dev) about 23, walkthrough up to 15 when
+  # apt is slow). They are still there so a hung server can't burn hours.
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     # A real Postgres server for the document store's tests (apps/server/test/store.test.ts): the only back end
     # whose locking across separate connections matches Neon in production.
     services:
@@ -118,7 +121,7 @@ jobs:
   e2e:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -148,6 +151,7 @@ jobs:
   # real Community Solid Server (the same major version and WAC setup the deployment runs).
   e2e-solid:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -174,7 +178,7 @@ jobs:
   walkthrough:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
