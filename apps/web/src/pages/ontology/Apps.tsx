@@ -81,7 +81,7 @@ function SetupSteps({ app, token }: { app: ConnectedApp; token?: string }) {
         <p className="mb-2 text-muted">
           Change <code className="font-mono">npm ci</code> and <code className="font-mono">npm test</code> to however your app installs and tests itself. Each run tests the working draft, then each open change that it hasn’t tested yet.
         </p>
-        <CodeBlock code={yaml} maxHeight={360} />
+        <CodeBlock code={yaml} language="yaml" ariaLabel="Workflow file" maxHeight={360} />
         {repoUrl && (
           <a
             className="mt-1 inline-flex items-center gap-1 text-accent hover:underline"

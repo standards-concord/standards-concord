@@ -53,6 +53,23 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.33.0',
+    date: '2026-11-06',
+    title: 'Coloured workflow file for app checks',
+    pr: PRNUM,
+    changes: [
+      {
+        id: 'app-checks-yaml-highlight',
+        type: 'feat',
+        title: 'The app checks workflow file is colour-coded',
+        detail:
+          'When you connect an app, the workflow file to add to its repository is now syntax-highlighted like the rest of Concord’s code, so its settings, values and comments are easier to tell apart.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
+      },
+    ],
+  },
+  {
     version: '0.32.0',
     date: '2026-11-05',
     title: 'Less to read on every page',

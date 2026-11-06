@@ -113,6 +113,12 @@ test.describe('app checks', () => {
     const token = (await page.getByTestId('app-token').innerText()).trim();
     expect(token).toMatch(/^cna_/);
     await expect(page.getByText('standards-concord/standards-concord/actions/app-check@main')).toBeVisible();
+    // The workflow is syntax-highlighted as YAML: keys, strings and comments get their own colours.
+    const workflow = page.getByLabel('Workflow file');
+    await expect(workflow).toHaveAttribute('data-language', 'yaml');
+    await expect(workflow.locator('.tok-attr', { hasText: /^jobs$/ })).toBeVisible();
+    await expect(workflow.locator('.tok-string', { hasText: '*/30 * * * *' })).toBeVisible();
+    await expect(workflow.locator('.tok-comment').first()).toBeVisible();
     await expect(page.getByRole('link', { name: /Create it in example\/family-finder/ })).toHaveAttribute('href', /github\.com\/example\/family-finder\/new\/main\?filename=/);
     await expect(page.getByRole('link', { name: /Open example\/family-finder’s secrets/ })).toBeVisible();
 
