@@ -139,6 +139,19 @@ describe('RDF highlighting', () => {
     expect(comments('echo a #real')).toEqual(['#real']);
     expect(comments('echo a;#real')).toEqual(['#real']);
     expect(comments('# whole line')).toEqual(['# whole line']);
+    // A backslash-newline joins the lines: foo\ then #bar is the one word foo#bar, but a space before the backslash ends the word.
+    expect(comments('echo foo\\\n#bar')).toEqual([]);
+    expect(comments('echo foo \\\n#bar')).toEqual(['#bar']);
+    expect(comments('echo foo\\\n  #bar')).toEqual(['#bar']);
+  });
+
+  it('shell: a flag stays a flag with its value quoted straight after it', () => {
+    const segs = highlightSegments("curl -H'Content-Type: text/turtle' -d\"x\"", 'shell');
+    expect(segs.find((s) => s.text === '-H')?.cls).toBe('tok-attr');
+    expect(segs.find((s) => s.text === "'Content-Type: text/turtle'")?.cls).toBe('tok-string');
+    expect(segs.find((s) => s.text === '-d')?.cls).toBe('tok-attr');
+    // A command split over lines: after a pipe and a continuation, the next word is still a command.
+    expect(highlightSegments('echo a |\\\n  cat', 'shell').find((s) => s.text === 'cat')?.cls).toBe('tok-func');
   });
 
   it('shell: URLs and @files stop at operators and backslashes', () => {

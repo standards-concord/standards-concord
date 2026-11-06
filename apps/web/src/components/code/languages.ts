@@ -247,16 +247,20 @@ const shellParser: StreamParser<ShellState> = {
       return 'string';
     }
     if (stream.sol()) {
-      state.command = !state.continued;
+      // A continued line keeps the word boundary and command position from before the backslash (foo\ then #bar is foo#bar).
+      if (!state.continued) {
+        state.command = true;
+        state.wordStart = true;
+      }
       state.continued = false;
-      state.wordStart = true;
     }
     if (stream.eatSpace()) {
       state.wordStart = true;
       return null;
     }
     const wordStart = state.wordStart;
-    const command = state.command && wordStart;
+    const commandBefore = state.command;
+    const command = commandBefore && wordStart;
     state.command = false;
     state.wordStart = false;
     const ch = stream.peek();
@@ -269,7 +273,8 @@ const shellParser: StreamParser<ShellState> = {
       stream.next();
       if (stream.eol()) {
         state.continued = true;
-        state.wordStart = true;
+        state.wordStart = wordStart;
+        state.command = commandBefore;
         return 'punct';
       }
       stream.next();
@@ -288,7 +293,7 @@ const shellParser: StreamParser<ShellState> = {
     if (stream.match(/^\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)/)) return 'variable';
     if (wordStart) {
       if (stream.match(SHELL_URL)) return 'iri';
-      if (stream.match(/^--?[A-Za-z0-9][\w-]*(?=[\s=|;&]|$)/)) return 'flag';
+      if (stream.match(/^--?[A-Za-z0-9][\w-]*(?=[\s=|;&'"]|$)/)) return 'flag';
       if (stream.match(SHELL_FILE)) return 'variable';
     }
     if (stream.match(SHELL_WORD)) {
