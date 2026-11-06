@@ -579,6 +579,29 @@
   }
 }
 
+/*
+ * Avatar role rings (Avatar's `roles`, RoleRingLegend): owners in the amber of the owner's crown,
+ * the steward (who chairs) in the accent, ODI oversight in purple; RoleChips use the same colours.
+ * They reuse each look's own tokens, so they follow its palette and contrast (e2e/looks.spec.ts
+ * checks the rings at 3:1 and the ODI chip at 4.5:1).
+ */
+:root {
+  --role-owner: var(--warn);
+  --role-steward: var(--accent);
+  --role-odi: var(--syn-keyword);
+  /* The ODI oversight role chip's background (owner and steward chips use warn-soft and accent-soft). */
+  --role-odi-soft: color-mix(in srgb, var(--role-odi) 12%, var(--surface));
+}
+/* Civic's purple slot is a red-orange, too close to its amber, so ODI oversight is blue there. */
+[data-look='civic'] {
+  --role-odi: #1f4fe0;
+}
+@media (prefers-color-scheme: dark) {
+  [data-look='civic'] {
+    --role-odi: #8fb0ff;
+  }
+}
+
 @theme inline {
   --font-sans: var(--font-body);
   --font-mono: var(--font-code);
