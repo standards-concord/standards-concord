@@ -53,6 +53,24 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.41.4',
+    date: '2026-11-07',
+    title: 'Tidier “Validate from your own code”',
+    pr: 104,
+    changes: [
+      {
+        id: 'validate-api-help-tidy',
+        type: 'fix',
+        title: 'The curl examples on Validate data are highlighted and line up',
+        detail:
+          'In Validate data’s “Validate from your own code” section, the curl examples are now syntax-highlighted like the rest of Concord’s code, each in one box with its own copy button, and the section no longer runs into the card’s edges. The key facts (address, body, answer, status, limits) are a short list instead of one long paragraph.',
+        roles: ['contributor', 'member', 'agent'],
+        to: '{o}/validate',
+        ask: 'Are the examples easy to read and copy?',
+      },
+    ],
+  },
+  {
     version: '0.41.3',
     date: '2026-11-07',
     title: 'Sections you have opened come back at once',
