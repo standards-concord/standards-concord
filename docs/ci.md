@@ -39,13 +39,15 @@ scripts/ci-local.sh --report      # test, e2e-dev, e2e-preview, e2e-solid, walkt
 scripts/ci-local.sh e2e-dev       # or just some jobs, without posting anything
 ```
 
-The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. A full run takes about 13 minutes in a 4-CPU Claude sandbox (it took an hour before these changes):
+The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. A full run takes about 10 minutes in a 4-CPU Claude sandbox (it took an hour before these changes), with the CPUs about 93% busy, so on that machine it is now limited by the total work rather than by waiting:
 
-- Jobs run side by side (`--parallel`, one per CPU by default), and the browser suite is split into three shards (`--shards`), each with its own API server, web server, data directory and ports, so no two share state.
+- Jobs run side by side (`--parallel`, one and a half per CPU by default), and the browser suite is split into six shards (`--shards`) of similar length, using the times in [e2e/timings.json](../e2e/timings.json) (`--update-timings` refreshes them). Each shard has its own API server, web server, data directory and ports, so no two share state. More than one and a half pieces per CPU starves the unit tests, whose timing checks then fail.
+- The unit tests start first and keep normal priority, one package's test runner at a time; the browser pieces run at low priority and use the CPU left over. The summary shows each piece's CPU time.
 - The web app is built once, up front.
 - As in CI, the production build gets the whole browser suite and the Vite dev server a smoke test (`pnpm test:e2e:smoke`: the pages, the alpha walkthrough, the reasoner and Validate data). Running all ~490 tests against both took 24 minutes more and caught little: what breaks in only one of them almost always breaks the build.
 - The server's test files run in parallel, each worker with its own Postgres database (apps/server/test/setup.ts).
-- `settle()` in the browser tests waits until the page has no request in flight for 150 ms, instead of Playwright's `networkidle`, which always waits out 500 ms and took about 40% of a typical test.
+- `settle()` in the browser tests waits until the page has no request in flight for 150 ms, instead of Playwright's `networkidle`, which always waits out 500 ms and took about 40% of a typical test. Requests the previous page still had in flight stop counting when a new page loads (Playwright doesn't always report their end, and each one used to cost every later page 10 s).
+- In CI, a browser test's trace and video are recorded only when it is retried after a failure. Recording every test and throwing the recording away when it passed took about half the browser tests' CPU.
 
 With `--report` it records the result for the commit it tested, and refuses to run with uncommitted changes, so the record always describes exactly that commit:
 
