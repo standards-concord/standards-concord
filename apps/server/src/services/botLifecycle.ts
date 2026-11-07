@@ -5,6 +5,7 @@ import { newId, newToken } from '../ids.js';
 import { dropMeeting, emit, finishCall, meetingLock, saveMeeting } from './meetings.js';
 import { BookingError, IDEMPOTENCY_KEY_MS, recall } from './recall.js';
 import { keepAlive } from '../keepAlive.js';
+import { withLease } from '../lease.js';
 
 /**
  * Each meeting's Recall.ai bot is one record (`meeting.bot`) with one state machine:
@@ -30,7 +31,7 @@ import { keepAlive } from '../keepAlive.js';
  *   it has finished or doesn't exist, or definitively refused the booking; or a
  *   facilitator dismissed a booking that can no longer be checked.
  * - A withdrawn meeting is only deleted once its record has settled.
- * - Requests for one meeting go one at a time, in its lane; lanes run side by side.
+ * - Requests for one meeting go one at a time, in its lane (on one instance: see leased); lanes run side by side.
  */
 
 type Bot = NonNullable<Meeting['bot']>;
@@ -276,6 +277,16 @@ const lanes = new Map<string, Promise<void>>();
 const queued = new Map<string, Promise<void>>();
 const extra = new Set<Promise<unknown>>();
 
+/**
+ * A lane's requests on one instance at a time: each instance (Vercel function) has lanes of its own, so the lane
+ * also holds a lease in the database. If another instance is driving the meeting, this run is left out; whatever
+ * that one didn't get to is picked up by the next sweep (on a later request, or the daily cron). Not a fence, and
+ * it needn't be: every step is a compare-and-set on the record and every request to Recall.ai is idempotent, so a
+ * run that overruns its lease only repeats a request.
+ */
+export const LANE_LEASE_MS = 2 * MINUTE;
+const leased = (id: string, fn: () => Promise<unknown>) => withLease(`bot-lane:${id}`, LANE_LEASE_MS, fn, { wait: false }).then(() => undefined);
+
 /** Work started but not waited for (analysis after a bot left, say). */
 export function background<T>(p: Promise<T>) {
   keepAlive(p);
@@ -318,7 +329,7 @@ export function driveStrays(id: string, skip?: Set<string>): Promise<void> {
     strayQueued.set(id, keepAlive(next));
     return next;
   }
-  const run = cancelStrays(id, undefined, skip)
+  const run = leased(id, () => cancelStrays(id, undefined, skip))
     .catch((err) => console.warn(`[meet-bot] ${id}: ${(err as Error).message}`))
     .finally(() => lanes.delete(id));
   // Kept running after the response or scheduled run that started it (Vercel's waitUntil): a lane is a request to Recall.ai.
@@ -344,7 +355,7 @@ export function drive(id: string, now?: number): Promise<void> {
     queued.set(id, keepAlive(next));
     return next;
   }
-  const run = work(id, now)
+  const run = leased(id, () => work(id, now))
     .catch((err) => console.warn(`[meet-bot] ${id}: ${(err as Error).message}`))
     .finally(() => lanes.delete(id));
   // Kept running after the response or scheduled run that started it (Vercel's waitUntil): a lane is a request to Recall.ai.

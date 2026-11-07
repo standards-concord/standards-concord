@@ -5,6 +5,7 @@ import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { transaction, get, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
+import { withLease } from '../lease.js';
 import { withLock } from '../locks.js';
 import { parseCancellations, parseOccurrences, type CalendarOccurrence } from './calendarFeed.js';
 import { findProject } from './ontologies.js';
@@ -402,15 +403,37 @@ async function applyCancellations(project: OntologyProject, cancelled: { uids: s
   return steps;
 }
 
+/**
+ * Changes to the set of calendar calls (a sync, an import) one at a time: a lock in this process, and a lease in the
+ * database for the other instances (Vercel functions), so two of them can't both add the same call. The body is
+ * reads and writes only (requests to Recall.ai run afterwards, see Finish), so it finishes well inside the lease.
+ * With `wait: false`, undefined at once if another instance holds it.
+ */
+export const CALENDAR_LEASE_MS = 60_000;
+function calendarLock<T>(fn: () => Promise<T>): Promise<T>;
+function calendarLock<T>(fn: () => Promise<T>, opts: { wait: false }): Promise<T | undefined>;
+function calendarLock<T>(fn: () => Promise<T>, opts?: { wait: false }): Promise<T | undefined> {
+  return withLock('meet-bot:calendar', () => (opts ? withLease('meet-bot:calendar', CALENDAR_LEASE_MS, fn, opts) : withLease('meet-bot:calendar', CALENDAR_LEASE_MS, fn)));
+}
+
 /** Re-reads the bot's calendar. Without MEET_BOT_ICS_URL this does nothing. */
 export async function syncCalendar(now = new Date()): Promise<MeetBotInfo['lastSync']> {
   const url = config.meetBot.calendarIcsUrl;
   if (!url) return undefined;
   const later: Finish[] = [];
-  const result = await withLock('meet-bot:calendar', async () => {
+  // Read before taking the calendar lease, so a slow feed never holds it.
+  let occs: CalendarOccurrence[] | undefined;
+  let failure: string | undefined;
+  try {
+    occs = parseOccurrences(await readFeed(url), { from: new Date(now.getTime() - OVERRUN_MAX_MS), to: new Date(now.getTime() + HORIZON_MS) });
+  } catch (err) {
+    failure = (err as Error).message;
+  }
+  // Another instance syncing right now does this round.
+  const result = await calendarLock(async () => {
     let state: SyncState;
     try {
-      const occs = parseOccurrences(await readFeed(url), { from: new Date(now.getTime() - OVERRUN_MAX_MS), to: new Date(now.getTime() + HORIZON_MS) });
+      if (!occs) throw new Error(failure);
       await reconcile(occs, 'calendar', { now }, later);
       state = { at: now.toISOString(), ok: true, events: occs.filter((o) => o.meetingUrl && (!config.meetBot.inviteEmail || botAttendee(o))).length };
     } catch (err) {
@@ -419,7 +442,11 @@ export async function syncCalendar(now = new Date()): Promise<MeetBotInfo['lastS
     }
     await put('kv', { id: SYNC_KEY, ...state });
     return state;
-  });
+  }, { wait: false });
+  if (!result) {
+    const last = await get<SyncState & { id: string }>('kv', SYNC_KEY);
+    return last ? { at: last.at, ok: last.ok, events: last.events, error: last.error } : undefined;
+  }
   // Beside the bookings, never holding them (or the calendar) up.
   for (const step of later) void background(step());
   return result;
@@ -444,7 +471,7 @@ export async function scheduleFromInvite(project: OntologyProject, user: User, i
   if (!occs.length && !cancels) throw new HttpError(400, 'That invite has no calls in the next two weeks.');
   if (occs.length && !occs.some((o) => o.meetingUrl)) throw new HttpError(400, 'That invite has no Google Meet link.');
   const later: Finish[] = [];
-  const { touched, steps } = await withLock('meet-bot:calendar', async () => ({
+  const { touched, steps } = await calendarLock(async () => ({
     steps: cancels ? await applyCancellations(project, cancelled) : [],
     touched: occs.length ? await reconcile(occs, 'upload', { now, project, actor: user, postPromptsToChat: opts.postPromptsToChat }, later) : [],
   }));
@@ -564,18 +591,22 @@ export async function planApproved(ids: string[], now = new Date()) {
 /** Resolves once every call's lane, and work started in the background, has finished. For tests and shutdown. */
 export const meetBotIdle = lanesIdle;
 
-let lastSyncAt = 0;
 let ticking = false;
+
+/** Whether the calendar is due a re-read: by the last sync any instance recorded, not this one's memory. */
+async function syncDue(now: Date) {
+  const last = await get<SyncState & { id: string }>('kv', SYNC_KEY);
+  const age = now.getTime() - (last ? Date.parse(last.at) : NaN);
+  // A sync recorded "in the future" (the clock was moved back, or no sync yet) doesn't hold the next one back.
+  return !(age >= 0 && age < config.meetBot.calendarPollMs - 1000);
+}
 
 /** Runs every minute from the server's clock loop. Overlapping ticks are skipped. */
 export async function meetBotTick(now = new Date()) {
   if (ticking) return;
   ticking = true;
   try {
-    if (config.meetBot.calendarIcsUrl && now.getTime() - lastSyncAt >= config.meetBot.calendarPollMs - 1000) {
-      lastSyncAt = now.getTime();
-      await syncCalendar(now);
-    }
+    if (config.meetBot.calendarIcsUrl && (await syncDue(now))) await syncCalendar(now);
     // Requests to Recall.ai run in each call's own lane, beside the tick rather than inside it.
     await dispatchDue(now, { wait: false });
   } finally {

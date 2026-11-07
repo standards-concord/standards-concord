@@ -294,6 +294,31 @@ describe('invite-by-email', () => {
     expect(await calendarMeetings()).toEqual([]);
   });
 
+  // On Vercel each function instance had its own lanes and its own calendar lock, so two instances could add the
+  // same call from the calendar, or send its bookings, at once. Each now holds a lease in the database too.
+  it('leaves the calendar, or a call’s bookings, to another server already dealing with them, and picks them up afterwards', async () => {
+    writeFeed(oneOff({ start: '2026-11-14T15:00:00Z', end: '2026-11-14T16:00:00Z', bot: 'concord.bot+volunteering@example.org' }));
+    await put('kv', { id: 'lease:meet-bot:calendar', token: 'another-server', until: Date.now() + 60_000 });
+    await syncNow(at('2026-11-14T09:00:00Z'));
+    expect(await calendarMeetings()).toEqual([]);
+    await remove('kv', 'lease:meet-bot:calendar');
+    await sync(at('2026-11-14T09:01:00Z'));
+    const [m] = await calendarMeetings();
+    expect(m.calendar?.start).toBe('2026-11-14T15:00:00.000Z');
+
+    await put('kv', { id: `lease:bot-lane:${m.id}`, token: 'another-server', until: Date.now() + 60_000 });
+    calls.length = 0;
+    await dispatchDue(at('2026-11-14T14:46:00Z'));
+    expect(calls).toEqual([]);
+    await remove('kv', `lease:bot-lane:${m.id}`);
+    await dispatchDue(at('2026-11-14T14:47:00Z'));
+    expect(calls).toEqual([expect.objectContaining({ method: 'POST', url: '/bot/', body: expect.objectContaining({ join_at: '2026-11-14T15:00:00.000Z' }) })]);
+    expect((await getMeeting(m.id)).bot?.botId).toBe(`bot-${nextBot}`);
+    writeFeed();
+    await sync(at('2026-11-14T14:50:00Z'));
+    expect(await calendarMeetings()).toEqual([]);
+  });
+
   it('goes live when the call starts, keeps prompts out of the chat unless asked, and ends after the call', async () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-10T14:00:00Z'));
@@ -914,13 +939,17 @@ describe('invite-by-email', () => {
   it('a skip that lands just before a transcript line wins: the line is dropped', async () => {
     const m = await liveCall();
     const { meetingLock } = await import('../src/services/meetings.js');
-    // Hold the meeting's lock, queue the webhook behind it, then mark the call skipped before releasing.
+    // The skip holds the meeting's lock (and so the database's writer lock) when the webhook arrives: the webhook
+    // queues behind it, and the call is marked skipped before the lock is let go.
     let release!: () => void;
-    const held = meetingLock(m.id, () => new Promise<void>((r) => (release = r)));
+    const go = new Promise<void>((r) => (release = r));
+    const held = meetingLock(m.id, async () => {
+      await go;
+      const fresh = await getMeeting(m.id);
+      await saveMeeting({ ...fresh, calendar: { ...fresh.calendar!, skip: true } });
+    });
     const hook = line(m.id, 'Arrives during the skip.', m.bot!.botId);
     await new Promise((r) => setTimeout(r, 20));
-    const fresh = await getMeeting(m.id);
-    await saveMeeting({ ...fresh, calendar: { ...fresh.calendar!, skip: true } });
     release();
     await held;
     await hook;

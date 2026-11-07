@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, Role, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { transaction, get, HttpError, list, mustGet, put, remove } from '../db.js';
+import { transaction, get, HttpError, inTransaction, list, mustGet, put, remove } from '../db.js';
 import { newId, newToken } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { FACILITATOR, MEETING_ANALYST } from '../llm/prompts.js';
@@ -23,13 +23,15 @@ export const saveMeeting = async (m: Meeting) => await put('meetings', m, m.onto
 const save = saveMeeting;
 
 /**
- * Serialises changes to one meeting (bookings, webhooks, posting, skipping), within this process. That is enough
- * while the backend is one server (the VM). Known limit: on several instances (Vercel Functions) two of them could
- * still interleave a meeting's read and write, so before the backend runs there, every meetingLock and the
- * calendar lock must also hold the database's writer lock (a transaction) for their read-modify-write. See
- * docs/deploy.md, "Before the backend runs on more than one instance".
+ * Serialises changes to one meeting (bookings, webhooks, posting, skipping). The body runs in a database
+ * transaction, which holds the store's one writer lock, so its read-modify-write is atomic across every instance
+ * (each Vercel function instance has locks of its own); the lock in this process only queues this instance's
+ * callers so they don't all wait on the database. Keep the body to reads and writes: nothing over the network.
+ * Called inside a transaction already, it runs straight away: the writer lock is held, so no other holder is
+ * mid-way, and waiting for this process's lock there could deadlock against a holder waiting for the writer lock.
  */
-export const meetingLock = <T>(id: string, fn: () => Promise<T> | T) => withLock(`meeting:${id}`, fn);
+export const meetingLock = <T>(id: string, fn: () => Promise<T> | T): Promise<T> =>
+  inTransaction() ? Promise.resolve().then(fn) : withLock(`meeting:${id}`, () => transaction(fn));
 
 /** Applies a change to the latest stored copy of a meeting, under its lock, so concurrent updates aren't lost. */
 export function mutateMeeting(id: string, change: (m: Meeting) => void): Promise<Meeting> {
@@ -204,33 +206,69 @@ export function parseTranscript(raw: string): TranscriptLine[] {
 /* Analysis                                                                  */
 /* ------------------------------------------------------------------------ */
 
+/** How long one run may take to analyse a call before another may take it over (its server died, say). */
+export const ANALYSIS_CLAIM_MS = 10 * 60_000;
+/** Being analysed by a run that is still within its claim. */
+export const analysing = (m: Meeting) => m.status === 'processing' && (m.analysisClaim?.until ?? 0) > Date.now();
+
+/**
+ * Analyses a call once. The run claims it on the record (any server instance sees the claim), so a second ask
+ * while it runs gets the call as it is; a claim whose run died lapses after ANALYSIS_CLAIM_MS, and only the run
+ * holding the claim saves its result.
+ */
 export async function analyseMeeting(m: Meeting): Promise<Meeting> {
   m = await getMeeting(m.id);
   if (botActive(m) || botOutstanding(m)) throw new HttpError(409, 'The bot may still be in the call. End the call first.');
   if (!m.transcript.length) throw new HttpError(409, 'The transcript is empty');
   const project = await getProject(m.ontologyId);
+  const token = newToken();
+  let claimed = false;
+  let was: Meeting['status'] = m.status;
   m = await mutateMeeting(m.id, (x) => {
+    if (analysing(x)) return;
+    was = x.status === 'processing' ? 'error' : x.status;
     x.status = 'processing';
+    x.analysisClaim = { token, until: Date.now() + ANALYSIS_CLAIM_MS };
+    claimed = true;
   });
+  if (!claimed) return m;
   emit(m, { type: 'status', status: m.status });
-  const graph = await ontologyStore.working(project);
-  const { value } = await llm.json<MeetingAnalysis>({
-    task: 'meeting-analysis',
-    system: MEETING_ANALYST,
-    schema: MeetingAnalysisSchema as never,
-    maxTokens: 20000,
-    messages: [
-      {
-        role: 'user',
-        content: `Ontology being designed: ${project.title}. ${project.description}\n\nIts current terms (to recognise when people talk about something that already exists):\n${ontologyDigest(graph, 150)}\n\nTranscript of "${m.title}":\n\n${m.transcript.map((l) => `${l.speaker}: ${l.text}`).join('\n')}`,
-      },
-    ],
-    fallback: () => heuristicAnalysis(m.transcript, graph.view().classes.map((c) => c.label ?? '')),
-  });
+  let value: MeetingAnalysis;
+  try {
+    const graph = await ontologyStore.working(project);
+    ({ value } = await llm.json<MeetingAnalysis>({
+      task: 'meeting-analysis',
+      system: MEETING_ANALYST,
+      schema: MeetingAnalysisSchema as never,
+      maxTokens: 20000,
+      messages: [
+        {
+          role: 'user',
+          content: `Ontology being designed: ${project.title}. ${project.description}\n\nIts current terms (to recognise when people talk about something that already exists):\n${ontologyDigest(graph, 150)}\n\nTranscript of "${m.title}":\n\n${m.transcript.map((l) => `${l.speaker}: ${l.text}`).join('\n')}`,
+        },
+      ],
+      fallback: () => heuristicAnalysis(m.transcript, graph.view().classes.map((c) => c.label ?? '')),
+    }));
+  } catch (err) {
+    // Let go of the claim, so the call can be analysed again straight away.
+    const back = await mutateMeeting(m.id, (x) => {
+      if (x.analysisClaim?.token !== token) return;
+      x.status = was;
+      delete x.analysisClaim;
+    });
+    emit(back, { type: 'status', status: back.status });
+    throw err;
+  }
+  let mine = false;
   m = await mutateMeeting(m.id, (x) => {
+    // Taken over after this run's claim lapsed: the run that holds it now saves its own result.
+    if (x.analysisClaim?.token !== token) return;
     x.analysis = value;
     x.status = 'analysed';
+    delete x.analysisClaim;
+    mine = true;
   });
+  if (!mine) return m;
   emit(m, { type: 'status', status: m.status });
   await logActivity({ ontologyId: m.ontologyId, type: 'meeting.analysed', message: `analysed the call “${m.title}”: ${value.useCases.length} use case(s), ${value.terms.length} candidate terms`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   return m;
@@ -382,7 +420,6 @@ export async function uploadTranscript(project: OntologyProject, user: User, tit
 /* Live co-facilitation                                                      */
 /* ------------------------------------------------------------------------ */
 
-const lastPromptAt = new Map<string, number>();
 /** When the last transcript line of a live call arrived, whichever server instance it reached. */
 export const lastLineTime = (m: Meeting) => m.lastLineAt;
 
@@ -394,6 +431,10 @@ export async function onLiveLine(
 ): Promise<boolean> {
   // Whether to keep the line is decided on the latest copy, under the lock, so a skip or cancellation that just happened counts.
   let accepted = true;
+  // Whether this line is the one to look for a suggestion at: claimed with the line, so of two servers taking
+  // lines at once only one asks.
+  let prompting = false;
+  const gap = opts.minGapLines ?? 4;
   const m = await meetingLock(meetingId, async () => {
     const x = await getMeeting(meetingId);
     const gen = x.bot?.gen;
@@ -409,16 +450,17 @@ export async function onLiveLine(
     opts.before?.(x);
     x.transcript.push(line);
     x.lastLineAt = Date.now();
+    if (x.transcript.length - (x.promptedAtLine ?? 0) >= gap) {
+      x.promptedAtLine = x.transcript.length;
+      prompting = true;
+    }
     return save(x);
   });
   if (!accepted) return false;
   emit(m, { type: 'line', line });
   // A notice about chat posting that failed earlier is retried as the call goes on.
   if (m.chatNoticeError || (m.bot?.status === 'in-call' && m.source !== 'simulation' && !!m.postPromptsToChat !== !!m.chatModeAnnounced)) await announceChatMode(meetingId).catch(() => undefined);
-  const n = m.transcript.length;
-  const gap = opts.minGapLines ?? 4;
-  if (n - (lastPromptAt.get(m.id) ?? 0) < gap) return true;
-  lastPromptAt.set(m.id, n);
+  if (!prompting) return true;
   const prompt = await facilitate(m);
   if (!prompt) return true;
   const entry: FacilitatorPrompt = { at: clock.iso(), t: line.t, text: prompt, posted: false };
@@ -445,56 +487,61 @@ async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok
   return { ok: false, error: 'No meeting bot is connected to this call, so there is no chat to post in.' };
 }
 
-const posting = new Set<string>();
+/**
+ * How long a run may take to send one message into the call's chat before another may try. Claims are kept on the
+ * record, so two server instances never post the same prompt or notice at once; one whose run died lapses.
+ */
+export const CHAT_CLAIM_MS = 2 * 60_000;
+const held = (c?: { until: number }) => !!c && c.until > Date.now();
 
 /** Posts one prompt into the meeting chat. Only that prompt is updated, on the latest copy of the meeting. */
 export async function postPrompt(meetingId: string, index: number, opts: { quiet?: boolean } = {}) {
-  const m = await getMeeting(meetingId);
+  const token = newToken();
+  let claimed = false;
+  const m = await mutateMeeting(meetingId, (x) => {
+    const q = x.facilitatorPrompts[index];
+    if (!q || q.posted || held(q.postClaim)) return;
+    q.postClaim = { token, until: Date.now() + CHAT_CLAIM_MS };
+    claimed = true;
+  });
   const p = m.facilitatorPrompts[index];
   if (!p) throw new HttpError(404, 'No such prompt');
   if (p.posted) return m;
-  const key = `${meetingId}:${index}`;
-  if (posting.has(key)) throw new HttpError(409, 'That prompt is being posted already');
-  posting.add(key);
-  try {
-    const r = await sendToChat(m, p.text);
-    const fresh = await mutateMeeting(meetingId, (x) => {
-      const q = x.facilitatorPrompts[index];
-      if (r.ok) {
-        q.posted = true;
-        q.postedAt = clock.iso();
-        delete q.postError;
-      } else q.postError = r.error;
-    });
-    emit(fresh, { type: 'meeting', meeting: fresh });
-    if (!r.ok && !opts.quiet) throw new HttpError(409, r.error);
-    return fresh;
-  } finally {
-    posting.delete(key);
-  }
+  if (!claimed) throw new HttpError(409, 'That prompt is being posted already');
+  const r = await sendToChat(m, p.text);
+  const fresh = await mutateMeeting(meetingId, (x) => {
+    const q = x.facilitatorPrompts[index];
+    if (q.postClaim?.token === token) delete q.postClaim;
+    if (r.ok) {
+      q.posted = true;
+      q.postedAt = clock.iso();
+      delete q.postError;
+    } else if (!q.posted) q.postError = r.error;
+  });
+  emit(fresh, { type: 'meeting', meeting: fresh });
+  if (!r.ok && !opts.quiet) throw new HttpError(409, r.error);
+  return fresh;
 }
 
 /**
  * Tells the call when posting in its chat is switched on or off, so what the bot
  * said when it joined stays true. Only once the bot is in the call; until then
- * the next check (when it joins) does it.
+ * the next check (when it joins) does it. One notice at a time, on any instance.
  */
-const announcing = new Set<string>();
+const noticeDue = (x: Meeting) => x.source !== 'simulation' && x.bot?.status === 'in-call' && (x.chatModeAnnounced ?? false) !== !!x.postPromptsToChat && !held(x.chatNoticeClaim);
 
 export async function announceChatMode(meetingId: string) {
-  if (announcing.has(meetingId)) return;
-  announcing.add(meetingId);
-  try {
-    await announceOnce(meetingId);
-  } finally {
-    announcing.delete(meetingId);
-  }
-}
-
-async function announceOnce(meetingId: string) {
-  const m = await getMeeting(meetingId);
-  const want = !!m.postPromptsToChat;
-  if (m.source === 'simulation' || m.bot?.status !== 'in-call' || (m.chatModeAnnounced ?? false) === want) return;
+  if (!noticeDue(await getMeeting(meetingId))) return; // the usual case, without a write
+  const token = newToken();
+  let want = false;
+  let claimed = false;
+  const m = await mutateMeeting(meetingId, (x) => {
+    want = !!x.postPromptsToChat;
+    if (!noticeDue(x)) return;
+    x.chatNoticeClaim = { token, until: Date.now() + CHAT_CLAIM_MS };
+    claimed = true;
+  });
+  if (!claimed) return;
   const r = await sendToChat(
     m,
     want
@@ -502,6 +549,7 @@ async function announceOnce(meetingId: string) {
       : `${config.meetBot.botName}: I'll stop posting questions in the chat. I'm still transcribing; my suggestions now go to the facilitator in Concord.`,
   );
   const fresh = await mutateMeeting(meetingId, (x) => {
+    if (x.chatNoticeClaim?.token === token) delete x.chatNoticeClaim;
     if (r.ok) {
       x.chatModeAnnounced = want;
       delete x.chatNoticeError;
@@ -732,7 +780,7 @@ export function finishCall(meetingId: string): Promise<Meeting> {
   const run = (async () => {
     const m = await getMeeting(meetingId);
     emit(m, { type: 'status', status: m.status, bot: m.bot });
-    return m.transcript.length && m.status !== 'analysed' && m.status !== 'processing' ? analyseMeeting(m) : m;
+    return m.transcript.length && m.status !== 'analysed' && !analysing(m) ? analyseMeeting(m) : m;
   })().finally(() => finishing.delete(meetingId));
   finishing.set(meetingId, run);
   return run;

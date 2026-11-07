@@ -639,6 +639,8 @@ export interface FacilitatorPrompt {
   postedAt?: string;
   /** Why posting to the meeting chat failed, if it did. */
   postError?: string;
+  /** A server run posting it right now, until when (ms): one post at a time, whichever server instance asks. */
+  postClaim?: { token: string; until: number };
 }
 
 /** Where a calendar-invited call came from: the bot's calendar feed or an uploaded .ics invite. */
@@ -741,8 +743,14 @@ export interface Meeting {
   chatModeAnnounced?: boolean;
   /** The last notice about chat posting couldn't be sent; it is retried as the call goes on. */
   chatNoticeError?: string;
+  /** A server run sending a notice about chat posting right now, until when (ms). */
+  chatNoticeClaim?: { token: string; until: number };
   /** When the last transcript line arrived (server time, ms): kept on the record so every server instance sees it. */
   lastLineAt?: number;
+  /** How many lines the transcript had when the co-lead bot last looked for a suggestion (paces its suggestions). */
+  promptedAtLine?: number;
+  /** While 'processing': which server run is analysing the call, until when (ms). A run that dies lets it lapse. */
+  analysisClaim?: { token: string; until: number };
   transcript: TranscriptLine[];
   /** Suggestions the co-lead bot made during the call (gaps, follow-up questions). */
   facilitatorPrompts: FacilitatorPrompt[];

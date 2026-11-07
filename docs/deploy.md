@@ -91,9 +91,13 @@ What waits for a visitor or the daily call on Vercel (accepted, issue #112):
 - **Ending a call.** A call past its slot that has gone quiet for ten minutes, or that has overrun by three hours, is ended by the next scheduled run, and a quiet call sends no requests to start one. Until a visitor or the daily call comes, the bot can stay in the call. Recall.ai takes it out by itself only when everyone has left, or after six hours in the call, which is a much weaker limit. The call's summary and any retries also wait for that run. Recall.ai's status webhook would end that wait; it is the follow-up in #112.
 - **Governance deadlines** (a review period ending, a vote closing) are applied just after the next visit's response, and in the daily call.
 
-## Before the backend runs on more than one instance
+## Running more than one instance
 
-The backend assumes one process. Changes to one meeting (bookings, transcript lines from the bot's webhook, skips, cancellations from the calendar) are serialised by locks held in that process ([locks.ts](../apps/server/src/locks.ts)), and the Meet bot's clock runs in it. That is correct on the single server above. Serverless functions (Vercel) run several instances at once, so before the backend moves there, the meeting and calendar locks must also take the database's writer lock (a transaction) around each read and write, and a calendar invite's meeting must be created atomically, one record per occurrence, so that two scheduled runs can't each create one. Its scheduled work already runs without a timer (see [Scheduled work](#scheduled-work)). Until then, run one backend instance.
+Vercel runs several function instances at once, each with its own memory, so nothing that must hold across requests lives in one process:
+
+- **Changes to one meeting** (bookings, transcript lines from the bot's webhook, skips, cancellations from the calendar) run in a database transaction, which holds the store's one writer lock; the lock in each process only queues that instance's callers ([meetings.ts](../apps/server/src/services/meetings.ts), `meetingLock`).
+- **Requests to Recall.ai for one meeting** (its "lane") and **changes to the set of calendar calls** (a sync or an import) hold a short lease in the database ([lease.ts](../apps/server/src/lease.ts)), so another instance leaves them alone and the next sweep picks up anything it missed. The leases don't fence: every bot step is a compare-and-set and every Recall.ai request is idempotent, so a run that outlasts its lease only repeats a request.
+- **Scheduled work** runs under one lease too (see Scheduled work above).
 
 ## Alternative: AWS
 
