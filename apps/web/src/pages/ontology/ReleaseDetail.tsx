@@ -20,7 +20,7 @@ export function ReleaseDetailPage() {
   const { releaseId = '' } = useParams();
   const { id, ontology, userById, hasRole, myRoles, reload } = useOntology();
   const { session } = useSession();
-  const state = useAsync(() => api.release(releaseId), [releaseId]);
+  const state = useAsync(() => api.release(releaseId), [releaseId], { keep: `release|${releaseId}` });
   const act = useAction(async (fn: () => Promise<ReleaseDetail>) => {
     state.setData(await fn());
     void reload();

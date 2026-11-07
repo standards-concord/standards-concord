@@ -381,7 +381,7 @@ export function ChangeRequestPage() {
   const { crId = '' } = useParams();
   const { id, ontology, view, userById, hasRole } = useOntology();
   const { now } = useSession();
-  const state = useAsync(() => api.changeRequest(crId), [crId]);
+  const state = useAsync(() => api.changeRequest(crId), [crId], { keep: `changeRequest|${crId}` });
   const [params, setParams] = useSearchParams();
   const tab = (['changes', 'diff', 'checks', 'discussion'].includes(params.get('view') ?? '') ? params.get('view') : 'changes') as View;
   const setTab = (v: View) => {

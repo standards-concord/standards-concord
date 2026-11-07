@@ -1,10 +1,12 @@
 import { accountToken, onAccountChange, stillCurrent } from './session';
+import { clearOffline, dropOffline, loadOffline, saveOffline } from './offlineStore';
 
 /**
  * The last answer for each `keep` key of useAsync, so a page opened again shows it at once while it
  * loads the current one (stale while revalidate). Kept per account: keys include the account, all of
  * it is dropped whenever the account changes, and an answer that arrives after the change is not kept.
- * The oldest go once there are too many.
+ * The oldest go once there are too many. Each answer is also saved on this device (lib/offlineStore.ts),
+ * and read back when Concord is opened again as the same account, so pages show with no connection.
  */
 const kept = new Map<string, unknown>();
 // The newest load still on its way for each key, so a slower, older answer never replaces a newer one
@@ -13,15 +15,40 @@ const loads = new Map<string, number>();
 let lastLoad = 0;
 export const KEEP_MAX = 100;
 
+/** Reading back what this device saved for the account, once it is known. */
+let reading: Promise<void> = Promise.resolve();
+
 onAccountChange(() => {
   kept.clear();
   loads.clear();
+  const account = accountToken().account;
+  // Signing out (here or in another tab) wipes the device's copy; opening as an account reads its own.
+  reading = account ? readBack(account) : clearOffline();
+  // The session waits for this before showing pages, so they open with what was saved.
+  return reading;
 });
+
+async function readBack(account: string) {
+  const saved = await loadOffline(account);
+  if (accountToken().account !== account) return;
+  // What the device saved is older than anything loaded since: it goes first, so it is evicted first.
+  const since = [...kept];
+  kept.clear();
+  for (const { key, value } of saved) if (!since.some(([k]) => k === key) && !loads.has(key)) kept.set(key, value);
+  for (const [key, value] of since) kept.set(key, value);
+  trim();
+}
+
+/** Resolves once what this device saved for the current account has been read back (or failed). */
+export function keptReady(): Promise<void> {
+  return reading;
+}
 
 /** The key for `keep` under the current account, or nothing to keep (no key, or no account yet). */
 export function keptKey(keep: string | undefined): string | undefined {
   const account = accountToken().account;
-  return keep && account ? `${account}|${keep}` : undefined;
+  // Only signed-in accounts keep anything: a signed-out visitor sees nothing worth keeping.
+  return keep && account && account !== 'guest' ? `${account}|${keep}` : undefined;
 }
 
 export function keptValue<T>(key: string | undefined): { value: T } | undefined {
@@ -31,10 +58,16 @@ export function keptValue<T>(key: string | undefined): { value: T } | undefined 
 function store(key: string, value: unknown) {
   kept.delete(key);
   kept.set(key, value);
-  if (kept.size > KEEP_MAX) {
+  void saveOffline(key, value);
+  trim();
+}
+
+function trim() {
+  while (kept.size > KEEP_MAX) {
     const oldest = kept.keys().next().value!;
     kept.delete(oldest);
     loads.delete(oldest);
+    void dropOffline(oldest);
   }
 }
 
@@ -77,6 +110,7 @@ export function prefetchKept(keep: string, fn: () => Promise<unknown>) {
 function forget(key: string) {
   kept.delete(key);
   loads.delete(key);
+  void dropOffline(key);
 }
 
 /**

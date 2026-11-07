@@ -6,20 +6,34 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  */
 let account: string | undefined = 'alice';
 let signOuts = '0';
-const listeners: (() => void)[] = [];
+const listeners: (() => unknown)[] = [];
 vi.mock('./session', () => ({
   accountToken: () => ({ account, signOuts }),
   stillCurrent: (t: { account?: string; signOuts: string }, a: string) => t.account === a && account === a && signOuts === t.signOuts,
-  onAccountChange: (fn: () => void) => (listeners.push(fn), () => undefined),
+  onAccountChange: (fn: () => unknown) => (listeners.push(fn), () => undefined),
+}));
+// A stand-in for the device's copy (IndexedDB in the browser).
+const saved = new Map<string, { value: unknown; at: number }>();
+let clock = 0;
+vi.mock('./offlineStore', () => ({
+  saveOffline: async (key: string, value: unknown) => void saved.set(key, { value, at: ++clock }),
+  dropOffline: async (key: string) => void saved.delete(key),
+  clearOffline: async () => saved.clear(),
+  loadOffline: async (account: string) => {
+    const mine = [...saved].filter(([k]) => k.startsWith(`${account}|`));
+    for (const [k] of saved) if (!k.startsWith(`${account}|`)) saved.delete(k);
+    return mine.map(([key, v]) => ({ key, ...v })).sort((a, b) => a.at - b.at);
+  },
 }));
 const switchTo = (next: string | undefined) => {
   account = next;
-  for (const fn of listeners) fn();
+  return listeners.map((fn) => fn());
 };
 
 async function load() {
   vi.resetModules();
   listeners.length = 0;
+  saved.clear();
   account = 'alice';
   return import('./kept');
 }
@@ -228,5 +242,59 @@ describe('kept answers', () => {
     answer('from before the edit');
     await new Promise((r) => setTimeout(r));
     expect(k.keptValue(k.keptKey('changes|vol'))).toBeUndefined();
+  });
+
+  describe('on this device', () => {
+    it('saves what is kept, and drops what is forgotten or evicted', async () => {
+      const k = await load();
+      const p = page(k);
+      k.finishLoad(p.start('releases|vol'), { value: ['1.0.0'] });
+      expect(saved.get('alice|releases|vol')?.value).toEqual(['1.0.0']);
+      p.owner.changed('releases|vol');
+      await Promise.resolve();
+      expect(saved.has('alice|releases|vol')).toBe(false);
+      for (let i = 0; i <= k.KEEP_MAX; i++) k.finishLoad(k.startLoad(k.keptKey(`page|${i}`)), { value: i });
+      await Promise.resolve();
+      expect(saved.has('alice|page|0')).toBe(false);
+      expect(saved.size).toBe(k.KEEP_MAX);
+    });
+
+    // Opening Concord again (a reload, or the next day with no connection) shows what was saved.
+    it('reads back the account’s own copy when it is opened again, oldest first', async () => {
+      const k = await load();
+      saved.set('alice|releases|vol', { value: ['1.0.0'], at: 1 });
+      saved.set('alice|forks|vol', { value: ['fork'], at: 2 });
+      saved.set('bob|releases|vol', { value: ['bob’s'], at: 3 });
+      account = undefined;
+      // The session waits on what the account change returns before showing pages: it must be the
+      // reading back, or pages open before it is done (that used to happen, so nothing showed offline).
+      const [waitFor] = switchTo('alice');
+      expect(waitFor).toBeInstanceOf(Promise);
+      await waitFor;
+      expect(k.keptValue('alice|releases|vol')).toEqual({ value: ['1.0.0'] });
+      expect(k.keptValue('alice|forks|vol')).toEqual({ value: ['fork'] });
+      // Another account’s copy is never read, and is deleted from the device.
+      expect(k.keptValue('bob|releases|vol')).toBeUndefined();
+      expect(saved.has('bob|releases|vol')).toBe(false);
+    });
+
+    it('a newer answer that arrived while reading back is not replaced by the saved one', async () => {
+      const k = await load();
+      saved.set('alice|releases|vol', { value: ['old'], at: 1 });
+      account = undefined;
+      switchTo('alice');
+      k.finishLoad(k.startLoad(k.keptKey('releases|vol')), { value: ['new'] });
+      await k.keptReady();
+      expect(k.keptValue('alice|releases|vol')).toEqual({ value: ['new'] });
+    });
+
+    it('signing out wipes the device’s copy', async () => {
+      const k = await load();
+      k.finishLoad(k.startLoad(k.keptKey('releases|vol')), { value: ['1.0.0'] });
+      expect(saved.size).toBe(1);
+      switchTo(undefined);
+      await k.keptReady();
+      expect(saved.size).toBe(0);
+    });
   });
 });

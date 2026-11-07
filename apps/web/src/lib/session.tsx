@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { SessionInfo } from '@concord/shared';
-import { api } from '../api';
+import { api, ApiError } from '../api';
 
 interface SessionCtx {
   session?: SessionInfo;
@@ -27,15 +27,57 @@ let activeAccount: string | undefined;
  * Called whenever this tab's account changes: signing in, out (here or in another tab) or as someone
  * else. Anything kept in memory that only one account could read is dropped then.
  */
-const accountListeners = new Set<() => void>();
-export function onAccountChange(fn: () => void): () => void {
+const accountListeners = new Set<() => void | Promise<unknown>>();
+export function onAccountChange(fn: () => void | Promise<unknown>): () => void {
   accountListeners.add(fn);
   return () => accountListeners.delete(fn);
 }
+/** What listeners are still doing for the last account change (say, reading back what this device saved). */
+let accountSettling: Promise<unknown> = Promise.resolve();
 function setActiveAccount(next: string | undefined) {
   if (next === activeAccount) return;
   activeAccount = next;
-  for (const fn of accountListeners) fn();
+  const work: unknown[] = [];
+  for (const fn of accountListeners) work.push(fn());
+  accountSettling = Promise.allSettled(work);
+}
+/** Waits for the last account change's listeners, but never longer than a moment. */
+function accountSettled(): Promise<unknown> {
+  return Promise.race([accountSettling, new Promise((r) => setTimeout(r, 1500))]);
+}
+
+/**
+ * The last signed-in session, saved on this device so Concord can open with no connection as the
+ * same person (showing what the device saved for them). Removed on signing out.
+ */
+const OFFLINE_SESSION = 'concord.offline.session';
+function saveOfflineSession(s: SessionInfo) {
+  try {
+    if (s.user) localStorage.setItem(OFFLINE_SESSION, JSON.stringify({ session: s, savedAt: Date.now() }));
+    else localStorage.removeItem(OFFLINE_SESSION);
+  } catch {
+    /* storage unavailable */
+  }
+}
+function forgetOfflineSession() {
+  try {
+    localStorage.removeItem(OFFLINE_SESSION);
+  } catch {
+    /* storage unavailable */
+  }
+}
+/** The saved session, its clock moved on by the time since it was saved; undefined if there is none. */
+function offlineSession(): SessionInfo | undefined {
+  try {
+    const raw = localStorage.getItem(OFFLINE_SESSION);
+    if (!raw) return undefined;
+    const { session, savedAt } = JSON.parse(raw) as { session: SessionInfo; savedAt: number };
+    if (!session?.user) return undefined;
+    const base = Date.parse(session.now);
+    return { ...session, now: new Date((Number.isNaN(base) ? savedAt : base) + (Date.now() - savedAt)).toISOString() };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -77,6 +119,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const setSession = useCallback((s: SessionInfo) => {
     setActiveAccount(s.user?.id ?? 'guest');
+    saveOfflineSession(s);
     fetchedAt.current = Date.now();
     setSessionState(s);
     setError(undefined);
@@ -97,9 +140,24 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     try {
       const s = await fetchSession();
       if (!s) return undefined;
+      // Pages show what this device saved for the account at once, so it is read back first.
+      setActiveAccount(s.user?.id ?? 'guest');
+      await accountSettled();
       setSession(s);
       return s;
     } catch (e) {
+      // No connection: carry on as the last person signed in here, with what the device saved for them.
+      // Nothing is sent as them until the server is back, and it still decides what they may do.
+      const saved = e instanceof ApiError && e.offline ? offlineSession() : undefined;
+      // (A second check while the first is still reading back, as React's strict mode makes, joins it.)
+      if (saved && (!activeAccount || activeAccount === saved.user!.id)) {
+        setActiveAccount(saved.user!.id);
+        await accountSettled();
+        fetchedAt.current = Date.now();
+        setSessionState(saved);
+        setError(undefined);
+        return saved;
+      }
       setError(e);
       return undefined;
     } finally {
@@ -123,6 +181,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const current = sessionRef.current;
       const was = current?.user?.id;
       if (was) clearDrafts(was);
+      forgetOfflineSession();
       if (current) setSession({ ...current, user: undefined });
       setActiveAccount(undefined);
       void fetchSession()
@@ -143,9 +202,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         .catch(() => {});
     };
     window.addEventListener('focus', check);
+    window.addEventListener('online', check);
     document.addEventListener('visibilitychange', check);
     return () => {
       window.removeEventListener('focus', check);
+      window.removeEventListener('online', check);
       document.removeEventListener('visibilitychange', check);
     };
   }, [setSession, fetchSession]);
@@ -179,10 +240,12 @@ export function useSession() {
  * otherwise. The query drafts and assistant chats are what is cleared.
  */
 export function beginSignOut(userId: string) {
+  forgetOfflineSession();
   setActiveAccount(undefined);
   clearDrafts(userId);
 }
 export function finishSignOut(userId: string) {
+  forgetOfflineSession();
   setActiveAccount(undefined);
   try {
     localStorage.setItem(SIGN_OUTS, String(Number(signOuts()) + 1));

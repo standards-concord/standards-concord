@@ -60,6 +60,7 @@ import type {
   User,
   ValidationReport,
 } from '@concord/shared';
+import { setOffline } from './lib/offline';
 
 export class ApiError extends Error {
   status: number;
@@ -96,8 +97,10 @@ async function request<T>(method: string, path: string, body?: Json | BodyInit, 
   try {
     res = await fetch(path, { method, headers, body: payload, credentials: 'include' });
   } catch {
+    setOffline(true);
     throw new ApiError(0, OFFLINE_MESSAGE);
   }
+  setOffline(false);
   if (!res.ok) {
     let message = `${res.status} ${res.statusText || 'Request failed'}`;
     let parsed: unknown;

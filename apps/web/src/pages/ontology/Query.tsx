@@ -132,8 +132,8 @@ function QueryWorkspace({ storageKey, account }: { storageKey: string; account: 
   const { session, setSession } = useSession();
   const [rowPage, setRowPage] = useState(0);
 
-  const turtle = useAsync(() => api.source(id, 'turtle'), [id]);
-  const view = useAsync(() => api.view(id), [id]);
+  const turtle = useAsync(() => api.source(id, 'turtle'), [id], { keep: `source|${id}|turtle|working` });
+  const view = useAsync(() => api.view(id), [id], { keep: `view|${id}|working` });
   // The ontology store on this thread loads the ontology (the "Ontology loaded" status).
   const storeRef = useRef<SparqStore | null>(null);
   // Queries run in a worker that Cancel and the time limit can stop.

@@ -1,4 +1,7 @@
-import { defineConfig } from 'vite';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
@@ -7,8 +10,40 @@ const target = process.env.CONCORD_API ?? 'http://localhost:8787';
 // The commit being built, shown next to the app version on the alpha pages (Vercel and GitHub Actions set these).
 const commit = (process.env.VERCEL_GIT_COMMIT_SHA ?? process.env.GITHUB_SHA ?? '').slice(0, 40);
 
+/**
+ * Writes sw.js (from sw/sw.js) into the build with the list of every built file, so the service
+ * worker keeps the whole app on the device and Concord opens with no connection. Its version changes
+ * whenever any file does, which makes browsers install the new one.
+ */
+function serviceWorker(): Plugin {
+  let outDir = 'dist';
+  return {
+    name: 'concord-service-worker',
+    apply: 'build',
+    configResolved(c) {
+      outDir = path.resolve(c.root, c.build.outDir);
+    },
+    closeBundle() {
+      const files: string[] = [];
+      const walk = (dir: string) => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) walk(full);
+          else if (!/\.(map|md)$/.test(e.name) && e.name !== 'sw.js' && e.name !== 'index.html') files.push('/' + path.relative(outDir, full).split(path.sep).join('/'));
+        }
+      };
+      walk(outDir);
+      files.sort();
+      const version = createHash('sha256').update(files.join('\n')).update(readFileSync(path.join(outDir, 'index.html'))).digest('hex').slice(0, 12);
+      const template = readFileSync(path.resolve(import.meta.dirname, 'sw/sw.js'), 'utf8');
+      const sw = template.replace('self.__CONCORD_VERSION__', JSON.stringify(version)).replace('self.__CONCORD_FILES__', JSON.stringify(files));
+      writeFileSync(path.join(outDir, 'sw.js'), sw);
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), serviceWorker()],
   define: { 'import.meta.env.VITE_APP_COMMIT': JSON.stringify(commit) },
   // sparq loads its WebAssembly from a URL relative to its own module. Vite's dev
   // prebundler moves the module into node_modules/.vite/deps, where that URL

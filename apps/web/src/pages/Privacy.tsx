@@ -96,7 +96,9 @@ export function PrivacyPage() {
             <li>
               <strong>Your browser.</strong> Concord sets a sign-in cookie that lasts 30 days, a cookie that lasts 30 days and remembers who you are while you switch
               between demo personas, and short-lived cookies (10 minutes) while you sign in. It remembers your chosen look, your walkthrough progress and the link to
-              withdraw a public summary in the browser’s own storage.
+              withdraw a public summary in the browser’s own storage. So you can keep reading with no connection, it also saves the app itself and copies of
+              the pages you open while signed in (lists, change requests, releases and so on) in the browser, along with who you are signed in as. Only that
+              account can see them, and signing out deletes them.
             </li>
           </ul>
           <p>There is no advertising, and no third-party tracking or analytics.</p>

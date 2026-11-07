@@ -10,6 +10,7 @@ import { formatDate, roleLabel } from '../lib/format';
 import { Logo, OdiLogo } from './badges';
 import { Avatar, Button, buttonClasses, cx, LinkButton } from './ui';
 import { WalkthroughDock } from './Walkthrough';
+import { useOffline } from '../lib/offline';
 import { Popover } from './Disclosure';
 
 function OntologySwitcher() {
@@ -157,6 +158,19 @@ function MenuLink({ to, icon, children }: { to: string; icon: ReactNode; childre
   );
 }
 
+/** Says so while Concord can't reach its server: pages show what this device saved for you. */
+function OfflineBanner() {
+  const offline = useOffline();
+  if (!offline) return null;
+  return (
+    <div role="status" className="border-b border-warn/30 bg-warn-soft text-sm">
+      <p className="mx-auto max-w-7xl px-4 py-1.5 sm:px-6">
+        <strong>You’re offline.</strong> Concord is showing what this device saved. Changes need a connection for now.
+      </p>
+    </div>
+  );
+}
+
 function DemoBanner() {
   const { session, setSession, now, isDemo } = useSession();
   const w = useWalkthrough();
@@ -248,6 +262,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <UserMenu />
         </div>
       </header>
+      <OfflineBanner />
       <DemoBanner />
       <main id="main" tabIndex={-1} className="flex-1 scroll-mt-16 outline-none">
         {children}

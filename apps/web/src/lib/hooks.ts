@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { ApiError } from '../api';
 import { finishLoad, keptKey, keptOwner, keptValue, startLoad } from './kept';
 
 export interface AsyncState<T> {
@@ -18,6 +19,8 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
   const [data, setDataState] = useState<T | undefined>(() => keptValue<T>(keptKey(opts?.keep))?.value);
   const [error, setError] = useState<unknown>();
   const [loading, setLoading] = useState(true);
+  const shownRef = useRef(data);
+  shownRef.current = data;
   const seq = useRef(0);
   const fnRef = useRef(fn);
   fnRef.current = fn;
@@ -34,6 +37,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
     const started = startLoad(key);
     const shown = keptValue<T>(key);
     if (shown) {
+      shownRef.current = shown.value;
       setDataState(shown.value);
       setError(undefined);
     }
@@ -46,7 +50,9 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
         setError(undefined);
       }
     } catch (e) {
-      if (id === seq.current) setError(e);
+      // With no connection, a page showing what was kept (or loaded earlier) carries on showing it;
+      // the offline banner says why it may be out of date.
+      if (id === seq.current && !(e instanceof ApiError && e.offline && shownRef.current !== undefined)) setError(e);
     } finally {
       finishLoad(started, answer);
       if (id === seq.current) setLoading(false);
