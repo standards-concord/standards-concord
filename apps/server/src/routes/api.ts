@@ -21,6 +21,7 @@ import { withTriageBudget } from '../services/budget.js';
 import { feedbackChat, listFeedback, questionsFor, readPodFeedback, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
 import { podReader } from '../solidOidc.js';
 import { solid } from '../services/solid.js';
+import { forgetOwnPodLogin } from '../services/ownPods.js';
 import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor, testerForSaving } from '../services/alpha.js';
 import {
   checkPublicSummary,
@@ -214,6 +215,8 @@ export function apiRouter(): Router {
     const meant = optStr(req.body?.session);
     if (meant !== undefined && meant !== sessionHandle(req.cookies?.[SESSION_COOKIE])) return void res.json({ ended: false });
     await endAdminLogin(req.cookies?.[SESSION_COOKIE]);
+    // The Solid login Concord writes their own pod with ends too (step 5e): nothing writes as them after they sign out.
+    if (req.user) await forgetOwnPodLogin(req.user.id);
     await clearTesterCookie(req, res);
     await destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({ ended: true });

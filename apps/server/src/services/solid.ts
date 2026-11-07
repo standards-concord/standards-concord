@@ -5,7 +5,7 @@ import { DataFactory, Parser, Writer, type Quad } from 'n3';
 import { slugify } from '../ids.js';
 import { localTag, PreconditionFailed, privateStore, type WriteCondition } from './privateStore.js';
 import { clientCredentialsLogin, podFetch, podRequester, type PodRequest, type SolidLogin } from '../solidOidc.js';
-import { ownPodOf, ownPods, type OwnPod } from './ownPods.js';
+import { concordFolder, ownPodOf, ownPods, OwnPodUnavailable, type OwnPod } from './ownPods.js';
 
 /**
  * Private data lives in each person's Solid pod. People never see this:
@@ -105,37 +105,37 @@ interface PodAccess {
 }
 
 /**
+ * The URL of a path inside Concord's folder. Only plain relative paths: no `.` or `..` segments (nor encoded ones),
+ * no leading slash, query or fragment, so nothing Concord writes can land outside the folder it made private.
+ */
+export function urlIn(base: string, relPath: string): string {
+  const segments = relPath.split('/');
+  const bad =
+    !relPath ||
+    relPath.startsWith('/') ||
+    /[\\?#]/.test(relPath) ||
+    /%(2e|2f|5c)/i.test(relPath) ||
+    segments.some((seg, i) => seg === '.' || seg === '..' || (seg === '' && i < segments.length - 1));
+  const url = bad ? undefined : new URL(relPath, base).href;
+  if (!url || !url.startsWith(base) || url === base) throw new HttpError(400, `Not a path inside Concord’s folder: ${relPath}`);
+  return url;
+}
+
+/**
  * The pod a person's private data goes to, if any: their own (a Solid account, where own pods are used; throws when
  * Concord can't write to it now) or the one this server provisioned for them on its Solid server.
  */
 async function podAccess(userId: string): Promise<PodAccess | undefined> {
   const own = await ownPodOf(userId);
-  if (own) {
-    const base = `${own.pod}concord/`;
-    return {
-      pod: own.pod,
-      webId: own.webId,
-      base,
-      own,
-      async request() {
-        const req = await own.request();
-        if (!own.privateAt) {
-          await makePrivate(req, base, own.webId);
-          await own.markPrivate();
-          own.privateAt = 'now';
-        }
-        return req;
-      },
-    };
-  }
+  if (own) return { pod: own.pod, webId: own.webId, base: concordFolder(own.pod), own, request: () => own.request() };
   if (!config.solid.serverUrl) return undefined;
   const rec = await get<PodRecord>('kv', `pod:${userId}`);
   return rec ? { pod: rec.podUrl, webId: rec.webId, base: `${rec.podUrl}concord/`, request: () => ownerRequest({ ...rec, id: userId }) } : undefined;
 }
 
 /** A failed write to someone's own pod, as the person sees it (the sign-in and configuration messages pass through). */
-const ownPodFailed = (err: unknown) =>
-  err instanceof HttpError || err instanceof PreconditionFailed ? err : new HttpError(502, `Couldn’t save to your pod: ${(err as Error).message}`.slice(0, 300));
+const ownPodFailed = (err: unknown, verb = 'save to') =>
+  err instanceof HttpError || err instanceof PreconditionFailed ? err : new HttpError(502, `Couldn’t ${verb} your pod: ${(err as Error).message}`.slice(0, 300));
 
 /** A precondition for `writeExisting`: replace only this version (ETag), or only create (`*`). */
 export { PreconditionFailed, type WriteCondition } from './privateStore.js';
@@ -179,7 +179,8 @@ export const solid = {
     if (access) {
       try {
         const req = await access.request();
-        const url = `${access.base}${relPath}`;
+        const url = urlIn(access.base, relPath);
+        if (access.own) await privateTarget(req, access.base, url, access.webId);
         const res = await req('PUT', url, { headers: { 'content-type': contentType }, body: typeof body === 'string' ? body : new Uint8Array(body) });
         if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
         return { kind: 'solid', url };
@@ -196,10 +197,23 @@ export const solid = {
 
   async read(userId: string, relPath: string): Promise<string | undefined> {
     const access = await podAccess(userId);
+    // Their own pod is the only place their data is: a failure is reported, and only a missing document is missing.
+    if (access?.own) {
+      try {
+        const req = await access.request();
+        const url = urlIn(access.base, relPath);
+        const res = await req('GET', url);
+        if (res.status === 404 || res.status === 410) return undefined;
+        if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+        return await res.text();
+      } catch (err) {
+        throw ownPodFailed(err, 'read from');
+      }
+    }
     if (access) {
       try {
         const req = await access.request();
-        const res = await req('GET', `${access.base}${relPath}`);
+        const res = await req('GET', urlIn(access.base, relPath));
         if (res.ok) return await res.text();
       } catch {
         /* fall through to local */
@@ -221,7 +235,7 @@ export const solid = {
   /** URL of a folder (relative path ending in /) in a user's pod, when it lives on the Solid server. */
   async folderUrl(userId: string, relFolder: string): Promise<string | undefined> {
     const access = await podAccess(userId).catch(() => undefined);
-    return access && `${access.base}${relFolder}`;
+    return access && urlIn(access.base, relFolder);
   },
 
   /**
@@ -240,7 +254,9 @@ export const solid = {
     const prev = await get<Kv<string[]> & { pod?: string }>('kv', key);
     if (!opts.force && prev && (prev.pod ?? access.pod) === access.pod && JSON.stringify(prev.value) === JSON.stringify(want)) return 'unchanged';
     const req = await access.request();
-    const r = await shareFolder(req, `${access.base}${relFolder}`, access.pod, access.webId, want, { create: opts.create });
+    // In their own pod, Concord's folder is made private first: a folder shared below it starts from its rules.
+    if (access.own) await makePrivate(req, access.base, access.webId);
+    const r = await shareFolder(req, urlIn(access.base, relFolder), access.pod, access.webId, want, { create: opts.create });
     if (r === 'shared') await put('kv', { id: key, value: want, pod: access.pod });
     return r;
   },
@@ -259,7 +275,7 @@ export const solid = {
     const asideName = (n: number) => relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}-${n}${ext}`);
     if (access) {
       const req = await access.request();
-      const url = `${access.base}${relPath}`;
+      const url = urlIn(access.base, relPath);
       const res = await req('GET', url);
       if (res.status === 404 || res.status === 410) return { ifNoneMatch: '*' };
       if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
@@ -296,7 +312,7 @@ export const solid = {
     const access = await podAccess(userId);
     if (access) {
       const req = await access.request();
-      const url = `${access.base}${relPath}`;
+      const url = urlIn(access.base, relPath);
       const res = await req('GET', url);
       if (res.status === 404 || res.status === 410) return {};
       if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
@@ -336,7 +352,8 @@ export const solid = {
   /** writeExisting's PUT to a pod. */
   async writeTo(access: PodAccess, relPath: string, body: string | ArrayBuffer, contentType: string, when: WriteCondition): Promise<{ kind: 'solid'; url: string }> {
     const req = await access.request();
-    const url = `${access.base}${relPath}`;
+    const url = urlIn(access.base, relPath);
+    if (access.own) await privateTarget(req, access.base, url, access.webId);
     const headers: Record<string, string> = { 'content-type': contentType };
     if (when.ifMatch) headers['if-match'] = when.ifMatch;
     if (when.ifNoneMatch) headers['if-none-match'] = when.ifNoneMatch;
@@ -468,9 +485,11 @@ export async function shareFolder(req: PodRequest, folder: string, podUrl: strin
 
 /**
  * Make Concord's folder in someone's own pod private to them before anything is written in it: an access control of
- * its own that gives the owner Read, Write and Control, and nobody else anything, so nothing is inherited from the
- * pod (whose root may be readable by everyone). A folder that already has its own access control is left as it is:
- * the owner, or Concord before, set it. Pods using ACP are refused without anything written.
+ * its own that gives the owner Read, Write and Control over it and everything in it (acl:default), and nobody else
+ * anything, so nothing is inherited from the pod (whose root may be readable by everyone). A folder that already has
+ * an access control, the person's own or one made meanwhile, is checked rather than trusted: anything that lets
+ * someone else in, or leaves what is in the folder to rules from above it, is refused with nothing written. Pods
+ * using ACP are refused the same way.
  */
 export async function makePrivate(req: PodRequest, folder: string, owner: string): Promise<void> {
   let head = await req('HEAD', folder);
@@ -482,10 +501,60 @@ export async function makePrivate(req: PodRequest, folder: string, owner: string
   if (head.status !== 200) throw new Error(`HEAD ${folder} → ${head.status}`);
   const { acl, acp } = aclOf(head.headers.get('link'), folder);
   if (acp) throw acpRefusal(folder);
-  if (await readAcl(req, acl, folder)) return;
-  const res = await req('PUT', acl, { headers: { 'content-type': 'text/turtle', 'if-none-match': '*' }, body: await wacMerge(folder, acl, undefined, undefined, owner, []) });
-  if (res.status === 412) return; // made meanwhile (another of this person's requests)
-  if (!res.ok) throw new Error(`PUT ${acl} → ${res.status}`);
+  let existing = await readAcl(req, acl, folder);
+  if (!existing) {
+    const res = await req('PUT', acl, { headers: { 'content-type': 'text/turtle', 'if-none-match': '*' }, body: await wacMerge(folder, acl, undefined, undefined, owner, []) });
+    if (!res.ok && res.status !== 412) throw new Error(`PUT ${acl} → ${res.status}`);
+    // Whatever is there now (Concord's, or one made meanwhile) is what counts, so it is read back and checked.
+    existing = await readAcl(req, acl, folder);
+    if (!existing) throw new Error(`${acl} wasn’t there after it was written`);
+  }
+  onlyTheOwner(existing.quads, acl, folder, owner, { folder: true, readers: false });
+}
+
+/**
+ * Before Concord writes `url` in someone's own pod: Concord's folder is private to them (makePrivate), and no access
+ * control between it and `url` (a folder's, or the document's own) lets anyone else in, apart from Concord's own
+ * rule that lets the administrators read a shared folder (shareRead).
+ */
+async function privateTarget(req: PodRequest, base: string, url: string, owner: string): Promise<void> {
+  await makePrivate(req, base, owner);
+  const rest = url.slice(base.length).split('/');
+  for (let i = 0; i < rest.length; i++) {
+    const at = base + rest.slice(0, i + 1).join('/') + (i < rest.length - 1 ? '/' : '');
+    if (at === base) continue;
+    const head = await req('HEAD', at);
+    if (head.status === 404 || head.status === 410) return; // not there yet, nor anything below it: it takes the rules above
+    if (head.status !== 200) throw new Error(`HEAD ${at} → ${head.status}`);
+    const { acl, acp } = aclOf(head.headers.get('link'), at);
+    if (acp) throw acpRefusal(at);
+    const own = await readAcl(req, acl, at);
+    if (own) onlyTheOwner(own.quads, acl, at, owner, { folder: at.endsWith('/'), readers: true });
+  }
+}
+
+/** Something in someone's own pod isn't private to them, so Concord writes nothing there. */
+const notPrivate = (resource: string, why: string) =>
+  new OwnPodUnavailable(`Concord didn’t save to your pod: ${resource} ${why}. Make it private to you (or remove its access rules), then try again.`);
+
+/**
+ * Checks an access control document gives access to the owner only: every rule names agents (no classes such as
+ * everyone or any signed-in agent, and no groups), and only the owner, except Concord's own read-only rule for the
+ * administrators where `readers` allows it. For a folder, the owner's rule must also cover what is in it
+ * (acl:default), or its documents would take rules from above it.
+ */
+function onlyTheOwner(quads: Quad[], aclUrl: string, resource: string, owner: string, opts: { folder: boolean; readers: boolean }) {
+  const rules = new Set(quads.filter((x) => x.predicate.value.startsWith(ACL) || (x.predicate.value === RDF_TYPE && x.object.value === `${ACL}Authorization`)).map((x) => x.subject.value));
+  const of = (rule: string, p: string) => quads.filter((x) => x.subject.value === rule && x.predicate.value === `${ACL}${p}`).map((x) => x.object.value);
+  let coversContents = false;
+  for (const rule of rules) {
+    if (of(rule, 'agentClass').length || of(rule, 'agentGroup').length) throw notPrivate(resource, 'can be opened by others than you');
+    const others = of(rule, 'agent').filter((a) => a !== owner);
+    const adminsRead = opts.readers && rule === `${aclUrl}#concord-admins` && of(rule, 'mode').every((m) => m === `${ACL}Read`);
+    if (others.length && !adminsRead) throw notPrivate(resource, 'can be opened by others than you');
+    if (of(rule, 'agent').includes(owner) && of(rule, 'default').includes(resource)) coversContents = true;
+  }
+  if (opts.folder && !coversContents) throw notPrivate(resource, 'has access rules that don’t cover what is in it');
 }
 
 const usable = (u: string) => {

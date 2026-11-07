@@ -4,7 +4,7 @@ import * as oauth from 'oauth4webapi';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { config } from '../src/config.js';
 import { get, HttpError, openDb, put } from '../src/db.js';
-import { keepOwnPodLogin, loadOwnPodLogin } from '../src/services/ownPods.js';
+import { forgetOwnPodLogin, keepOwnPodLogin, loadOwnPodLogin, saveOwnPodLogin } from '../src/services/ownPods.js';
 import { solid } from '../src/services/solid.js';
 import { inPods, podOf, storageAbove, type SolidLogin } from '../src/solidOidc.js';
 
@@ -109,7 +109,7 @@ const status = async (p: Promise<unknown>) => {
 describe('a Solid account’s private data in its own pod', () => {
   it('goes to Concord’s folder in their pod, made private to them before anything is written there', async () => {
     const a = await account();
-    expect(await keepOwnPodLogin(a.id, await login(a.webId), a.pod)).toBe('kept');
+    expect(await keepOwnPodLogin(a.id, await login(a.webId), a.pod)).toMatchObject({ status: 'kept' });
     const r = await solid.write(a.id, 'use-cases/u1.ttl', '<#x> a <#Y> .');
     expect(r).toEqual({ kind: 'solid', url: `${a.pod}concord/use-cases/u1.ttl` });
     const folder = `/${a.id}/concord/`;
@@ -121,19 +121,88 @@ describe('a Solid account’s private data in its own pod', () => {
     const puts = log.filter((l) => l.startsWith('PUT'));
     expect(puts.indexOf(`PUT ${folder}.acl`)).toBeLessThan(puts.indexOf(`PUT ${folder}use-cases/u1.ttl`));
     expect(await get('privateFiles', `${a.id}/use-cases/u1.ttl`)).toBeUndefined();
-    // Once private, later writes don't touch the access control again.
+    // Later writes check it again, but don't change it.
     log = [];
     await solid.write(a.id, 'use-cases/u2.ttl', 'two');
-    expect(log.some((l) => l.includes('.acl'))).toBe(false);
+    expect(log.filter((l) => l.startsWith('PUT') && l.includes('.acl'))).toEqual([]);
+    expect(log).toContain(`GET ${folder}.acl`);
   });
 
-  it('leaves access control the owner already set on the folder as it is', async () => {
+  const ownerOnly = (folder: string, owner: string) =>
+    `@prefix acl: <http://www.w3.org/ns/auth/acl#>.\n<#me> a acl:Authorization; acl:agent <${owner}>; acl:accessTo <${folder}>; acl:default <${folder}>; acl:mode acl:Read, acl:Write, acl:Control.\n`;
+  const everyone = (folder: string, owner: string) =>
+    `${ownerOnly(folder, owner)}<#all> a acl:Authorization; acl:agentClass <http://xmlns.com/foaf/0.1/Agent>; acl:accessTo <${folder}>; acl:default <${folder}>; acl:mode acl:Read.\n`;
+  const aclDoc = (body: string) => ({ body: Buffer.from(body), type: 'text/turtle', etag: `"acl${++tag}"` });
+
+  it('leaves an access control the owner already set on the folder as it is, when it is private to them', async () => {
     const a = await account();
     await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    const folder = `${a.pod}concord/`;
     docs.set(`/${a.id}/concord/`, { body: Buffer.alloc(0), type: 'text/turtle', etag: '"f"' });
-    docs.set(`/${a.id}/concord/.acl`, { body: Buffer.from('# theirs'), type: 'text/turtle', etag: '"a"' });
-    await solid.write(a.id, 'interviews/i.ttl', 'x');
-    expect(docs.get(`/${a.id}/concord/.acl`)?.body.toString()).toBe('# theirs');
+    docs.set(`/${a.id}/concord/.acl`, aclDoc(ownerOnly(folder, a.webId)));
+    expect(await status(solid.write(a.id, 'interviews/i.ttl', 'x'))).toBe('ok');
+    expect(docs.get(`/${a.id}/concord/.acl`)?.body.toString()).toBe(ownerOnly(folder, a.webId));
+  });
+
+  // Review r1 of step 5e: an access control already on the folder (or one that appeared between Concord's look and
+  // its write, a 412) was taken as private without reading it, so a public folder would have received private data.
+  it('refuses to write into a folder whose access control lets others in, or leaves its contents to the rules above', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    const folder = `${a.pod}concord/`;
+    docs.set(`/${a.id}/concord/`, { body: Buffer.alloc(0), type: 'text/turtle', etag: '"f"' });
+    for (const [acl, why] of [
+      [everyone(folder, a.webId), /can be opened by others than you/],
+      [`@prefix acl: <http://www.w3.org/ns/auth/acl#>.\n<#x> acl:agent <https://someone.else/#me>; acl:accessTo <${folder}>; acl:mode acl:Read.\n${ownerOnly(folder, a.webId)}`, /can be opened by others than you/],
+      [`@prefix acl: <http://www.w3.org/ns/auth/acl#>.\n<#me> acl:agent <${a.webId}>; acl:accessTo <${folder}>; acl:mode acl:Read, acl:Write.\n`, /don’t cover what is in it/],
+      ['# theirs', /don’t cover what is in it/],
+    ] as const) {
+      docs.set(`/${a.id}/concord/.acl`, aclDoc(acl));
+      expect(await status(solid.write(a.id, 'interviews/i.ttl', 'x'))).toMatch(new RegExp(`^409 Concord didn’t save to your pod: .*${why.source}`));
+      expect(await status(solid.writeExisting(a.id, 'alpha/testing.jsonld', '{}', 'application/ld+json', { ifNoneMatch: '*' }))).toMatch(/^409/);
+    }
+    // One made by someone else between Concord's look and its own write (Concord's gets 412) is read and checked too.
+    docs.delete(`/${a.id}/concord/.acl`);
+    let raced = false;
+    refuse = (method, path) => {
+      if (method === 'PUT' && path.endsWith('/concord/.acl') && !raced) {
+        raced = true;
+        docs.set(path, aclDoc(everyone(folder, a.webId)));
+        return 412;
+      }
+      return undefined;
+    };
+    expect(await status(solid.write(a.id, 'interviews/i.ttl', 'x'))).toMatch(/^409 .*can be opened by others than you/);
+    expect([...docs.keys()].filter((k) => k.includes('/interviews/') || k.includes('/alpha/'))).toEqual([]);
+  });
+
+  it('refuses a folder or document below it whose own access control lets others in, but allows the administrators’ read-only share', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    await solid.write(a.id, 'interviews/first.ttl', 'x');
+    const sub = `${a.pod}concord/interviews/`;
+    docs.set(`/${a.id}/concord/interviews/.acl`, aclDoc(everyone(sub, a.webId)));
+    expect(await status(solid.write(a.id, 'interviews/second.ttl', 'x'))).toMatch(/^409 .*interviews\/ can be opened by others than you/);
+    docs.delete(`/${a.id}/concord/interviews/.acl`);
+    docs.set(`/${a.id}/concord/interviews/first.ttl.acl`, aclDoc(everyone(`${sub}first.ttl`, a.webId)));
+    expect(await status(solid.write(a.id, 'interviews/first.ttl', 'y'))).toMatch(/^409 .*first\.ttl can be opened by others than you/);
+    expect(docs.get(`/${a.id}/concord/interviews/first.ttl`)?.body.toString()).toBe('x');
+    // Concord's own share of the feedback folder (the administrators may read) is fine to write below.
+    await solid.writeExisting(a.id, 'feedback/f1.json', '{}', 'application/json');
+    expect(await solid.shareRead(a.id, 'feedback/', ['https://admin.example/profile#me'])).toBe('shared');
+    expect(await status(solid.writeExisting(a.id, 'feedback/f2.json', '{}', 'application/json'))).toBe('ok');
+  });
+
+  // Review r1 of step 5e: the path was put after Concord's folder as it was, so `../x` landed elsewhere in the pod
+  // (still inside it, so the pod check let it through), outside the folder Concord made private.
+  it('never writes or reads outside Concord’s folder, whatever the path', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    for (const bad of ['../public.ttl', 'use-cases/../../public.ttl', '/public.ttl', 'a/./b.ttl', 'a//b.ttl', '%2e%2e/public.ttl', 'a%2fb', 'a\\b', 'x?y', 'x#y', '']) {
+      expect(await status(solid.write(a.id, bad, 'x'))).toMatch(/^400 Not a path inside Concord’s folder/);
+      expect(await status(solid.read(a.id, bad))).toMatch(/^400 Not a path inside Concord’s folder/);
+    }
+    expect(log.filter((l) => l.startsWith('PUT'))).toEqual([]);
   });
 
   it('reports a write their pod refuses, and keeps nothing here instead', async () => {
@@ -162,7 +231,7 @@ describe('a Solid account’s private data in its own pod', () => {
     await keepOwnPodLogin(a.id, await login(a.webId, { expiresAt: Date.now() - 1000, refreshToken: undefined }), a.pod);
     expect(await status(solid.write(a.id, 'use-cases/u.ttl', 'x'))).toMatch(/^409 Your Solid sign-in has ended/);
     // A profile naming no pod: nothing is kept, and the write says what to fix.
-    expect(await keepOwnPodLogin(a.id, await login(a.webId), undefined)).toBe('no-pod');
+    expect(await keepOwnPodLogin(a.id, await login(a.webId), undefined)).toEqual({ status: 'no-pod' });
     expect(await status(solid.write(a.id, 'use-cases/u.ttl', 'x'))).toMatch(/pim:storage/);
     expect(log.filter((l) => l.startsWith('PUT'))).toEqual([]);
     expect(await get('privateFiles', `${a.id}/use-cases/u.ttl`)).toBeUndefined();
@@ -171,15 +240,87 @@ describe('a Solid account’s private data in its own pod', () => {
   it('needs CONCORD_ENCRYPTION_KEY to keep the login, and says so', async () => {
     const a = await account();
     delete process.env.CONCORD_ENCRYPTION_KEY;
-    expect(await keepOwnPodLogin(a.id, await login(a.webId), a.pod)).toBe('no-key');
+    expect(await keepOwnPodLogin(a.id, await login(a.webId), a.pod)).toEqual({ status: 'no-key' });
     expect(await status(solid.write(a.id, 'use-cases/u.ttl', 'x'))).toMatch(/^409 .*CONCORD_ENCRYPTION_KEY/);
   });
 
-  it('keeps the login sealed, and refreshes it under the account’s own id', async () => {
+  it('keeps the login sealed, and refreshes it under an id of its own sign-in', async () => {
     const a = await account();
-    await keepOwnPodLogin(a.id, await login(a.webId, { refreshToken: 'rt-secret' }), a.pod);
+    const kept = await keepOwnPodLogin(a.id, await login(a.webId, { refreshToken: 'rt-secret' }), a.pod);
+    if (kept.status !== 'kept') throw new Error('not kept');
+    expect(kept.sharedId).toMatch(new RegExp(`^user:${a.id}#[0-9a-f]+$`));
     expect(JSON.stringify(await get('kv', `solid-user:${a.id}`))).not.toContain('rt-secret');
-    expect(await loadOwnPodLogin(`user:${a.id}`)).toMatchObject({ refreshToken: 'rt-secret', sharedId: `user:${a.id}` });
+    expect(await loadOwnPodLogin(kept.sharedId)).toMatchObject({ refreshToken: 'rt-secret', sharedId: kept.sharedId });
+  });
+
+  // Review r1 of step 5e: one sealing context for every account, and loading took the row's word for whose login it
+  // was, so a sealed login copied into another account's row was used as that account.
+  it('opens a sealed login only for the account, WebID and pod it was kept for', async () => {
+    const a = await account();
+    const b = await account();
+    const ka = await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    const kb = await keepOwnPodLogin(b.id, await login(b.webId), b.pod);
+    if (ka.status !== 'kept' || kb.status !== 'kept') throw new Error('not kept');
+    const rowA = (await get<{ sealed: string; gen: string }>('kv', `solid-user:${a.id}`))!;
+    const rowB = (await get<{ id: string; webId: string; pod: string; gen: string; sealed: string }>('kv', `solid-user:${b.id}`))!;
+    await put('kv', { ...rowB, sealed: rowA.sealed, gen: rowA.gen });
+    expect(await loadOwnPodLogin(`user:${b.id}#${rowA.gen}`)).toBeUndefined();
+    await put('kv', { ...rowB, pod: a.pod });
+    expect(await loadOwnPodLogin(kb.sharedId)).toBeUndefined();
+    expect(await loadOwnPodLogin(ka.sharedId)).toBeDefined();
+  });
+
+  // Review r1 of step 5e: signing out left the kept login in place, so work after it (and a refresh) could go on as them.
+  it('forgets the login at sign-out, and a refresh under way can’t bring it back', async () => {
+    const a = await account();
+    const kept = await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    if (kept.status !== 'kept') throw new Error('not kept');
+    const refreshing = (await loadOwnPodLogin(kept.sharedId))!;
+    await forgetOwnPodLogin(a.id);
+    await saveOwnPodLogin(kept.sharedId, { ...refreshing, accessToken: 'at-2', refreshToken: 'rt-2' });
+    expect(await get('kv', `solid-user:${a.id}`)).toBeUndefined();
+    expect(await status(solid.write(a.id, 'use-cases/u.ttl', 'x'))).toMatch(/^409 .*sign in with Solid again/i);
+  });
+
+  it('signs out through the API: the kept login goes with the session', async () => {
+    const request = (await import('supertest')).default;
+    const { createApp } = await import('../src/app.js');
+    const { createSession } = await import('../src/services/users.js');
+    const { SESSION_COOKIE } = await import('../src/auth.js');
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    const token = await createSession(a.id);
+    await request(createApp()).post('/api/auth/logout').set('Cookie', `${SESSION_COOKIE}=${token}`).send({}).expect(200);
+    expect(await get('kv', `solid-user:${a.id}`)).toBeUndefined();
+  });
+
+  // Review r1 of step 5e: a refresh merged its tokens into whatever row was there, so a newer sign-in's key and
+  // client were paired with the older sign-in's tokens.
+  it('saves a refresh only into the sign-in it refreshed, never into a newer one', async () => {
+    const a = await account();
+    const first = await keepOwnPodLogin(a.id, await login(a.webId, { refreshToken: 'rt-first' }), a.pod);
+    if (first.status !== 'kept') throw new Error('not kept');
+    const old = (await loadOwnPodLogin(first.sharedId))!;
+    const second = await keepOwnPodLogin(a.id, await login(a.webId, { refreshToken: 'rt-second' }), a.pod);
+    if (second.status !== 'kept') throw new Error('not kept');
+    await saveOwnPodLogin(first.sharedId, { ...old, refreshToken: 'rt-first-rotated' });
+    expect(await loadOwnPodLogin(first.sharedId)).toBeUndefined();
+    expect(await loadOwnPodLogin(second.sharedId)).toMatchObject({ refreshToken: 'rt-second' });
+    await saveOwnPodLogin(second.sharedId, { ...(await loadOwnPodLogin(second.sharedId))!, refreshToken: 'rt-second-rotated' });
+    expect(await loadOwnPodLogin(second.sharedId)).toMatchObject({ refreshToken: 'rt-second-rotated' });
+  });
+
+  // Review r1 of step 5e: a failed read of their own pod fell back to this server's store, so a refused or broken pod
+  // looked like stale or missing data.
+  it('reports a read their pod fails, and only a missing document reads as missing', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    await put('privateFiles', { id: `${a.id}/use-cases/u.ttl`, data: Buffer.from('stale copy here').toString('base64') }, a.id);
+    expect(await solid.read(a.id, 'use-cases/u.ttl')).toBeUndefined();
+    await solid.write(a.id, 'use-cases/u.ttl', 'in the pod');
+    expect(await solid.read(a.id, 'use-cases/u.ttl')).toBe('in the pod');
+    refuse = (method) => (method === 'GET' ? 500 : undefined);
+    expect(await status(solid.read(a.id, 'use-cases/u.ttl'))).toMatch(/^502 Couldn’t read from your pod: .*500/);
   });
 
   // A Solid sign-in gives one refresh token, which a provider may rotate at each use. An administrator's session
@@ -189,12 +330,13 @@ describe('a Solid account’s private data in its own pod', () => {
     const { sessionKey } = await import('../src/solidOidc.js');
     const a = await account();
     const l = await login(a.webId, { refreshToken: 'rt-shared' });
-    await keepOwnPodLogin(a.id, l, a.pod);
+    const kept = await keepOwnPodLogin(a.id, l, a.pod);
+    if (kept.status !== 'kept') throw new Error('not kept');
     const token = `admin-session-${a.id}`;
-    expect(await keepAdminLogin(token, l, { sharedWith: `user:${a.id}` })).toBe(true);
+    expect(await keepAdminLogin(token, l, { sharedWith: kept.sharedId })).toBe(true);
     const row = await get<{ ref?: string; sealed: string }>('kv', `admin-login:${sessionKey(token)}`);
-    expect(row).toMatchObject({ ref: `user:${a.id}`, sealed: '' });
-    expect(await adminLoginFor({ cookies: { [SESSION_COOKIE]: token } } as never)).toMatchObject({ refreshToken: 'rt-shared', sharedId: `user:${a.id}` });
+    expect(row).toMatchObject({ ref: kept.sharedId, sealed: '' });
+    expect(await adminLoginFor({ cookies: { [SESSION_COOKIE]: token } } as never)).toMatchObject({ refreshToken: 'rt-shared', sharedId: kept.sharedId });
   });
 
   it('shares the feedback folder in their own pod with the administrators', async () => {

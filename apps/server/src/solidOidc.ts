@@ -581,10 +581,7 @@ async function renew(login: SolidLogin): Promise<boolean> {
   const store = sharedLogins;
   return await withLease(`solid-refresh:${id}`, 30_000, async () => {
     const latest = await store.load(id);
-    if (!latest) return false; // signed out meanwhile
-    // A newer sign-in may have replaced the login (an own-pod login is one per account, step 5e): its tokens are
-    // bound to its own key and client, so those are taken up with them.
-    Object.assign(login, { keys: latest.keys, client: latest.client, as: latest.as });
+    if (!latest) return false; // signed out, or (an own-pod login, step 5e) replaced by a newer sign-in, meanwhile
     if (latest.accessToken !== login.accessToken && Date.now() < latest.expiresAt - 30_000) {
       Object.assign(login, { accessToken: latest.accessToken, refreshToken: latest.refreshToken, expiresAt: latest.expiresAt });
       return true;

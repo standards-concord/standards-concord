@@ -355,8 +355,8 @@ export function mountAuth(router: Router) {
     let ownLogin: string | undefined;
     if (usesOwnPod(user)) {
       const kept = await keepOwnPodLogin(user.id, done.login, done.storage);
-      if (kept === 'kept') ownLogin = `${USER_LOGIN_PREFIX}${user.id}`;
-      if (kept === 'kept' && user.podUrl !== done.storage) await setPodUrl(user.id, done.storage!);
+      if (kept.status === 'kept') ownLogin = kept.sharedId;
+      if (kept.status === 'kept' && user.podUrl !== done.storage) await setPodUrl(user.id, done.storage!);
     }
     if (isAdmin(user, 'solid')) await keepAdminLogin(sessionToken, done.login, { sharedWith: ownLogin });
     res.redirect(`${config.webUrl}${done.returnTo}`);
