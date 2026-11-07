@@ -61,8 +61,13 @@ async function checkMembers(input: unknown): Promise<FederationMember[]> {
     if (!project) throw new HttpError(400, `No ontology “${ontologyId}”`);
     if (out.some((m) => m.ontologyId === project.id)) throw new HttpError(400, `${project.title} is in the list twice`);
     if (version.startsWith('fork:')) {
-      // An ontology's development fork, for trying a change in the federation before proposing it.
-      if (!(await findFork(version.slice('fork:'.length), project))) throw new HttpError(400, `${project.title} has no fork “${version.slice('fork:'.length)}”`);
+      // An ontology's development fork, for trying a change in the federation before proposing it. Stored
+      // by its slug, whichever name it was given by (findFork also takes an id or qualified name), so one
+      // fork always has one version string.
+      const fork = await findFork(version.slice('fork:'.length), project);
+      if (!fork) throw new HttpError(400, `${project.title} has no fork “${version.slice('fork:'.length)}”`);
+      out.push({ ontologyId: project.id, version: `fork:${fork.slug}` });
+      continue;
     } else {
       if (version !== 'draft' && !(await ontologyStore.versions(project)).includes(version)) throw new HttpError(400, `${project.title} has no release ${version}`);
       // A version waiting for a steward's approval isn't public, so it can't be read into a federation (as with imports).
@@ -190,7 +195,8 @@ export async function setCommitment(project: OntologyProject, f: Federation, com
 
 /**
  * A member's graph and import closure. `override` replaces one ontology's working draft (a proposed
- * change): for the member itself and wherever another member's imports load that draft.
+ * change): for the member itself and wherever another member's imports load that draft, following
+ * whatever the proposal imports.
  */
 async function memberInputs(f: Federation, override?: { ontologyId: string; graph: OntologyGraph }): Promise<{ inputs: FederationMemberInput[]; key: string }> {
   const inputs: FederationMemberInput[] = [];
@@ -224,9 +230,8 @@ async function memberInputs(f: Federation, override?: { ontologyId: string; grap
         revision = m.version;
       }
     }
-    let closure = await hostedImportClosure(graph);
-    if (override && closure.imported.some((r) => r.ontologyId === override.ontologyId && r.version === 'draft'))
-      closure = { ...closure, imported: closure.imported.map((r) => (r.ontologyId === override.ontologyId && r.version === 'draft' ? { ...r, graph: override.graph, revision: proposedRevision } : r)) };
+    // Resolved with the proposal standing in for its draft, so imports the proposal adds are followed too.
+    const closure = await hostedImportClosure(graph, override && { ...override, revision: proposedRevision });
     inputs.push({ id: p.id, title: p.title, version: m.version, graph, closure });
     // The member's version (which fork, say) and the exact content it was at.
     parts.push(`${p.id}@${m.version}@${revision}[${closureFingerprint(closure)}]`);

@@ -34,7 +34,14 @@ export function matchImport(iri: string, projects: OntologyProject[], publicUrl 
   return undefined;
 }
 
-export function hostedImportResolver(projects: OntologyProject[]): ImportResolver {
+/** A proposed change to one ontology's working draft, used wherever an import loads that draft. */
+export interface DraftOverride {
+  ontologyId: string;
+  graph: OntologyGraph;
+  revision: string;
+}
+
+export function hostedImportResolver(projects: OntologyProject[], override?: DraftOverride): ImportResolver {
   return async (iri) => {
     const m = matchImport(iri, projects);
     if (!m) return null;
@@ -43,6 +50,8 @@ export function hostedImportResolver(projects: OntologyProject[]): ImportResolve
     if (version === undefined) version = (await latestVersion(project)) ?? 'draft';
     else if (version !== 'draft' && !(await ontologyStore.versions(project)).includes(version)) return null;
     if (await isHeld(project, version)) return { unresolved: 'held' };
+    // The proposal stands in for the draft, so what it imports is followed too.
+    if (override && version === 'draft' && project.id === override.ontologyId) return { iri, graph: override.graph, title: project.title, version, ontologyId: project.id, revision: override.revision };
     // A release never changes; the draft is named by its revision, read together with its graph so the
     // revision always names exactly what was loaded.
     if (version === 'draft') {
@@ -55,9 +64,9 @@ export function hostedImportResolver(projects: OntologyProject[]): ImportResolve
 }
 
 /** The import closure of `graph`, resolved against the ontologies Concord hosts. */
-export async function hostedImportClosure(graph: OntologyGraph): Promise<ImportClosure> {
+export async function hostedImportClosure(graph: OntologyGraph, override?: DraftOverride): Promise<ImportClosure> {
   if (graph.metadata().imports.length === 0) return { imported: [], unresolved: [], direct: [] };
-  return resolveImportClosure(graph, hostedImportResolver(await list<OntologyProject>('ontologies')));
+  return resolveImportClosure(graph, hostedImportResolver(await list<OntologyProject>('ontologies'), override));
 }
 
 /** What the closure loaded, for cache keys: a report is reused only for exactly the same imports. */

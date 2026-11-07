@@ -101,6 +101,9 @@ describe('federation forks', () => {
     const fed = await owner.post('/api/federations').send({ title: `With a fork ${Date.now()}`, members: [{ ontologyId: volId, version: '1.0.0' }, { ontologyId: fs.id, version: `fork:${fork.body.slug}` }] });
     expect(fed.status).toBe(201);
     expect(fed.body.memberInfo[1]).toMatchObject({ version: `fork:${fork.body.slug}`, forks: [{ slug: fork.body.slug, title: 'lenders' }] });
+    // Review r2: a fork named by its id is stored by its slug, so one fork never has two cache keys.
+    const byId = await owner.patch(`/api/federations/${fed.body.slug}`).send({ members: [{ ontologyId: volId, version: '1.0.0' }, { ontologyId: fs.id, version: `fork:${fork.body.id}` }] });
+    expect(byId.body.members[1]).toEqual({ ontologyId: fs.id, version: `fork:${fork.body.slug}` });
     const check = (await owner.get(`/api/federations/${fed.body.slug}/check`)).body;
     expect(check.passed).toBe(true);
     const cmp = (await owner.get(`/api/federations/${fed.body.slug}/compare/${fed.body.slug}`)).body;

@@ -6,6 +6,7 @@ import { openDb, put } from '../src/db.js';
 import { findProject, getProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
+import { checkFederationNow, findFederation } from '../src/services/federations.js';
 
 const app = createApp();
 const VOL = 'https://w3id.org/odi/volunteering#';
@@ -175,5 +176,20 @@ describe('federations', () => {
     expect(check.body.error).toMatch(/being reviewed/);
     const add = await owner.post('/api/federations').send({ title: `Held again ${Date.now()}`, members: [{ ontologyId: o.id, version: 'draft' }] });
     expect(add.status).toBe(400);
+  });
+
+  // Review r2: a proposal was swapped in for its draft only after another member's imports were
+  // resolved, so what the proposal newly imports was missing from that member's own check.
+  it('follows what a proposed change imports wherever another member imports its draft', async () => {
+    const owner = await login('Nested proposal owner');
+    const b = await coUser(owner);
+    const a = await coUser(owner);
+    const pa = await getProject(a.id);
+    await ontologyStore.commitWorking(pa, await OntologyGraph.fromTurtle(`${await (await ontologyStore.working(pa)).toTurtle()}\n<${pa.ontologyIRI}> <http://www.w3.org/2002/07/owl#imports> <${b.ontologyIRI}> .`), 'Import B', { name: 'Test' });
+    const fed = (await owner.post('/api/federations').send({ title: `Nested ${Date.now()}`, members: [{ ontologyId: a.id, version: 'draft' }, { ontologyId: b.id, version: 'draft' }] })).body;
+    const pb = await getProject(b.id);
+    const proposal = await OntologyGraph.fromTurtle(`${await (await ontologyStore.working(pb)).toTurtle()}\n<${pb.ontologyIRI}> <http://www.w3.org/2002/07/owl#imports> <https://w3id.org/odi/volunteering> .`);
+    const check = await checkFederationNow(await findFederation(fed.id), { ontologyId: b.id, graph: proposal });
+    expect(check.members.find((m) => m.ontologyId === a.id)?.imports).toBe(2);
   });
 });
