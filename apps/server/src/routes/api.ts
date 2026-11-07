@@ -74,6 +74,7 @@ import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser
 import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
 import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
 import { reasonInWorker } from '../reasoner/pool.js';
+import { keepAlive } from '../keepAlive.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -530,7 +531,12 @@ export function apiRouter(): Router {
     requireUser(req);
     return await meetingFor(req);
   };
-  r.get('/meetings/:id', async (req, res) => res.json(await visible(req)));
+  r.get('/meetings/:id', async (req, res) => {
+    const m = await visible(req);
+    // A simulated call is carried on by whoever reads it (see meetings.simulateCall).
+    if (m && meetings.simulationRunning(m)) void keepAlive(meetings.advanceSimulation(m.id)).catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
+    res.json(m);
+  });
   r.patch('/meetings/:id', async (req, res) => {
     const b = req.body ?? {};
     const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
@@ -554,7 +560,7 @@ export function apiRouter(): Router {
   r.post('/meetings/:id/end', async (req, res) => {
     const m = await meetings.getMeeting(String(req.params.id));
     await meetings.requireFacilitator(m, requireUser(req), 'end this call');
-    meetings.stopSimulation(m.id);
+    await meetings.stopSimulation(m.id);
     res.json(await meetings.endLiveMeeting(m.id));
   });
   r.post('/meetings/:id/propose', async (req, res) => {

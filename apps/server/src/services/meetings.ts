@@ -10,6 +10,8 @@ import { llm } from '../llm/provider.js';
 import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
+import { keepAlive } from '../keepAlive.js';
+import { withLease } from '../lease.js';
 import { withLock } from '../locks.js';
 import { filterAsync } from '../asyncList.js';
 import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, driveStrays, idleBot, knownGone, MAX_DISMISSED, normalise, noteStray, settled, tracked } from './botLifecycle.js';
@@ -854,36 +856,87 @@ export const SIMULATED_CALL: TranscriptLine[] = [
   { speaker: 'Priya Shah', text: "Great. I'll ask Concord to write this up as use cases and a draft change request, and we'll review it asynchronously rather than meeting again." },
 ];
 
-const runningSimulations = new Set<string>();
-
-/** Replays the scripted call line by line so testers can watch the co-facilitator work. */
+/**
+ * Replays the scripted call line by line so testers can watch the co-facilitator work. Its progress is on the
+ * meeting record (lines are due one every `delayMs` from the start), and any server instance asked about the call
+ * adds the lines whose time has come (advanceSimulation): this one carries it on while it runs, and on Vercel,
+ * where an instance may stop once it has answered, reading the call carries it on.
+ */
 export async function simulateCall(project: OntologyProject, user: User, title: string, opts: { delayMs?: number; postPromptsToChat?: boolean } = {}) {
+  const delay = Math.max(0, opts.delayMs ?? 1800);
   const m = await newMeeting(project, user, title || 'Volunteering standard: use case call (simulated)', 'simulation', {
     meetingUrl: 'https://meet.google.com/sim-ulat-ion',
     postPromptsToChat: !!opts.postPromptsToChat,
     bot: { provider: 'simulated', status: 'in-call' },
+    simulation: { startedAt: Date.now(), delayMs: delay, next: 0 },
   });
-  const delay = opts.delayMs ?? 1800;
-  runningSimulations.add(m.id);
-  const run = async () => {
-    for (const line of SIMULATED_CALL) {
-      if (!runningSimulations.has(m.id)) return;
-      if (delay) await new Promise((r) => setTimeout(r, delay));
-      await onLiveLine(m.id, { ...line, t: (await getMeeting(m.id)).transcript.length * 20 }, { minGapLines: 4 });
-    }
-    runningSimulations.delete(m.id);
-    const done = await mutateMeeting(m.id, (x) => {
-      x.bot = { provider: 'simulated', status: 'done' };
-    });
-    emit(done, { type: 'status', status: done.status, bot: done.bot });
-    await analyseMeeting(done);
-  };
-  if (delay) void run().catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
-  else await run();
+  if (delay) void keepAlive(carryOn(m.id, delay)).catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
+  else await advanceSimulation(m.id);
   await logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.simulated', message: `started a simulated call “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
   return await getMeeting(m.id);
 }
 
-export function stopSimulation(id: string) {
-  runningSimulations.delete(id);
+async function carryOn(id: string, delay: number) {
+  for (let more = true; more; more = await advanceSimulation(id)) await new Promise((r) => setTimeout(r, delay));
+}
+
+/** Whether a simulated call still has lines to come. */
+export const simulationRunning = (m: Meeting) => !!m.simulation && !m.simulation.stopped && !m.simulation.finished;
+
+/**
+ * Adds a simulated call's lines whose time has come, then (after the last) ends and analyses it. One instance at
+ * a time (a lease); each line is added exactly once, by the step that moves `next` on in the same transaction.
+ * True while lines remain.
+ */
+export async function advanceSimulation(id: string): Promise<boolean> {
+  return (await withLease(`simulation:${id}`, 60_000, () => advanceNow(id), { wait: false })) ?? true;
+}
+
+async function advanceNow(id: string): Promise<boolean> {
+  for (;;) {
+    const m = await get<Meeting>('meetings', id);
+    const sim = m?.simulation;
+    if (!m || !sim || sim.stopped || sim.finished) return false;
+    if (sim.next >= SIMULATED_CALL.length) return finishSimulation(id);
+    const due = sim.delayMs ? Math.floor((Date.now() - sim.startedAt) / sim.delayMs) : SIMULATED_CALL.length;
+    if (sim.next >= due) return true;
+    const i = sim.next;
+    await onLiveLine(
+      id,
+      { ...SIMULATED_CALL[i], t: m.transcript.length * 20 },
+      {
+        minGapLines: 4,
+        accept: (x) => x.simulation?.next === i && !x.simulation.stopped,
+        before: (x) => void (x.simulation!.next = i + 1),
+      },
+    );
+  }
+}
+
+async function finishSimulation(id: string): Promise<false> {
+  let mine = false;
+  const done = await mutateMeeting(id, (x) => {
+    if (!x.simulation || x.simulation.finished || x.simulation.stopped) return;
+    x.simulation.finished = true;
+    x.bot = { provider: 'simulated', status: 'done' };
+    mine = true;
+  });
+  if (!mine) return false;
+  emit(done, { type: 'status', status: done.status, bot: done.bot });
+  await analyseMeeting(done);
+  return false;
+}
+
+/** Simulated calls still running, carried on (from the scheduler: a call nobody is watching still finishes). */
+export async function carryOnSimulations() {
+  for (const m of await list<Meeting>('meetings')) if (m.source === 'simulation' && simulationRunning(m)) await advanceSimulation(m.id);
+}
+
+/** End call on a simulated call: no more lines, on any instance. */
+export async function stopSimulation(id: string) {
+  const m = await get<Meeting>('meetings', id);
+  if (!m || !simulationRunning(m)) return;
+  await mutateMeeting(id, (x) => {
+    if (x.simulation && !x.simulation.finished) x.simulation.stopped = true;
+  });
 }

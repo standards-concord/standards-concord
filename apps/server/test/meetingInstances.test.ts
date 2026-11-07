@@ -1,7 +1,7 @@
 import type { Meeting } from '@concord/shared';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { closeDb, openDb, put } from '../src/db.js';
-import { analyseMeeting, getMeeting, mutateMeeting } from '../src/services/meetings.js';
+import { advanceSimulation, analyseMeeting, getMeeting, mutateMeeting, SIMULATED_CALL } from '../src/services/meetings.js';
 import { findProject } from '../src/services/ontologies.js';
 import { seedDemo } from '../src/services/simulation.js';
 
@@ -13,7 +13,7 @@ import { seedDemo } from '../src/services/simulation.js';
  * TEST_DATABASE_URL both are on a real Postgres, on separate connections.
  */
 const pgUrl = process.env.TEST_DATABASE_URL;
-let other: { mutateMeeting: typeof mutateMeeting; closeDb: typeof closeDb };
+let other: { mutateMeeting: typeof mutateMeeting; advanceSimulation: typeof advanceSimulation; closeDb: typeof closeDb };
 
 beforeAll(async () => {
   if (pgUrl) await openDb({ kind: 'postgres', url: pgUrl, max: 4 });
@@ -23,7 +23,8 @@ beforeAll(async () => {
   const db = await import('../src/db.js');
   if (pgUrl) await db.openDb({ kind: 'postgres', url: pgUrl, max: 4 });
   else await db.openDb();
-  other = { mutateMeeting: (await import('../src/services/meetings.js')).mutateMeeting, closeDb: db.closeDb };
+  const meetings = await import('../src/services/meetings.js');
+  other = { mutateMeeting: meetings.mutateMeeting, advanceSimulation: meetings.advanceSimulation, closeDb: db.closeDb };
 });
 afterAll(async () => {
   await other?.closeDb();
@@ -80,5 +81,25 @@ describe('analysing a call on several servers', () => {
     expect(out.status).toBe('analysed');
     expect(out.analysis?.competencyQuestions.length).toBeGreaterThan(0);
     expect(out.analysisClaim).toBeUndefined();
+  });
+});
+
+describe('a simulated call on several servers', () => {
+  // The replay was a loop in the process that started it, so on Vercel, where an instance may stop once it has
+  // answered, the call stopped mid-way and stayed "live". Its progress is now on the record, carried on by
+  // whichever server is asked, each line exactly once.
+  it('is carried on by any server, each line once and in order, and ends analysed', async () => {
+    const m = await meeting({ source: 'simulation', status: 'live', transcript: [], bot: { provider: 'simulated', status: 'in-call' }, simulation: { startedAt: Date.now() - 60_000, delayMs: 1, next: 0 } });
+    await Promise.all([advanceSimulation(m.id), other.advanceSimulation(m.id), advanceSimulation(m.id)]);
+    for (let i = 0; i < 100 && (await getMeeting(m.id)).status !== 'analysed'; i++) await new Promise((r) => setTimeout(r, 20));
+    const done = await getMeeting(m.id);
+    expect(done.transcript.map((l) => l.text)).toEqual(SIMULATED_CALL.map((l) => l.text));
+    expect(done).toMatchObject({ status: 'analysed', bot: { status: 'done' }, simulation: { finished: true } });
+  });
+
+  it('adds only the lines whose time has come', async () => {
+    const m = await meeting({ source: 'simulation', status: 'live', transcript: [], bot: { provider: 'simulated', status: 'in-call' }, simulation: { startedAt: Date.now() - 3 * 60_000 - 1000, delayMs: 60_000, next: 0 } });
+    expect(await other.advanceSimulation(m.id)).toBe(true);
+    expect((await getMeeting(m.id)).transcript).toHaveLength(3);
   });
 });

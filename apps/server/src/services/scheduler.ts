@@ -32,12 +32,13 @@ const DAY = 24 * 60 * MINUTE;
 
 /** The jobs, imported when first run so loading this module loads none of them. */
 const defaultJobs = async (): Promise<ScheduledJob[]> => {
-  const [{ runTick }, { meetBotTick }, { sweepRuns }, { processOutstanding }, { syncFeedbackSharing }] = await Promise.all([
+  const [{ runTick }, { meetBotTick }, { sweepRuns }, { processOutstanding }, { syncFeedbackSharing }, { carryOnSimulations }] = await Promise.all([
     import('./simulation.js'),
     import('./meetBot.js'),
     import('./appGithub.js'),
     import('./feedbackIssues.js'),
     import('./feedback.js'),
+    import('./meetings.js'),
   ]);
   return [
     // The governance clock: close review periods and votes, auto-merge, auto-draft releases, publish to GitHub.
@@ -48,6 +49,8 @@ const defaultJobs = async (): Promise<ScheduledJob[]> => {
     { name: 'github-app', every: MINUTE, run: sweepRuns },
     // Public feedback summaries that couldn't be posted straight away are retried.
     { name: 'feedback', every: MINUTE, run: processOutstanding },
+    // Simulated calls nobody is watching still finish (and get analysed).
+    { name: 'simulations', every: MINUTE, run: carryOnSimulations },
     // Testers' pod feedback folders are shared with exactly ADMIN_WEBIDS.
     { name: 'feedback-sharing', every: DAY, run: syncFeedbackSharing },
   ];

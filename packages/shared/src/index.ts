@@ -749,6 +749,8 @@ export interface Meeting {
   lastLineAt?: number;
   /** How many lines the transcript had when the co-lead bot last looked for a suggestion (paces its suggestions). */
   promptedAtLine?: number;
+  /** A simulated call's progress, kept on the record so whichever server instance is asked can carry it on. */
+  simulation?: { startedAt: number; delayMs: number; next: number; stopped?: boolean; finished?: boolean };
   /** While 'processing': which server run is analysing the call, until when (ms). A run that dies lets it lapse. */
   analysisClaim?: { token: string; until: number };
   transcript: TranscriptLine[];
