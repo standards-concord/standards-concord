@@ -150,10 +150,11 @@ export function publicOrigin(req: Request): string | undefined {
   const hinted = req.header('x-concord-origin');
   if (hinted && ORIGIN_RE.test(hinted.trim()) && fromTrustedProxy(req)) return norm(hinted);
   const host = req.headers.host?.trim().toLowerCase();
-  // As a Vercel function, Vercel only routes this deployment's own domains here, and the Host is the one asked for.
-  if (servedByVercel() && host && ORIGIN_RE.test(`https://${host}`)) return `https://${host}`;
   const direct = host ? trustedOrigins().find((o) => new URL(o).host === host) : undefined;
   if (direct) return direct;
+  // As a Vercel function, Vercel only routes this deployment's own domains here (a preview, a new custom domain),
+  // and the Host is the one asked for, over HTTPS.
+  if (servedByVercel() && host && ORIGIN_RE.test(`https://${host}`)) return `https://${host}`;
   if (process.env.CONCORD_PROXY_SECRET) return undefined;
   return norm(config.publicUrl);
 }

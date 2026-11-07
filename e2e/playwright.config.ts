@@ -109,7 +109,7 @@ export default defineConfig({
           reuseExistingServer: !process.env.CI,
           timeout: 120_000,
           env: {
-            ...(vercelApi ? { VERCEL: '1', DATABASE_URL: process.env.E2E_DATABASE_URL!, PUBLIC_URL: `http://localhost:${WEB_PORT}` } : {}),
+            ...(vercelApi ? { VERCEL: '1', DATABASE_URL: process.env.E2E_DATABASE_URL! } : {}),
             PORT: String(API_PORT),
             CONCORD_DATA_DIR: dataDir,
             WEB_URL: `http://localhost:${WEB_PORT}`,
