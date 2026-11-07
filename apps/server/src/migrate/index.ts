@@ -147,8 +147,11 @@ const diskHead = (dir: string) => {
   }
 };
 
-/** A repository's refs, but not the git store's short-lived pins (writers' commits waiting to be drafted). */
-const sourceRefs = (dir: string) => new Map([...gitRefs(dir, '')].filter(([name]) => !name.startsWith('refs/concord/commits/') && !name.startsWith('refs/concord/fork-pins/')));
+/**
+ * All of a repository's refs, the git store's pins included: a pin can be all that holds a writer's commit (one
+ * that crashed before the draft took it), and the git store reclaims or drops pins itself once it runs again.
+ */
+const sourceRefs = (dir: string) => gitRefs(dir, '');
 
 /** The fork branches the database store must have: each record's head, and branches on disk with no record. */
 async function expectedForkRefs(p: OntologyProject, dir: string | undefined): Promise<Map<string, string>> {

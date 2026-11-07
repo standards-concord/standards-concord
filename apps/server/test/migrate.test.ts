@@ -225,6 +225,26 @@ describe('moving a database to the database-backed ontology store', () => {
     await recopy();
   });
 
+  // Review r2 of #118: pins were left out of the refs recorded at import, so a commit only a pin held (a writer
+  // that crashed before the draft took it) was lost from the export.
+  it('keeps a commit that only a pin holds, and the pin, through import and export', async () => {
+    const orphan = inRepo('commit-tree', (await readCommit(firstRelease)).tree, '-p', firstRelease, '-m', 'A writer crashed before drafting this');
+    const pin = `refs/concord/commits/${orphan}-t${Date.now()}-writer-1`;
+    inRepo('update-ref', pin, orphan);
+    const out = fs.mkdtempSync(path.join(tmpdir(), 'concord-export-'));
+    try {
+      await recopy();
+      await exportHistories(out);
+      const git = (...args: string[]) => execFileSync('git', ['--git-dir', path.join(out, 'ontologies', p.slug, '.git'), ...args]).toString().trim();
+      expect(git('rev-parse', pin)).toBe(orphan);
+      expect(git('cat-file', '-t', orphan)).toBe('commit');
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+      inRepo('update-ref', '-d', pin);
+    }
+    await recopy();
+  });
+
   it('exports the repository’s other tags and branches too, as they were', async () => {
     // Only fork branches and named commits were written back, so a rollback lost other refs and their history.
     inRepo('tag', '-a', 'workshop-notes', '-m', 'Notes from the workshop', firstRelease);
