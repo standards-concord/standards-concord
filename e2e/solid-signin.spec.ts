@@ -110,7 +110,8 @@ test('the admin signs in with their WebID and reads testers’ feedback from the
   expect((await page.request.get('/api/feedback/pods')).status()).toBe(200);
 
   // Signing out ends the admin's Solid login: reading the pods needs a new one.
-  await page.request.post('/api/auth/logout');
+  const out = await page.request.post('/api/auth/logout', { data: {} });
+  expect(await out.json()).toEqual({ ended: true });
   expect((await page.request.get('/api/feedback/pods')).status()).toBe(401);
 });
 
@@ -124,7 +125,8 @@ test('someone else signs in with Solid (from their provider’s address) and can
 
   // Signing in again finds the same account.
   const id = session.user.id;
-  await page.request.post('/api/auth/logout');
+  const out = await page.request.post('/api/auth/logout', { data: {} });
+  expect(await out.json()).toEqual({ ended: true });
   await page.context().clearCookies();
   await solidSignIn(page, SOLID.visitor);
   expect((await (await page.request.get('/api/session')).json()).user.id).toBe(id);
