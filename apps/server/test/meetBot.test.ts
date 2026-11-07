@@ -254,17 +254,19 @@ describe('invite-by-email', () => {
     expect(m).toMatchObject({ status: 'scheduled', title: 'Use case workshop', meetingUrl: 'https://meet.google.com/xyz-abcd-efg', bot: { provider: 'recall', status: 'scheduled' } });
     expect(m.calendar).toMatchObject({ feed: 'calendar', start: '2026-11-10T15:00:00.000Z', organizer: 'tom@example.org', recurring: false });
 
-    // A day ahead: nothing is booked yet.
+    // A day ahead, as soon as the call is approved: a bot is booked to join at the start time. Used to wait until
+    // fifteen minutes before, so a few missed ticks inside Recall.ai's ten minutes' notice cost the call its bot.
     await dispatchDue(at('2026-11-09T15:00:00Z'));
-    expect(calls).toEqual([]);
-
-    // Fifteen minutes ahead: a bot is booked to join at the start time.
-    await dispatchDue(at('2026-11-10T14:46:00Z'));
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ method: 'POST', url: '/bot/', body: { meeting_url: 'https://meet.google.com/xyz-abcd-efg', join_at: '2026-11-10T15:00:00.000Z' } });
     m = await getMeeting(m.id);
     expect(m.status).toBe('scheduled');
     expect(m.bot?.botId).toBe(`bot-${nextBot}`);
+
+    // Later ticks book nothing more: the clock can miss every tick up to the start without the call losing its bot.
+    await dispatchDue(at('2026-11-10T14:46:00Z'));
+    await dispatchDue(at('2026-11-10T14:58:00Z'));
+    expect(calls.filter((c) => c.method === 'POST' && c.url === '/bot/')).toHaveLength(1);
 
     // The organiser moves the call: the booked bot is cancelled and booked again for the new time.
     calls.length = 0;
@@ -2000,6 +2002,8 @@ describe('invite-by-email', () => {
     const s = await steward('Steward Lookout');
     expect((await s.post(`/api/meetings/${m.id}/bot/dismiss`)).status).toBe(200);
     expect((await getMeeting(m.id)).bot!.dismissed).toHaveLength(1);
+    // Skipped, so the call doesn't book a new bot (whose own lookups would use the same link) while it is watched.
+    expect((await s.patch(`/api/meetings/${m.id}`).send({ skip: true })).status).toBe(200);
     const t = Date.now() + 24 * 3600e3;
     await dispatchDue(new Date(t));
     stubMode.listHides = false;
@@ -2505,6 +2509,8 @@ describe('scheduling from an uploaded invite', () => {
     expect(res.body.meetings).toHaveLength(2);
     const second = new Date(first.getTime() + 7 * 86400e3);
     await steward.post('/api/ontologies/volunteering/meetings/calendar').send({ ics: series(second) });
+    // Both weeks were booked straight away, so the cancelled week goes once Recall.ai confirms its bot is gone.
+    await meetBotIdle();
     const left = (await list<Meeting>('meetings')).filter((m) => m.calendar?.uid === 'weekly-upload');
     expect(left.map((m) => m.calendar!.start)).toEqual([first.toISOString()]);
   });

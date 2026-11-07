@@ -33,8 +33,8 @@ import { allUsers, logActivity } from './users.js';
 
 /** Calls further ahead than this aren't listed yet. */
 const HORIZON_MS = 14 * 24 * 60 * 60 * 1000;
-/** Recall.ai asks for ten minutes' notice to guarantee a bot; book a little earlier. */
-export const BOOK_AHEAD_MS = 15 * 60 * 1000;
+/** Without a Recall.ai key, an approved call says it can't have a bot this long before it starts. */
+const NO_PROVIDER_NOTICE_MS = 15 * 60 * 1000;
 /** A call that arrives by invite ends this long after its slot once the transcript goes quiet. */
 const QUIET_MS = 10 * 60 * 1000;
 const OVERRUN_MAX_MS = 3 * 60 * 60 * 1000;
@@ -507,10 +507,15 @@ function planOne(meetingId: string, now: Date) {
       } else if (tracked(m) && m.bot.phase === 'booked' && t >= start) {
         // Booked: the call goes live when it starts (or when the first transcript line arrives).
         m.status = 'live';
-      } else if (!blocked && t >= start - BOOK_AHEAD_MS && (!tracked(m) || m.bot.phase === 'idle')) {
+      } else if (!blocked && (!tracked(m) || m.bot.phase === 'idle')) {
+        // Booked as soon as the call is approved, to join at its start. Recall.ai only guarantees a bot booked
+        // more than ten minutes ahead (and recommends booking as early as possible), so a few missed ticks
+        // close to the start can't cost the call its bot. A moved call releases this bot and books again.
         if (!recall.enabled()) {
-          m.status = 'error';
-          m.bot = { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER };
+          if (t >= start - NO_PROVIDER_NOTICE_MS) {
+            m.status = 'error';
+            m.bot = { provider: 'simulated', status: 'error', error: NO_BOT_PROVIDER };
+          }
         } else {
           if (!tracked(m)) m.bot = idleBot();
           // Recorded here; sent from the call's lane under the booking's idempotency key.
