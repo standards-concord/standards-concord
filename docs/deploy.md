@@ -60,6 +60,7 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | `RECALL_API_KEY` | The live Google Meet co-facilitator bot (Recall.ai). Its webhook comes in through Vercel. |
 | `MEET_BOT_EMAIL`, `MEET_BOT_ICS_URL` | Invite the bot by email: its Google account's address, and that calendar's secret iCal address. See [meet-bot.md](meet-bot.md). |
 | `OPENAI_API_KEY` with `STT_PROVIDER=openai` | Voice feedback in browsers without built-in speech recognition (Firefox). |
+| `CONCORD_SCHEDULE`, `CRON_SECRET` | How scheduled work starts (see [Scheduled work](#scheduled-work)): `timer` (the default on a server) or `requests` (the default on Vercel). `CRON_SECRET` is the secret Vercel Cron sends to `GET /api/cron/daily`. Without it, that endpoint refuses every call. |
 | `DEMO_MODE`, `ALLOW_PUBLIC_RESET` | Demo sign-in and the simulated working group (on by default); whether any tester can reset the shared demo (off). |
 | `GHCR_USER`, `GHCR_TOKEN` | Only if the image is made private again: a token with `read:packages`. |
 
@@ -72,6 +73,15 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 - **Your own domain:** point DNS A records for the hostname and `pods.` under it at the static IP, change `HOST` in `/opt/concord/stack.env`, restart the stack, and change `BACKEND_URL` in Vercel.
 - **Moving Concord's public address** (the domain people and agents use): add the domain in Vercel, set `PUBLIC_URL` to it with `set-key.sh`, run `node scripts/public-url.mjs https://<new-origin>` and merge so the plugins and MCP Registry entry follow. Keep the old domain serving Concord for a few weeks: installed plugins only move when they update, and every agent has to sign in again at the new address, because OAuth tokens are tied to the address they were issued for.
 - **Removing it:** `az group delete -n concord` deletes the VM, its IP address, disk and snapshots.
+
+## Scheduled work
+
+Some of Concord's work runs on a schedule: the governance clock (closing review periods and votes, auto-merging, drafting releases, publishing to GitHub), the Meet bot's calendar, GitHub App runs a request didn't start, and retries of public feedback summaries. All of it lives in [scheduler.ts](../apps/server/src/services/scheduler.ts). Each job says how often it is due, and a run does whatever is due:
+
+- **On the server**, a timer looks every minute (`CONCORD_SCHEDULE=timer`).
+- **On Vercel**, there is no long-running process (`CONCORD_SCHEDULE=requests`). Each instance looks for due work after a request, at most every 30 seconds. So deadlines are met as soon as anyone visits, including on public pages, and a failed job is retried on the next request. A Vercel Cron call to `GET /api/cron/daily` once a day (the Hobby plan's limit) runs every job, due or not, to catch up after a quiet day.
+
+Only one run goes at a time across every instance. A run takes a lease in the database, which lapses after five minutes if its runner dies. Jobs must be safe to repeat and to run late.
 
 ## Before the backend runs on more than one instance
 
