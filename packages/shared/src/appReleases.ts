@@ -53,6 +53,63 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.42.0',
+    date: '2026-11-07',
+    title: 'Ontologies checked with what they import, and federations',
+    pr: 109,
+    changes: [
+      {
+        id: 'import-checks',
+        type: 'feat',
+        title: 'Every change is checked together with the ontologies it imports',
+        detail:
+          'An ontology that imports another is now reasoned over with that ontology loaded, so a change that contradicts it is caught, and the checks say which import the problem comes from. Imports that aren’t on Concord are listed as not checked. The Overview shows what an ontology builds on, and anyone signed in can propose importing another.',
+        roles: ['steward', 'contributor'],
+        to: '{o}#imports-title',
+        ask: 'When an import causes a problem, is it clear what to change?',
+      },
+      {
+        id: 'federations',
+        type: 'feat',
+        title: 'Federations: check that ontologies work together (Advanced features)',
+        detail:
+          'With Advanced features on, the hub links to Federations: sets of ontologies, each at a chosen release or following its working draft, that are meant to be used together. Concord checks them alone and together and says which pair conflicts. A change to an ontology that follows its draft is checked against each federation it is in; if the ontology’s owners committed it to the federation, a change that breaks it fails.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Would you use a federation to keep related standards consistent?',
+      },
+      {
+        id: 'federation-releases',
+        type: 'feat',
+        title: 'Federation releases pin every ontology to its content hash',
+        detail:
+          'A federation’s owners can publish a release once every ontology in it is at a release and they work together. It pins each ontology, and everything they import, to its version and an RDFC-1.0 content hash, with the hash of the SHACL shapes derived from them, and is published as an ontology anyone can import at /def/fed/<name>/<version>. The next version is suggested from how the ontologies moved.',
+        roles: ['steward'],
+        to: '/f',
+      },
+      {
+        id: 'federation-compare',
+        type: 'feat',
+        title: 'Sub-federations, and comparing two federations term by term',
+        detail:
+          'A federation can extend another, such as financial services building on government concepts. Compare shows, for every term, whether it is the same, means the same, is refined, loosened or contradicted, or exists on one side only, and how many shared terms the two agree on.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Does the comparison tell you whether one federation is safe to use with another?',
+      },
+      {
+        id: 'federation-forks',
+        type: 'feat',
+        title: 'Fork a federation, propose it back, and hand settled terms upstream',
+        detail:
+          'Anyone can fork a federation: a development fork tries changes (including an ontology’s development fork as a member) and proposes them back for the original’s owners to accept or decline; a divergent fork goes its own way. A federation that extends another can hand its settled terms upstream: each becomes a change request on an ontology of the federation it extends, re-created there and linked back to the original term.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Would handing terms upstream this way work for your standard?',
+      },
+    ],
+  },
+  {
     version: '0.41.4',
     date: '2026-11-07',
     title: 'Tidier “Validate from your own code”',

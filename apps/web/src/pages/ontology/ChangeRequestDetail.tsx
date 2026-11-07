@@ -435,6 +435,11 @@ export function ChangeRequestPage() {
               view fork
             </Link>
           )}
+          {cr.origin.type === 'federation' && (
+            <Link className="text-accent hover:underline" to={`/f/${cr.origin.federationSlug}`}>
+              view federation
+            </Link>
+          )}
           {cr.origin.type === 'term-edit' && (
             <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(cr.origin.termIri)}`}>
               view term
