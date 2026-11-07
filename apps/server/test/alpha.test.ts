@@ -168,7 +168,7 @@ describe('alpha tester records', () => {
     // Switching persona again keeps the same tester; signing out forgets both.
     await agent.post('/api/auth/demo').send({ userId: personas[1].id });
     expect((await agent.get('/api/alpha/me')).body.tester.id).toBe(testerId);
-    await agent.post('/api/auth/logout');
+    await agent.post('/api/auth/logout').send({});
     expect((await agent.get('/api/alpha/me')).body).toEqual({ versions: [] });
   });
 

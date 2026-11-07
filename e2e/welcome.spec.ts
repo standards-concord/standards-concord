@@ -19,22 +19,24 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test('explains what Concord is and how the alpha works', async ({ page }) => {
+test('says what Concord is for in a few lines, and leads into the walkthrough', async ({ page }) => {
   await page.goto('/welcome');
   await expect(page.getByRole('heading', { level: 1, name: 'Help us test Concord' })).toBeVisible();
   await expect(page.getByText(/early prototype for designing open data standards together/)).toBeVisible();
 
-  const aims = page.getByRole('region', { name: 'What Concord is for' });
-  for (const t of ['Rigorous by default', 'Shaped by the people who use them', 'Governance without endless meetings']) await expect(aims.getByRole('heading', { name: t })).toBeVisible();
+  // One paragraph on what Concord is for, and the note that matters before trying it. The aim cards, the numbered
+  // steps (the walkthrough explains them) and the closing "Ready?" box were cut to keep the page short.
+  const what = page.getByRole('region', { name: 'What Concord is for' });
+  await expect(what.getByText(/Concord lets the whole community shape a standard/)).toBeVisible();
+  await expect(what.getByRole('heading', { level: 3 })).toHaveCount(0);
+  await expect(page.getByText(/don’t enter anything confidential/)).toBeVisible();
+  await expect(page.getByRole('region', { name: 'How the alpha works' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Ready?' })).toHaveCount(0);
+  await expect(page.getByText('Optional: the guided walkthrough covers the same ground.')).toBeVisible();
+  await expect(page.getByText(/Recorded for release/)).toHaveCount(0);
 
-  const how = page.getByRole('region', { name: 'How the alpha works' });
-  await expect(how.getByRole('listitem')).toHaveCount(4);
-  await expect(how.getByText(/don’t enter anything confidential/)).toBeVisible();
-
-  // Both ways in, at the top and again at the bottom.
-  const starts = page.getByRole('link', { name: 'Start the guided walkthrough' });
-  await expect(starts).toHaveCount(2);
-  for (const l of await starts.all()) await expect(l).toHaveAttribute('href', '/alpha');
+  // One way into the walkthrough, at the top.
+  await expect(page.getByRole('link', { name: 'Start the guided walkthrough' })).toHaveAttribute('href', '/alpha');
   await expect(page.getByRole('link', { name: 'Just leave feedback' })).toHaveAttribute('href', '/feedback');
 
   // The floating walkthrough guide stays out of the way here (it shows on other pages).

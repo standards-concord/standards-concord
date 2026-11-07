@@ -22,6 +22,7 @@ import type { ProposedTerm } from '../llm/schemas.js';
 import { createChangeRequest, draftFromNaturalLanguage, getCR, MAX_EDITS, submit, updateOps } from './changeRequests.js';
 import { reasonInWorker } from '../reasoner/pool.js';
 import { fairContext } from './fairResolution.js';
+import { hostedImportClosure } from './importClosure.js';
 import { competencyTests, findProject, getProject, rolesFor, setRoles } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps } from './proposals.js';
@@ -555,7 +556,7 @@ function validationBrief(v: ValidationReport) {
 
 /** Strict OWL: a fork may never serve an inconsistent ontology or an unsatisfiable class. */
 async function requireConsistent(p: OntologyProject, graph: OntologyGraph, what: string) {
-  const report = await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI) });
+  const report = await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI), imports: await hostedImportClosure(graph) });
   const brief = validationBrief(report);
   if (!report.reasoner.available) {
     // No OWL verdict. The reasoner worker then reports the structural checks' verdict (which miss whole classes of

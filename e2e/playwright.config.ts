@@ -61,6 +61,9 @@ export default defineConfig({
     // round to whole pixels at each zoom level, which once made zoomed and saved diagrams draw
     // text wider or narrower than its box; with this, a local run catches that too.
     launchOptions: { args: ['--font-render-hinting=full'] },
+    // The production build registers a service worker (apps/web/sw/sw.js). Requests it answers bypass
+    // page.route, which many specs rely on, so it is off except where offline.spec.ts turns it on.
+    serviceWorkers: 'block',
   },
   projects: [
     {

@@ -38,7 +38,7 @@ export function ActivityList({ items, compact }: { items: ActivityItem[]; compac
 }
 
 export function ActivityFeed({ ontologyId, limit = 12, compact, refreshKey }: { ontologyId?: string; limit?: number; compact?: boolean; refreshKey?: unknown }) {
-  const state = useAsync(() => api.activity(ontologyId), [ontologyId, refreshKey]);
+  const state = useAsync(() => api.activity(ontologyId), [ontologyId, refreshKey], { keep: `activity|${ontologyId}` });
   if (state.error && !state.data) return <ErrorCard error={state.error} onRetry={state.reload} />;
   if (!state.data) return <Loading />;
   if (!state.data.length)

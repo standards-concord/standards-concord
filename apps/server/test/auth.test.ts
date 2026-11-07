@@ -40,6 +40,41 @@ describe('Google and GitHub sign-in', () => {
   });
 });
 
+// A sign-out made with no connection is sent later, naming the session it meant. It must end that
+// session only: by then the browser may hold a newer sign-in, or another account's session.
+describe('a sign-out sent later', () => {
+  it('ends only the session it names', async () => {
+    const agent = request.agent(app);
+    const first = (await agent.post('/api/auth/demo').send({ name: 'Leaver' })).body;
+    expect(first.sessionId).toMatch(/^[\w-]{22}$/);
+    expect((await agent.get('/api/session')).body.sessionId).toBe(first.sessionId);
+    // Signed in again (as someone else) before the old sign-out got through: it ends nothing.
+    const second = (await agent.post('/api/auth/demo').send({ name: 'Newcomer' })).body;
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect((await agent.post('/api/auth/logout').send({ session: first.sessionId })).body).toEqual({ ended: false });
+    expect((await agent.get('/api/session')).body.user?.id).toBe(second.user.id);
+    // Naming the current session ends it.
+    expect((await agent.post('/api/auth/logout').send({ session: second.sessionId })).body).toEqual({ ended: true });
+    expect((await agent.get('/api/session')).body.user).toBeUndefined();
+    // With nobody signed in there is nothing to end.
+    expect((await agent.post('/api/auth/logout').send({ session: second.sessionId })).body).toEqual({ ended: false });
+  });
+
+  it('a plain sign-out still ends the current session, and the session id is never the token', async () => {
+    const agent = request.agent(app);
+    const r = await agent.post('/api/auth/demo').send({ name: 'Plain leaver' });
+    const cookie = String(r.headers['set-cookie']).match(/concord_session=([^;]+)/)![1];
+    expect(r.body.sessionId).not.toContain(cookie);
+    // Another site's form can't sign anyone out: only a JSON request can.
+    const form = await agent.post('/api/auth/logout').type('form').send('session=');
+    expect(form.status).toBe(415);
+    expect(String(form.headers['set-cookie'] ?? '')).not.toContain('concord_session=;');
+    expect((await agent.get('/api/session')).body.user?.id).toBe(r.body.user.id);
+    expect((await agent.post('/api/auth/logout').send({})).body).toEqual({ ended: true });
+    expect((await agent.get('/api/session')).body.user).toBeUndefined();
+  });
+});
+
 describe('reading feedback', () => {
   it('is not possible by giving yourself an ontology role or playing a persona', async () => {
     const owner = request.agent(app);

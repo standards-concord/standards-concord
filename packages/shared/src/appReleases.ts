@@ -53,6 +53,131 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.44.1',
+    date: '2026-11-07',
+    title: 'Validate data takes every value the ontology allows',
+    pr: 117,
+    changes: [
+      {
+        id: 'derived-datatypes-validate',
+        type: 'fix',
+        title: 'Numbers and dates written as a narrower type now pass Validate data',
+        detail: 'A minimum age written as "16"^^xsd:unsignedByte, or a time written as an xsd:dateTimeStamp, was reported as the wrong type although the ontology allows it. Datatypes an ontology defines itself are now checked as the type they are based on, with their limits.',
+        roles: ['agent', 'contributor'],
+        to: '{o}/validate',
+      },
+    ],
+  },
+  {
+    version: '0.44.0',
+    date: '2026-11-07',
+    title: 'Read Concord with no connection',
+    pr: 116,
+    changes: [
+      {
+        id: 'offline-reading',
+        type: 'feat',
+        title: 'Pages you have opened work offline',
+        detail:
+          'Concord now saves the app and the pages you open while signed in on this device. With no connection, or after a reload on a train, it opens as you and shows what it saved: lists, change requests, releases, use cases, meetings, the ontology itself. A notice says you’re offline. Changes still need a connection for now. Only your account can see what was saved, and signing out deletes it.',
+        roles: [],
+        to: '{o}/changes',
+        ask: 'Did Concord show what you expected when you were offline? Was anything missing that you needed?',
+      },
+    ],
+  },
+  {
+    version: '0.43.0',
+    date: '2026-11-07',
+    title: 'Fewer words on the welcome page and around the hub',
+    changes: [
+      {
+        id: 'shorter-welcome',
+        type: 'feat',
+        title: 'A shorter welcome page and walkthrough start',
+        detail:
+          'The welcome page keeps one paragraph on what Concord is for, the videos and the note not to enter anything confidential; the aim cards, the numbered steps and the closing box are gone. On the walkthrough page, the version picker and the sign-in prompt fold into one “What’s new since you last tested?” link.',
+        roles: [],
+        to: '/welcome',
+        ask: 'Did the welcome page tell you enough to get started?',
+      },
+      {
+        id: 'less-repetition',
+        type: 'feat',
+        title: 'Less repetition on the overview, use cases, governance and Validate data',
+        detail:
+          'The overview line just counts classes, properties and use cases. Use case rows say who and when, with the rest on each use case’s page. Governance shows the policy template only while you edit the policy, and Validate data drops its standing line about size limits (an error says when data goes over one).',
+        roles: [],
+        to: '{o}',
+      },
+      {
+        id: 'drafted-automatically',
+        type: 'fix',
+        title: 'A release the policy drafted says “Drafted automatically”',
+        detail: 'It used to say “Drafted by someone”. FAIR check messages also count properly now (“1 keyword”, not “1 keyword(s)”).',
+        roles: ['steward'],
+        to: '{o}/releases',
+      },
+    ],
+  },
+  {
+    version: '0.42.0',
+    date: '2026-11-07',
+    title: 'Ontologies checked with what they import, and federations',
+    pr: 109,
+    changes: [
+      {
+        id: 'import-checks',
+        type: 'feat',
+        title: 'Every change is checked together with the ontologies it imports',
+        detail:
+          'An ontology that imports another is now reasoned over with that ontology loaded, so a change that contradicts it is caught, and the checks say which import the problem comes from. Imports that aren’t on Concord are listed as not checked. The Overview shows what an ontology builds on, and anyone signed in can propose importing another.',
+        roles: ['steward', 'contributor'],
+        to: '{o}#imports-title',
+        ask: 'When an import causes a problem, is it clear what to change?',
+      },
+      {
+        id: 'federations',
+        type: 'feat',
+        title: 'Federations: check that ontologies work together (Advanced features)',
+        detail:
+          'With Advanced features on, the hub links to Federations: sets of ontologies, each at a chosen release or following its working draft, that are meant to be used together. Concord checks them alone and together and says which pair conflicts. A change to an ontology that follows its draft is checked against each federation it is in; if the ontology’s owners committed it to the federation, a change that breaks it fails.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Would you use a federation to keep related standards consistent?',
+      },
+      {
+        id: 'federation-releases',
+        type: 'feat',
+        title: 'Federation releases pin every ontology to its content hash',
+        detail:
+          'A federation’s owners can publish a release once every ontology in it is at a release and they work together. It pins each ontology, and everything they import, to its version and an RDFC-1.0 content hash, with the hash of the SHACL shapes derived from them, and is published as an ontology anyone can import at /def/fed/<name>/<version>. The next version is suggested from how the ontologies moved.',
+        roles: ['steward'],
+        to: '/f',
+      },
+      {
+        id: 'federation-compare',
+        type: 'feat',
+        title: 'Sub-federations, and comparing two federations term by term',
+        detail:
+          'A federation can extend another, such as financial services building on government concepts. Compare shows, for every term, whether it is the same, means the same, is refined, loosened or contradicted, or exists on one side only, and how many shared terms the two agree on.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Does the comparison tell you whether one federation is safe to use with another?',
+      },
+      {
+        id: 'federation-forks',
+        type: 'feat',
+        title: 'Fork a federation, propose it back, and hand settled terms upstream',
+        detail:
+          'Anyone can fork a federation: a development fork tries changes (including an ontology’s development fork as a member) and proposes them back for the original’s owners to accept or decline; a divergent fork goes its own way. A federation that extends another can hand its settled terms upstream: each becomes a change request on an ontology of the federation it extends, re-created there and linked back to the original term.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Would handing terms upstream this way work for your standard?',
+      },
+    ],
+  },
+  {
     version: '0.41.4',
     date: '2026-11-07',
     title: 'Tidier “Validate from your own code”',

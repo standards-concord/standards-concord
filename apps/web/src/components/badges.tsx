@@ -69,6 +69,8 @@ export function originInfo(origin?: ChangeRequestOrigin): { icon: LucideIcon; la
       return { icon: Combine, label: 'Synthesised from use cases' };
     case 'fork':
       return { icon: GitFork, label: `From the fork ${origin.forkSlug}` };
+    case 'federation':
+      return { icon: Combine, label: `Handed upstream from ${origin.federationTitle}` };
     default:
       return { icon: Pencil, label: 'Proposed directly' };
   }

@@ -14,6 +14,11 @@ import { initLook } from './lib/look';
 
 initLook();
 
+// The production build keeps the app itself on this device (sw/sw.js), so Concord opens with no connection.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => void navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>

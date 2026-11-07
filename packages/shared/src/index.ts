@@ -6,6 +6,9 @@ import type {
   ChangeClassification,
   ChangeLevel,
   ChangeOp,
+  FederationCheck,
+  FederationImpact,
+  FederationPin,
   OntologyDiff,
   OntologyView,
   OutputFormat,
@@ -19,6 +22,9 @@ export type {
   ChangeClassification,
   ChangeLevel,
   ChangeOp,
+  FederationCheck,
+  FederationImpact,
+  FederationPin,
   OntologyDiff,
   OntologyView,
   OutputFormat,
@@ -192,7 +198,128 @@ export interface OntologyProject {
   demo?: boolean;
   /** Everything this ontology publishes was approved as it was merged (older ones are checked once: see PublicHold). */
   publishedWithApproval?: boolean;
+  /**
+   * Federations (ids) this ontology commits to stay usable with: a change that breaks one of them fails
+   * validation. Results for any other federation it belongs to are advisory. Set by its owners and stewards.
+   */
+  committedFederations?: string[];
 }
+
+/** One ontology in a federation: at a release, following its working draft ('draft'), or one of its development forks ('fork:<slug>'). */
+export interface FederationMember {
+  ontologyId: string;
+  version: string;
+}
+
+/**
+ * A set of ontologies, each at a chosen version, meant to be used together (an Advanced feature).
+ * Anyone signed in can start one; its owners change it.
+ */
+export interface Federation {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  ownerIds: string[];
+  members: FederationMember[];
+  /**
+   * The federation this one extends (a sub-federation): typically it adds ontologies of its own and
+   * refines some of the parent's terms. Compare shows up to which terms the two agree.
+   */
+  parentId?: string;
+  /**
+   * The federation this one was forked from. A development fork is meant to come back (its owners
+   * propose its ontology choices back); a divergent fork goes its own way.
+   */
+  forkOf?: { federationId: string; kind: 'development' | 'divergent' };
+  /** Development forks proposing their ontology choices back to this federation. */
+  proposals?: FederationProposal[];
+  /** Terms this federation handed upstream to an ontology of the federation it extends. */
+  upstream?: UpstreamProposal[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FederationProposal {
+  id: string;
+  fromFederationId: string;
+  members: FederationMember[];
+  note: string;
+  by: string;
+  at: string;
+  status: 'open' | 'accepted' | 'declined';
+  decidedBy?: string;
+  decidedAt?: string;
+}
+
+export interface UpstreamProposal {
+  /** The change request opened on the target ontology. */
+  changeRequestId: string;
+  ontologyId: string;
+  /** Original term IRI → the IRI it gets upstream. */
+  mapping: Record<string, string>;
+  by: string;
+  at: string;
+}
+
+/**
+ * A federation release: every member and everything it imports pinned to a release and its RDFC-1.0
+ * content hash, with the hash of the SHACL shapes derived from the members' OWL. Never changes once published.
+ */
+export interface FederationRelease {
+  id: string;
+  federationId: string;
+  version: string;
+  notes: string;
+  pins: FederationPin[];
+  shapesHash: string;
+  /** The frozen closure's RDFC-1.0 hash: every pinned graph merged, exactly as checked. */
+  closureHash?: string;
+  /** The manifest's own RDFC-1.0 hash. */
+  hash: string;
+  previousVersion?: string;
+  publishedAt: string;
+  publishedBy: string;
+  /** The manifest, derived shapes and frozen closure (Turtle), exactly as published. */
+  manifest: string;
+  shapes: string;
+  closure?: string;
+}
+
+/** Whether a federation can be released now, what is in the way, and the version it should take. */
+export interface FederationReleasePlan {
+  ready: boolean;
+  blockers: string[];
+  suggested: { version: string; level: 'major' | 'minor' | 'patch'; reasons: string[] };
+  pins: FederationPin[];
+}
+
+/** A federation with what a page needs to show its members. */
+/** Two federations compared term by term (B is the federation asked about, A the one it is compared with). */
+export interface FederationComparison {
+  a: { id: string; slug: string; title: string };
+  b: { id: string; slug: string; title: string };
+  terms: { iri: string; kind: string; label?: string; relation: 'same' | 'equivalent' | 'tightened' | 'loosened' | 'conflict' | 'only-a' | 'only-b'; onlyInA: string[]; onlyInB: string[] }[];
+  counts: Record<'same' | 'equivalent' | 'tightened' | 'loosened' | 'conflict' | 'only-a' | 'only-b', number>;
+  shared: number;
+  agreeing: number;
+  /** The reasoner couldn't run on one side, so entailed superclasses are missing (not cached; try again). */
+  unfinished?: boolean;
+}
+
+export interface FederationDetail extends Federation {
+  memberInfo: { ontologyId: string; version: string; title: string; slug: string; ontologyIRI: string; versions: string[]; forks: { slug: string; title: string }[]; committed: boolean; canCommit: boolean }[];
+  canEdit: boolean;
+  parent?: { id: string; slug: string; title: string };
+  children: { id: string; slug: string; title: string }[];
+  forkedFrom?: { id: string; slug: string; title: string; kind: 'development' | 'divergent' };
+  forks: { id: string; slug: string; title: string; kind: 'development' | 'divergent' }[];
+  /** Each proposal with the proposing fork's name and how its ontology choices differ from this federation's. */
+  proposalInfo: (FederationProposal & { from: { slug: string; title: string }; changes: string[] })[];
+  /** Each upstream proposal with where its change request stands. */
+  upstreamInfo: (UpstreamProposal & { ontologyTitle: string; number?: number; status?: string })[];
+}
+
 
 export interface OntologySummary extends OntologyProject {
   /** Counts a caller may not see are left out: activity for signed-out callers, and the graph's while its working draft waits for approval. */
@@ -684,6 +811,8 @@ export type ChangeRequestOrigin =
   | { type: 'direct' }
   | { type: 'synthesis'; useCaseIds: string[] }
   | { type: 'fork'; forkId: string; forkSlug: string }
+  /** Terms a sub-federation handed upstream to this ontology. */
+  | { type: 'federation'; federationId: string; federationSlug: string; federationTitle: string }
   /** Reported anonymously from the public ontology page. */
   | { type: 'public-report'; termIri: string; version: string; /** The queued report it was opened from: approving twice finds this request. */ reportId?: string };
 
@@ -1563,6 +1692,11 @@ export interface PodFeedbackReport {
 
 export interface SessionInfo {
   user?: User;
+  /**
+   * Names this browser session without revealing its token: a sign-out made with no connection
+   * sends it later, so only that session ends (POST /api/auth/logout `{ session }`).
+   */
+  sessionId?: string;
   providers: { google: boolean; github: boolean; solid: boolean; demo: boolean };
   /**
    * WebIDs that can read testers' feedback: the deployment's administrators. Testers are
@@ -1587,7 +1721,7 @@ export interface SessionInfo {
  *  GET  /auth/google, /auth/github                -> OAuth redirect
  *  GET  /auth/solid?webId=<WebID or provider URL>  -> Solid-OIDC redirect (DPoP); /auth/solid/client.jsonld is the Client ID Document
  *  POST /api/auth/demo {userId? , name?, role?}   -> SessionInfo   (log in as a persona or create a demo user)
- *  POST /api/auth/logout                           -> {}
+ *  POST /api/auth/logout {session?} (JSON only)    -> {ended}   (with session: only if it is still that one)
  *  GET  /api/personas                              -> User[] (simulated personas available for demo login)
  *
  * Ontologies
@@ -1600,6 +1734,20 @@ export interface SessionInfo {
  *  GET  /api/ontologies/:id/source?format=turtle|...&ref=working|<version>  -> text (Content-Type by format); ?download=1 sets attachment
  *  GET  /api/ontologies/:id/validation?ref=working -> ValidationReport
  *  POST /api/ontologies/:id/sparql {query}         -> {head:{vars:string[]}, rows: Record<string,string>[]}
+ *
+ * Federations (Advanced features)
+ *  GET  /api/federations                             -> Federation[]
+ *  POST /api/federations {title, description?, members?, parentId?} -> FederationDetail
+ *  GET  /api/federations/:fed                        -> FederationDetail
+ *  PATCH /api/federations/:fed {title?, description?, members?} -> FederationDetail   (owners)
+ *  GET  /api/federations/:fed/check                  -> FederationCheck
+ *  GET  /api/federations/:fed/compare/:other         -> FederationComparison   (:fed compared with :other, term by term)
+ *  GET  /api/federations/:fed/release-plan           -> FederationReleasePlan
+ *  GET  /api/federations/:fed/releases               -> FederationRelease[] (without manifest, shapes and closure)
+ *  POST /api/federations/:fed/releases {version?, notes?} -> FederationRelease   (owners)
+ *  GET  /def/fed/:slug[/:version[/shapes]]           -> text/turtle: the release manifest, or its derived SHACL (public)
+ *  GET  /api/ontologies/:id/federations              -> (Federation & {committed})[]
+ *  POST /api/ontologies/:id/federations/:fed/commitment {committed} -> FederationDetail   (owners, stewards)
  *
  * Members & governance
  *  PUT  /api/ontologies/:id/members/:userId {roles}  -> Membership

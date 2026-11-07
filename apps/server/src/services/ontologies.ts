@@ -21,6 +21,7 @@ import { ontologyStore } from './ontologyStore.js';
 import { createHash } from 'node:crypto';
 import { getUser, logActivity } from './users.js';
 import { reasonInWorker } from '../reasoner/pool.js';
+import { closureFingerprint, hostedImportClosure } from './importClosure.js';
 
 export const getProject = async (id: string) => await mustGet<OntologyProject>('ontologies', id);
 export const findProject = async (idOrSlug: string) =>
@@ -118,7 +119,8 @@ export async function createProject(
 }
 
 async function uniqueSlug(base: string) {
-  const taken = new Set((await list<OntologyProject>('ontologies')).map((o) => o.slug));
+  // "fed" is taken by federation releases (/def/fed/...).
+  const taken = new Set(['fed', ...(await list<OntologyProject>('ontologies')).map((o) => o.slug)]);
   let s = base;
   for (let i = 2; taken.has(s); i++) s = `${base}-${i}`;
   return s;
@@ -188,9 +190,12 @@ export async function validateGraph(key: string, graph: Graph, cqs: { question: 
   const fair = await fairContext(graph.ontologyIRI);
   const r = fair.resolution;
   key += r ? `:${+r.rdf}${+r.html}` : '';
+  // Checked with what it imports: a new release or draft of an imported ontology gives a new key.
+  const imports = await hostedImportClosure(graph);
+  key += imports.direct.length ? `:imports=${closureFingerprint(imports)}` : '';
   let p = validationCache.get(key);
   if (!p) {
-    p = validate(graph, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair });
+    p = validate(graph, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair, imports });
     validationCache.set(key, p);
     p.catch(() => validationCache.delete(key));
   }

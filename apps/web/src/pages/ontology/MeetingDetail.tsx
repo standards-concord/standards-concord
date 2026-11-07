@@ -34,7 +34,7 @@ function fmtT(t?: number) {
 export function MeetingDetailPage() {
   const { meetingId = '' } = useParams();
   const { id } = useOntology();
-  const m = useAsync(() => api.meeting(meetingId), [meetingId]);
+  const m = useAsync(() => api.meeting(meetingId), [meetingId], { keep: `meeting|${meetingId}` });
   const [view, setView] = useState<View>('summary');
   const [proposed, setProposed] = useState<{ useCases: UseCase[] }>();
   const scrollRef = useRef<HTMLDivElement>(null);

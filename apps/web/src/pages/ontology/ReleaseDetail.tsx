@@ -20,7 +20,7 @@ export function ReleaseDetailPage() {
   const { releaseId = '' } = useParams();
   const { id, ontology, userById, hasRole, myRoles, reload } = useOntology();
   const { session } = useSession();
-  const state = useAsync(() => api.release(releaseId), [releaseId]);
+  const state = useAsync(() => api.release(releaseId), [releaseId], { keep: `release|${releaseId}` });
   const act = useAction(async (fn: () => Promise<ReleaseDetail>) => {
     state.setData(await fn());
     void reload();
@@ -53,7 +53,8 @@ export function ReleaseDetailPage() {
             <h3 className="mb-2 text-sm font-semibold">Release notes</h3>
             {r.notes ? <Markdown text={r.notes} /> : <p className="text-sm text-muted">No notes.</p>}
             <p className="mt-4 border-t border-line pt-3 text-xs text-muted">
-              Drafted by {userById(r.createdBy)?.name ?? 'someone'} on {formatDate(r.createdAt)}
+              {/* The policy's automation drafts releases as "system"; that used to read "Drafted by someone". */}
+              {r.createdBy === 'system' ? 'Drafted automatically' : `Drafted by ${userById(r.createdBy)?.name ?? 'someone'}`} on {formatDate(r.createdAt)}
               {r.publishedAt && ` · published ${formatDate(r.publishedAt, true)}`}
               {r.status === 'published' && (
                 <>
