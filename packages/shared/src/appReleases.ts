@@ -53,6 +53,40 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.43.0',
+    date: '2026-11-07',
+    title: 'Fewer words on the welcome page and around the hub',
+    changes: [
+      {
+        id: 'shorter-welcome',
+        type: 'feat',
+        title: 'A shorter welcome page and walkthrough start',
+        detail:
+          'The welcome page keeps one paragraph on what Concord is for, the videos and the note not to enter anything confidential; the aim cards, the numbered steps and the closing box are gone. On the walkthrough page, the version picker and the sign-in prompt fold into one “What’s new since you last tested?” link.',
+        roles: [],
+        to: '/welcome',
+        ask: 'Did the welcome page tell you enough to get started?',
+      },
+      {
+        id: 'less-repetition',
+        type: 'feat',
+        title: 'Less repetition on the overview, use cases, governance and Validate data',
+        detail:
+          'The overview line just counts classes, properties and use cases. Use case rows say who and when, with the rest on each use case’s page. Governance shows the policy template only while you edit the policy, and Validate data drops its standing line about size limits (an error says when data goes over one).',
+        roles: [],
+        to: '{o}',
+      },
+      {
+        id: 'drafted-automatically',
+        type: 'fix',
+        title: 'A release the policy drafted says “Drafted automatically”',
+        detail: 'It used to say “Drafted by someone”. FAIR check messages also count properly now (“1 keyword”, not “1 keyword(s)”).',
+        roles: ['steward'],
+        to: '{o}/releases',
+      },
+    ],
+  },
+  {
     version: '0.42.0',
     date: '2026-11-07',
     title: 'Ontologies checked with what they import, and federations',

@@ -139,7 +139,8 @@ test.describe('progressive disclosure', () => {
     await settle(page);
     // One plain sentence of counts, each linking to where the detail lives.
     const summary = page.getByTestId('overview-summary');
-    await expect(summary).toContainText(/\d+ class(es)? and \d+ propert(y|ies)/);
+    // Just the counts (the version is in the header, the policy and releases in the section nav).
+    await expect(summary).toHaveText(/^\d+ class(es)? · \d+ propert(y|ies) · \d+ use cases?$/);
     await expect(summary.getByRole('link', { name: /class/ })).toHaveAttribute('href', `/o/${demo.id}/browse`);
     await expect(summary.getByRole('link', { name: /use case/ })).toHaveAttribute('href', `/o/${demo.id}/use-cases`);
     // Changes in progress are a table that links to each change.
@@ -312,8 +313,9 @@ test.describe('progressive disclosure', () => {
     }
 
     // Each section is collapsed to a summary and opens to a readable view.
+    // The template picker is only for editing ("In short" names the policy), so readers don't get it as a section.
+    await expect(page.getByRole('button', { name: /Policy template/ })).toHaveCount(0);
     const sections: [RegExp, RegExp][] = [
-      [/Policy template/, /Lazy consensus|Steward-led|Working group|Membership vote|ODI stewarded/],
       [/Change request rules/, /Compare all levels/],
       [/Release rules/, /Compare all levels/],
       [/Ownership, ODI and automation/, /Ownership transfer/],
