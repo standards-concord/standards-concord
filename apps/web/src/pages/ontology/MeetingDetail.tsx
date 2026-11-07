@@ -53,11 +53,15 @@ export function MeetingDetailPage() {
   useEffect(() => {
     if (!live) return;
     let asking = false;
+    // A reply that arrives after the page moved on (another meeting, or the call ended) is dropped: clearing the
+    // timer doesn't stop a request already sent, and its meeting would replace the one now shown.
+    let gone = false;
     const t = setInterval(async () => {
       if (asking) return;
       asking = true;
       try {
         const u = await api.meetingUpdates(meetingId, transcriptLength.current);
+        if (gone || u.meeting.id !== meetingId) return;
         m.setData((p) => ({ ...u.meeting, transcript: [...(p?.transcript ?? []).slice(0, u.from), ...u.lines] }));
         if (u.meeting.status !== 'live') void m.reload();
       } catch {
@@ -66,7 +70,10 @@ export function MeetingDetailPage() {
         asking = false;
       }
     }, LIVE_POLL_MS);
-    return () => clearInterval(t);
+    return () => {
+      gone = true;
+      clearInterval(t);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, meetingId]);
 

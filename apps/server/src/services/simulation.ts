@@ -5,7 +5,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock, DAY_MS, saveClock, syncClock } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, HttpError, list, put } from '../db.js';
+import { clearAll, get, HttpError, list, put } from '../db.js';
 import { restoreSpending, snapshotSpending } from '../llm/budget.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
@@ -52,11 +52,19 @@ async function freezeDemoSeed(u: UseCase) {
 
 export const personaFor = (u: User | undefined) => PERSONAS.find((p) => p.name === u?.name);
 
+/**
+ * Whether the demo seed finished: 'seeding' is recorded before it starts and 'done' once it has, so a seed cut short
+ * (a function stopped part way) is told apart from a finished one. No record: a demo seeded before this existed.
+ */
+const SEED_STATE = 'demo-seed-state';
+type SeedState = { id: string; state: 'seeding' | 'done' };
+
 /** The demo ontology every alpha tester lands in: the volunteering standard, mid-flight. */
 export async function seedDemo(): Promise<OntologyProject | undefined> {
   const find = async () => (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
+  const finished = async () => (await get<SeedState>('kv', SEED_STATE))?.state !== 'seeding';
   const existing = await find();
-  if (existing) return existing;
+  if (existing && (await finished())) return existing;
   if (!fs.existsSync(FIXTURE)) {
     console.warn('[seed] volunteering fixture not found; skipping demo seed');
     return undefined;
@@ -64,7 +72,41 @@ export async function seedDemo(): Promise<OntologyProject | undefined> {
   // One instance seeds (Vercel starts several at once); the others wait for it and find its demo.
   // Seed history in the recent past so review periods are partly elapsed, on a clock of its own: requests
   // meanwhile (and other instances) keep the shared one.
-  return await withLease('demo-seed', 60_000, async () => (await find()) ?? (await clock.withShift(-21 * DAY_MS, seedHistory)), { renew: true, waitMs: 5 * 60_000 });
+  return await withLease(
+    'demo-seed',
+    60_000,
+    async () => {
+      const now = await find();
+      if (now && (await finished())) return now;
+      // A seed cut short left part of a demo behind: it is cleared and the demo seeded again.
+      if (now) await clearUnfinishedSeed(now);
+      await put<SeedState>('kv', { id: SEED_STATE, state: 'seeding' });
+      const seeded = await clock.withShift(-21 * DAY_MS, seedHistory);
+      await put<SeedState>('kv', { id: SEED_STATE, state: 'done' });
+      return seeded;
+    },
+    { renew: true, waitMs: 5 * 60_000 },
+  );
+}
+
+/**
+ * Clears what a seed cut short left behind, the way a demo reset does (keeping the AI spending totals, and this
+ * seed's lease). Only in demo mode, and only if the unfinished demo is the only ontology: otherwise nothing is
+ * cleared and the start-up task fails, so it is tried again and an administrator can reset the demo.
+ */
+async function clearUnfinishedSeed(partial: OntologyProject) {
+  const others = (await list<OntologyProject>('ontologies')).filter((o) => o.id !== partial.id);
+  if (!config.demoMode || others.length) throw new Error('The demo seed was cut short part way, and other data has been added since, so it was not cleared. Reset the demo to seed it again.');
+  console.warn('[seed] the demo seed was cut short part way; clearing it and seeding again');
+  await ontologyStore.wipe(async () => {
+    const spend = await snapshotSpending();
+    const lease = await get<{ id: string }>('kv', 'lease:demo-seed');
+    await clearAll();
+    await restoreSpending(spend);
+    if (lease) await put('kv', lease);
+  });
+  clock.reset();
+  await saveClock();
 }
 
 async function seedHistory() {
