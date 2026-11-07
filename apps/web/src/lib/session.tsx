@@ -70,42 +70,36 @@ function forgetOfflineSession() {
  * Signing out with no connection can't end the server's session. The session it meant (its handle,
  * SessionInfo.sessionId) is remembered here and ended as soon as the server can be reached: the server
  * ends that session only, so a newer sign-in or another account's session in this browser is never
- * touched. Each pending sign-out has its own id, and only that one is cleared when it is done.
+ * touched. Each pending sign-out has its own key, and only that one is removed when it is done.
  */
-const SIGN_OUT_PENDING = 'concord.signOutPending';
-interface PendingSignOut {
-  id: string;
-  session: string;
-}
+const SIGN_OUT_PENDING = 'concord.signOutPending.';
 export function markSignOutPending(session: string | undefined) {
   if (!session) return;
   try {
-    localStorage.setItem(SIGN_OUT_PENDING, JSON.stringify({ id: crypto.randomUUID(), session } satisfies PendingSignOut));
+    // One key per sign-out, so finishing one can never remove another tab's.
+    localStorage.setItem(SIGN_OUT_PENDING + crypto.randomUUID(), session);
   } catch {
     /* storage unavailable */
   }
 }
-function signOutPending(): PendingSignOut | undefined {
-  try {
-    const p = JSON.parse(localStorage.getItem(SIGN_OUT_PENDING) ?? 'null') as PendingSignOut | null;
-    return p && typeof p.id === 'string' && typeof p.session === 'string' ? p : undefined;
-  } catch {
-    return undefined;
-  }
-}
-function clearSignOutPending(id: string) {
-  try {
-    if (signOutPending()?.id === id) localStorage.removeItem(SIGN_OUT_PENDING);
-  } catch {
-    /* storage unavailable */
-  }
-}
-/** Ends the session a sign-out with no connection meant, now the server answers; done whatever it says. */
+/** Ends the sessions sign-outs made with no connection meant, now the server answers; each is done whatever it says. */
 async function finishPendingSignOut() {
-  const pending = signOutPending();
-  if (!pending) return;
-  await api.logout(pending.session);
-  clearSignOutPending(pending.id);
+  let pending: [string, string][] = [];
+  try {
+    pending = Object.keys(localStorage)
+      .filter((k) => k.startsWith(SIGN_OUT_PENDING))
+      .map((k) => [k, localStorage.getItem(k) ?? '']);
+  } catch {
+    return;
+  }
+  for (const [key, session] of pending) {
+    if (session) await api.logout(session);
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* storage unavailable */
+    }
+  }
 }
 
 /** The saved session, its clock moved on by the time since it was saved; undefined if there is none. */
@@ -261,7 +255,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (document.visibilityState !== 'visible') return;
       void fetchSession()
         .then((s) => {
-          if (s && s.user?.id !== sessionRef.current?.user?.id) setSession(s);
+          // Another account, or the same one signed in again (a new session, so a new handle for a later sign-out).
+          if (s && (s.user?.id !== sessionRef.current?.user?.id || s.sessionId !== sessionRef.current?.sessionId)) setSession(s);
         })
         .catch(() => {});
     };

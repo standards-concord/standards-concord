@@ -199,6 +199,9 @@ export function apiRouter(): Router {
   });
 
   r.post('/auth/logout', async (req, res) => {
+    // Only Concord's own pages sign out: a JSON request can't come from another site's form, which
+    // could otherwise sign people out of Concord without their asking.
+    if (!req.is('application/json')) throw new HttpError(415, 'Send the sign-out as JSON');
     // A sign-out made earlier with no connection names the session it meant (SessionInfo.sessionId):
     // if this browser's session is now another one (a newer sign-in, another account, or none), nothing ends.
     const meant = optStr(req.body?.session);

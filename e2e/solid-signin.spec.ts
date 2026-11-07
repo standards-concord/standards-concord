@@ -105,7 +105,7 @@ test('the admin signs in with their WebID and reads testers’ feedback from the
   const otherPage = await other.newPage();
   await solidSignIn(otherPage, SOLID.admin);
   expect((await otherPage.request.get('/api/feedback/pods')).status()).toBe(200);
-  await otherPage.request.post('/api/auth/logout');
+  await otherPage.request.post('/api/auth/logout', { data: {} });
   await other.close();
   expect((await page.request.get('/api/feedback/pods')).status()).toBe(200);
 

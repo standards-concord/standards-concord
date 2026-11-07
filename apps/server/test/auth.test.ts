@@ -65,7 +65,12 @@ describe('a sign-out sent later', () => {
     const r = await agent.post('/api/auth/demo').send({ name: 'Plain leaver' });
     const cookie = String(r.headers['set-cookie']).match(/concord_session=([^;]+)/)![1];
     expect(r.body.sessionId).not.toContain(cookie);
-    expect((await agent.post('/api/auth/logout')).body).toEqual({ ended: true });
+    // Another site's form can't sign anyone out: only a JSON request can.
+    const form = await agent.post('/api/auth/logout').type('form').send('session=');
+    expect(form.status).toBe(415);
+    expect(String(form.headers['set-cookie'] ?? '')).not.toContain('concord_session=;');
+    expect((await agent.get('/api/session')).body.user?.id).toBe(r.body.user.id);
+    expect((await agent.post('/api/auth/logout').send({})).body).toEqual({ ended: true });
     expect((await agent.get('/api/session')).body.user).toBeUndefined();
   });
 });
