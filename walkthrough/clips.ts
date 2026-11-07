@@ -157,7 +157,7 @@ export const clipActions: Record<string, Action> = {
   async 'c-validate-api'(c) {
     await c.d.clearHighlight();
     if (!(await c.d.click(c.d.page.getByRole('button', { name: /Validate from your own code/ }), 'Validate from your own code'))) return;
-    const example = c.d.page.getByTestId('validate-api-example').first();
+    const example = c.d.page.getByRole('region', { name: 'Validate a file (JSON report)' });
     await c.d.claimVisible(example.getByText(/curl -X POST/), 'the example is a POST');
     // Run the request the example shows (to the recorded hub, which serves the same paths) with the same data.
     const shown = /curl -X POST (\S+)/.exec((await example.textContent()) ?? '')?.[1];

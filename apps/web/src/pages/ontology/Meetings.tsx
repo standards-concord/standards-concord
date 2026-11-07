@@ -323,7 +323,7 @@ function BookingState({ m }: { m: Meeting }) {
   if (isBooked(m)) return <Badge tone="ok">Bot booked</Badge>;
   if (m.bot?.uncertain) return <Badge tone="warn" title={m.bot.error}>Checking an unconfirmed booking</Badge>;
   if (m.bot?.error) return <Badge tone="danger" title={m.bot.error}>Booking failed; retrying</Badge>;
-  return <Badge tone="outline">Books 15 min before</Badge>;
+  return <Badge tone="outline">Booking the bot</Badge>;
 }
 
 function UpcomingCalls({ calls, onChange, bot }: { calls: Meeting[]; onChange: () => void; bot?: MeetBotInfo }) {
@@ -392,7 +392,7 @@ export function MeetingsTab() {
   const { id, ontology } = useOntology();
   const { session, now } = useSession();
   const nav = useNavigate();
-  const list = useAsync(() => api.meetings(id), [id]);
+  const list = useAsync(() => api.meetings(id), [id], { keep: `meetings|${id}` });
   const botInfo = useAsync(() => api.meetBot(), []);
   const bot = botInfo.data ?? session?.meetBot;
   const canFacilitate = useCanFacilitate()();

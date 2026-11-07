@@ -404,8 +404,8 @@ function TraceCard({ uc, onChange }: { uc: UseCaseDetail; onChange: (u: UseCaseD
 
 function AddLink({ uc, onDone }: { uc: UseCaseDetail; onDone: (u: UseCaseDetail) => void }) {
   const { id } = useOntology();
-  const all = useAsync(() => api.useCases(id), [id]);
-  const meetings = useAsync(() => api.meetings(id), [id]);
+  const all = useAsync(() => api.useCases(id), [id], { keep: `useCases|${id}` });
+  const meetings = useAsync(() => api.meetings(id), [id], { keep: `meetings|${id}` });
   const [kind, setKind] = useState<'use-case' | 'meeting' | 'url'>('use-case');
   const [target, setTarget] = useState('');
   const [relation, setRelation] = useState<UseCaseLink['relation']>('related');

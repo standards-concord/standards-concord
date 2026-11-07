@@ -188,7 +188,7 @@ export function ChangeRequestsTab() {
   const { now } = useSession();
   const [params, setParams] = useSearchParams();
   const filter = (params.get('status') ?? 'open') as (typeof FILTERS)[number];
-  const list = useAsync(() => api.changeRequests(id, filter === 'open' || filter === 'all' ? undefined : filter), [id, filter]);
+  const list = useAsync(() => api.changeRequests(id, filter === 'open' || filter === 'all' ? undefined : filter), [id, filter], { keep: `changeRequests|${id}|${filter === 'open' || filter === 'all' ? '' : filter}` });
   const [dialog, setDialog] = useState<'new' | 'bug'>();
   const setFilter = (s: (typeof FILTERS)[number]) => {
     const n = new URLSearchParams(params);

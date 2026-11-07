@@ -341,9 +341,8 @@ test.describe('Validate data', () => {
   test('shows how to call the API at the ontology address', async ({ page, baseURL }) => {
     await page.goto('/o/volunteering/validate');
     await page.getByRole('button', { name: /Validate from your own code/ }).click();
-    const examples = page.getByTestId('validate-api-example');
-    await expect(examples.first()).toContainText(`curl -X POST ${baseURL}/def/volunteering/1.0.0`);
-    await expect(examples.nth(2)).toContainText("Accept-Profile: <http://www.w3.org/ns/shacl#>");
+    await expect(page.getByRole('region', { name: 'Validate a file (JSON report)' })).toContainText(`curl -X POST ${baseURL}/def/volunteering/1.0.0`);
+    await expect(page.getByRole('region', { name: 'Get the SHACL shapes by content negotiation' })).toContainText('Accept-Profile: <http://www.w3.org/ns/shacl#>');
     await page.getByRole('link', { name: 'connecting an agent' }).click();
     await expect(page).toHaveURL(/\/o\/volunteering\/connect$/);
   });
