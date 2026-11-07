@@ -59,6 +59,11 @@ export const config = {
    * each process's memory. On by default on Vercel, where several instances serve at once.
    */
   sharedLimits: bool(process.env.CONCORD_SHARED_LIMITS, !!process.env.VERCEL),
+  /**
+   * Where private data goes when it isn't in a pod (no Solid server, or an account with no pod): `files` under the
+   * data directory (the VM), or `db`, rows in the database (Vercel, which has no lasting disk).
+   */
+  privateStore: (process.env.CONCORD_PRIVATE_STORE ?? (process.env.VERCEL ? 'db' : 'files')) === 'db' ? ('db' as const) : ('files' as const),
   /** Vercel Cron's bearer secret, for GET /api/cron/daily. Unset: the endpoint refuses every call. */
   cronSecret: process.env.CRON_SECRET || undefined,
   /**

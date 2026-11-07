@@ -44,6 +44,7 @@ export type Collection =
   | 'federationReleases'
   | 'gitObjects'
   | 'gitRefs'
+  | 'privateFiles'
   | 'kv';
 
 let store: Promise<DocStore> | undefined;
