@@ -5,7 +5,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock, DAY_MS, saveClock, syncClock } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, get, HttpError, list, put } from '../db.js';
+import { clearAll, get, HttpError, list, put, remove, transaction, type Collection } from '../db.js';
 import { restoreSpending, snapshotSpending } from '../llm/budget.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
@@ -89,24 +89,30 @@ export async function seedDemo(): Promise<OntologyProject | undefined> {
   );
 }
 
+/** Where a demo seed writes rows that belong to its ontology (named by parent, or by an `ontologyId` field). */
+const SEEDED: Collection[] = ['memberships', 'useCases', 'interviews', 'meetings', 'changeRequests', 'reviews', 'votes', 'releases', 'requirementsDocs', 'activity', 'apps', 'appChecks', 'appFollowUps', 'forks', 'agentReports', 'federations', 'federationReleases'];
+
 /**
- * Clears what a seed cut short left behind, the way a demo reset does (keeping the AI spending totals, and this
- * seed's lease). Only in demo mode, and only if the unfinished demo is the only ontology: otherwise nothing is
- * cleared and the start-up task fails, so it is tried again and an administrator can reset the demo.
+ * Clears what a seed cut short left behind, and only that: the unfinished demo ontology, the rows that belong to it
+ * and its history. Accounts (the personas too, which the next seed reuses), feedback, private data and the server's
+ * own records (the import marker, leases, start-up records, the clock) are kept. The rows go in one transaction, so a
+ * writer meanwhile either comes before (and its row, if it is the demo's, goes too) or after (and finds no demo).
+ * Only in demo mode, and only if the unfinished demo is the only ontology: otherwise nothing is cleared and the
+ * start-up task fails, so it is tried again and an administrator can reset the demo.
  */
 async function clearUnfinishedSeed(partial: OntologyProject) {
   const others = (await list<OntologyProject>('ontologies')).filter((o) => o.id !== partial.id);
   if (!config.demoMode || others.length) throw new Error('The demo seed was cut short part way, and other data has been added since, so it was not cleared. Reset the demo to seed it again.');
   console.warn('[seed] the demo seed was cut short part way; clearing it and seeding again');
-  await ontologyStore.wipe(async () => {
-    const spend = await snapshotSpending();
-    const lease = await get<{ id: string }>('kv', 'lease:demo-seed');
-    await clearAll();
-    await restoreSpending(spend);
-    if (lease) await put('kv', lease);
+  // History first: if this stops in between, the unfinished demo is still there to be found, and cleared again.
+  await ontologyStore.forget(partial);
+  await transaction(async () => {
+    for (const c of SEEDED) {
+      const owned = new Set([...(await list<{ id: string }>(c, partial.id)).map((d) => d.id), ...(await list<{ id: string; ontologyId?: string }>(c)).filter((d) => d.ontologyId === partial.id).map((d) => d.id)]);
+      for (const id of owned) await remove(c, id);
+    }
+    await remove('ontologies', partial.id);
   });
-  clock.reset();
-  await saveClock();
 }
 
 async function seedHistory() {

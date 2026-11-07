@@ -1,8 +1,9 @@
 import { OntologyGraph } from '@concord/core';
 import type { OntologyProject } from '@concord/shared';
-import { clearAll, get, HttpError, put, transaction } from '../db.js';
+import { clearAll, get, HttpError, put, remove, transaction } from '../db.js';
 import {
   countBetween,
+  dropRepo,
   dateOrderLog,
   firstParentLog,
   getRef,
@@ -194,6 +195,15 @@ export const dbStore = {
 
   forgetReleases(project: Pick<OntologyProject, 'slug'>) {
     for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);
+  },
+
+  /** Forgets one ontology's history: its draft and every other ref (its objects stay, harmless). An interrupted demo seed's (simulation.ts). */
+  async forget(project: Pick<OntologyProject, 'slug'>): Promise<void> {
+    await transaction(async () => {
+      await remove('kv', headKey(project));
+      await dropRepo(project.slug);
+    });
+    for (const key of [...graphCache.keys()]) if (key.startsWith(project.slug)) graphCache.delete(key);
   },
 
   async versions(project: Pick<OntologyProject, 'slug'>): Promise<string[]> {

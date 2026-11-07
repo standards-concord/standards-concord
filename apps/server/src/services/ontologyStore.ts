@@ -685,6 +685,19 @@ export const gitStore = {
     for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);
   },
 
+  /** Deletes one ontology's repository (an interrupted demo seed's: simulation.ts), the way `wipe` deletes them all. */
+  async forget(project: Pick<OntologyProject, 'slug'>): Promise<void> {
+    const dir = repoDir(project);
+    const trash = path.join(config.dataDir, `.ontologies-deleted-${randomUUID()}`);
+    await transaction(async () => {
+      await assertStoreHeld();
+      if (fs.existsSync(dir)) fs.renameSync(dir, trash);
+    });
+    fs.rmSync(trash, { recursive: true, force: true });
+    for (const key of [...graphCache.keys()]) if (key.startsWith(project.slug)) graphCache.delete(key);
+    lastPruned.delete(project.slug);
+  },
+
   async versions(project: Pick<OntologyProject, 'slug'>): Promise<string[]> {
     await this.ensureSynced(project);
     const files = (await git(repoDir(project), ['ls-tree', '-r', '--name-only', await this.head(project), '--', 'releases'])).split('\n');
@@ -944,6 +957,7 @@ export interface OntologyStoreApi {
   updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string | null>>, message: string): Promise<string>;
   updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): Promise<string>;
   forgetReleases(project: Pick<OntologyProject, 'slug'>): void;
+  forget(project: Pick<OntologyProject, 'slug'>): Promise<void>;
   versions(project: Pick<OntologyProject, 'slug'>): Promise<string[]>;
   log(project: Pick<OntologyProject, 'slug'>, limit?: number): Promise<{ sha: string; author: string; date: string; subject: string }[]>;
   wipe(clear?: () => Promise<void>): Promise<void>;
