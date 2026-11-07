@@ -87,8 +87,10 @@ export interface RunResult {
  *
  * The lease is renewed while the jobs run. It is not a fence: a runner that stalls past LEASE_MS (renewals
  * failing, or the instance frozen) and then resumes carries on beside the run that took over, until its jobs
- * end. That window is an accepted limit; each job is safe to run twice at once, since it does its own
- * check-then-act in transactions or under its own leases (the governance tick, bot lanes, the calendar).
+ * end. On one server (the VM, where this runs from a timer) that overlap is harmless: the jobs' locks are held in
+ * the process. Across instances it is not yet: the Meet bot's calendar lock is held in the process too, so two
+ * runs at once could each create a meeting for the same new invite. Running on several instances (Vercel) is
+ * therefore gated on the store-backed locks and atomic occurrence creation of the next step (docs/deploy.md).
  */
 export async function runDue(opts: { force?: boolean; now?: () => number; renewEvery?: number } = {}): Promise<RunResult> {
   // Read-only (the cutover): no scheduled work at all, since jobs call out (Recall.ai, GitHub, pods) before they
@@ -150,7 +152,11 @@ export async function runDue(opts: { force?: boolean; now?: () => number; renewE
   await transaction(async () => {
     const s = await get<SchedulerState>('kv', STATE);
     if (s?.lease?.token === token) await put<SchedulerState>('kv', { ...s, lease: undefined });
-    else lostLease = true;
+    else {
+      // A runner that resumed and finished before its next renewal hasn't said so yet.
+      if (!lostLease) console.warn(`[schedule] this run's lease ran out and was taken over; ${due.map((j) => j.name).join(', ')} ran beside the new run`);
+      lostLease = true;
+    }
   });
   return { ran: due.map((j) => j.name), failed, ...(lostLease ? { lostLease } : {}) };
 }

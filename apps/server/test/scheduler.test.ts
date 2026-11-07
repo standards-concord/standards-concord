@@ -1,5 +1,5 @@
 import request from 'supertest';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
 import { closeDb, get, openDb, put, remove } from '../src/db.js';
 import { kickScheduled, LEASE_MS, resetKick, runDue, scheduledIdle, useJobs, type ScheduledJob } from '../src/services/scheduler.js';
@@ -143,8 +143,12 @@ describe('scheduled work', () => {
     restore = useJobs([next]);
     const second = runDue({ now, renewEvery: 3_600_000 });
     await expect.poll(() => next.runs).toBe(1);
+    // It finishes before any renewal noticed: the lost lease is still logged (review r2 of step 4).
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     release();
     expect(await first).toEqual({ ran: ['stalled'], failed: [], lostLease: true });
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/lease ran out/));
+    warn.mockRestore();
     // The second run's lease is still in place.
     expect(await runDue({ now, force: true })).toMatchObject({ ran: [], busy: true });
     releaseNext();

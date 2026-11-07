@@ -545,6 +545,7 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
   });
   for (const c of changes) await logActivity({ ontologyId: m.ontologyId, actorId: user.id, type: 'meeting.updated', message: `${c} ${named ? `“${m.title}”` : 'a call waiting for approval'}`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   emit(m, { type: 'meeting', meeting: m });
+  const approved = patch.approve && m.calendar?.approval === 'approved' ? [m.id] : [];
   // The other weeks of an approved series, with the same organiser and Meet link, are approved too.
   if (patch.approve && m.calendar?.uid) {
     for (const other of await list<Meeting>('meetings', m.ontologyId)) {
@@ -556,8 +557,11 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
         delete x.calendar!.approvalNote;
       });
       emit(o, { type: 'meeting', meeting: o });
+      approved.push(o.id);
     }
   }
+  // Booked now, to join at the call's start, rather than when the scheduler next looks.
+  if (approved.length) await (await import('./meetBot.js')).planApproved(approved);
   if (patch.skip) await drive(meetingId);
   if (patch.postPromptsToChat !== undefined) await announceChatMode(meetingId).catch(() => undefined);
   return await getMeeting(meetingId);

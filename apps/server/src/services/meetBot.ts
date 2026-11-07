@@ -548,6 +548,19 @@ export async function dispatchDue(now = new Date(), opts: { wait?: boolean } = {
   if (opts.wait !== false) await Promise.all(runs);
 }
 
+/**
+ * Books the bot for calls a facilitator just approved, straight away rather than on the next tick (on Vercel that
+ * can wait for the next visit, or the daily run). The request to Recall.ai runs beside the approval's response.
+ */
+export async function planApproved(ids: string[], now = new Date()) {
+  for (const id of ids) {
+    await planOne(id, now);
+    // Only a booking just begun: an old bot still being let go keeps to its own retry times.
+    const m = await get<Meeting>('meetings', id);
+    if (m && tracked(m) && m.bot.phase === 'booking') void background(drive(id));
+  }
+}
+
 /** Resolves once every call's lane, and work started in the background, has finished. For tests and shutdown. */
 export const meetBotIdle = lanesIdle;
 

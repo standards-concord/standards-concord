@@ -448,6 +448,22 @@ describe('invite-by-email', () => {
     expect(calls.filter((c) => c.url === '/bot/')).toHaveLength(1);
   });
 
+  // Review r2 of step 4: approving a call only updated its record, and the booking waited for the next scheduled
+  // run, which on Vercel can be the next visit or the daily one, too late for Recall.ai's ten-minute guarantee.
+  it('books the bot as soon as a facilitator approves the call, without waiting for a scheduled run', async () => {
+    writeFeed(oneOff({ uid: 'stranger', organizer: 'stranger@elsewhere.test', start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await syncCalendar(at('2026-11-09T09:00:00Z'));
+    const [m] = await calendarMeetings();
+    expect(m.calendar?.approval).toBe('pending');
+    const steward = request.agent(app);
+    await steward.post('/api/auth/demo').send({ name: 'Steward Swift', role: 'steward' });
+    expect((await steward.patch(`/api/meetings/${m.id}`).send({ approve: true })).status).toBe(200);
+    await meetBotIdle();
+    const booking = calls.find((c) => c.url === '/bot/');
+    expect(booking?.body).toMatchObject({ join_at: '2026-11-10T15:00:00.000Z' });
+    expect((await getMeeting(m.id)).bot?.botId).toBeTruthy();
+  });
+
   it('only books one bot when bookings overlap, and a skip during booking still cancels it', async () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-09T09:00:00Z'));
@@ -645,6 +661,8 @@ describe('invite-by-email', () => {
     // Tom's call is approved and booked, then taken over by someone else while Recall.ai is refusing cancellations.
     const s = await steward('Steward Quinn');
     await s.patch(`/api/meetings/${(await byUid('tom')).id}`).send({ approve: true });
+    // Approving books the bot at once, beside the response.
+    await meetBotIdle();
     await dispatchDue(at('2026-11-10T14:46:00Z'));
     const botId = (await getMeeting((await byUid('tom')).id)).bot!.botId!;
     stubMode.failCancel = true;
