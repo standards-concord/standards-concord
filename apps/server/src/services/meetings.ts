@@ -489,7 +489,7 @@ export async function onLiveLine(
 }
 
 /** Sends text into the meeting's chat through the bot. Simulated calls pretend to. */
-async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok: false; error: string }> {
+async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok: false; error: string; uncertain?: boolean }> {
   if (m.bot?.provider === 'recall') {
     if (!m.bot.botId || m.bot.phase !== 'booked' || !['joining', 'in-call'].includes(m.bot.status)) return { ok: false, error: 'The bot is not in the call, so it can’t post in the chat.' };
     return recall.sendChat(m.bot.botId, text);
@@ -547,6 +547,8 @@ export async function postPrompt(meetingId: string, index: number, opts: { quiet
     if (q.postClaim?.token === token) {
       delete q.postClaim;
       if (!r.ok && !q.posted) q.postError = r.error;
+      // No answer (or a server error): it may be in the chat. Said so, and posted again only when asked again.
+      if (!r.ok && !q.posted && r.uncertain) q.postUncertain = true;
     } else if (!r.ok) return;
     if (r.ok) {
       q.posted = true;
@@ -556,7 +558,7 @@ export async function postPrompt(meetingId: string, index: number, opts: { quiet
     }
   });
   emit(fresh, { type: 'meeting', meeting: fresh });
-  if (!r.ok && !opts.quiet) throw new HttpError(409, r.error);
+  if (!r.ok && !opts.quiet) throw new HttpError(409, r.uncertain ? `${MAYBE_POSTED} (${r.error})` : r.error);
   return fresh;
 }
 

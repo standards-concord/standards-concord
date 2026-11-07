@@ -29,7 +29,7 @@ const calls: Call[] = [];
 let stub: http.Server;
 let nextBot = 0;
 /** How the stand-in misbehaves, per test. */
-const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[], refuseDelayMs: 0, holdCreate: null as Promise<void> | null };
+const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, refuseChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[], refuseDelayMs: 0, holdCreate: null as Promise<void> | null };
 /** Called when a booking request whose reply is held (holdBookingReply) reaches the stub. */
 let createArrived: (() => void) | undefined;
 /**
@@ -114,7 +114,7 @@ beforeAll(async () => {
       // failCancel: every bot refuses to be removed; refuseIds: just these ones (after refuseDelayMs).
       const refuses = stubMode.failCancel || stubMode.refuseIds.some((id) => req.url?.startsWith(`/bot/${id}/`));
       if (refuses && (req.method === 'DELETE' || req.url?.includes('leave_call'))) return reply(405, '{"detail":"Method not allowed"}', stubMode.refuseDelayMs);
-      if (req.url?.includes('send_chat_message')) return stubMode.failChat ? reply(500, '{"detail":"chat unavailable"}') : reply(200, '{}', stubMode.chatDelayMs);
+      if (req.url?.includes('send_chat_message')) return stubMode.failChat ? reply(500, '{"detail":"chat unavailable"}') : stubMode.refuseChat ? reply(400, '{"detail":"bot not in call"}') : reply(200, '{}', stubMode.chatDelayMs);
       const done = req.url?.match(/^\/bot\/(bot-\d+)\/(?:leave_call\/)?$/);
       if (done && (req.method === 'DELETE' || req.method === 'POST')) bots.get(done[1])?.status_changes.push({ code: 'done' });
       if (req.method === 'DELETE' && stubMode.cancelDelayMs) return reply(200, '{}', stubMode.cancelDelayMs);
@@ -136,7 +136,7 @@ afterAll(() => {
 
 beforeEach(async () => {
   calls.length = 0;
-  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [], refuseDelayMs: 0, holdCreate: null });
+  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, refuseChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [], refuseDelayMs: 0, holdCreate: null });
   createArrived = undefined;
   for (const m of await list<Meeting>('meetings')) if (m.source === 'calendar-invite') await remove('meetings', m.id);
   for (const k of await list<{ id: string }>('kv')) if (/^meet-bot:(approval|retire|retired):/.test(k.id)) await remove('kv', k.id);
@@ -463,6 +463,39 @@ describe('invite-by-email', () => {
     expect(calls.filter((c) => c.url.includes('send_chat_message'))).toHaveLength(1);
     expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: true });
     expect((await getMeeting(m.id)).facilitatorPrompts[0].postUncertain).toBeUndefined();
+  });
+
+  // Review r2 of step 5: a post with no answer (a timeout, a dropped connection, a server error) was recorded as an
+  // ordinary failure and its claim cleared, so the next request posted it again without warning, though Recall.ai
+  // may have posted it already. Now that is "maybe posted"; a definite refusal (4xx) stays an ordinary failure.
+  it('marks a suggestion as maybe posted when Recall.ai gives no clear answer, and as failed when it refuses', async () => {
+    const m = await liveWithPrompt();
+    const s = await steward('Steward Ari');
+    stubMode.failChat = true;
+    const unsure = await s.post(`/api/meetings/${m.id}/prompts/0/post`);
+    expect(unsure.status).toBe(409);
+    expect(unsure.body.error).toMatch(/may already be in the call’s chat/);
+    expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: false, postUncertain: true });
+    // Automatic posts never repeat it; a facilitator who asks again does post it.
+    stubMode.failChat = false;
+    calls.length = 0;
+    const { postPrompt } = await import('../src/services/meetings.js');
+    await postPrompt(m.id, 0, { quiet: true });
+    expect(calls.filter((c) => c.url.includes('send_chat_message'))).toEqual([]);
+    expect((await s.post(`/api/meetings/${m.id}/prompts/0/post`)).status).toBe(200);
+    expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: true });
+  });
+
+  it('records a definite refusal from Recall.ai as a failed post, not a maybe-posted one', async () => {
+    const other = await liveWithPrompt();
+    const s = await steward('Steward Bea');
+    stubMode.refuseChat = true;
+    const refused = await s.post(`/api/meetings/${other.id}/prompts/0/post`);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).not.toMatch(/may already be/);
+    const p = (await getMeeting(other.id)).facilitatorPrompts[0];
+    expect(p).toMatchObject({ posted: false, postError: expect.stringMatching(/400/) });
+    expect(p.postUncertain).toBeUndefined();
   });
 
   // Review r1 of step 5: a notice sender that stalled past its claim still recorded its outcome, so it could set
