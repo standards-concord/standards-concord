@@ -79,9 +79,10 @@ export async function enqueueGitHubPublish(project: OntologyProject, release: Pi
       seq: (job?.seq ?? 0) + 1,
       releaseIds: [...new Set([...(sameRepo && job.status !== 'done' ? job.releaseIds : []), release.id])],
       // A newer release is a fresh start for a job that had stopped. A worker still running keeps its lease, and
-      // finishes only the older target (seq), so the job stays pending for this one.
+      // finishes only the older target (seq), so the job stays pending for this one. Another repository is another
+      // job: a worker still publishing to the old one loses its lease, and can't change this one.
       status: 'pending',
-      lease: job?.lease,
+      lease: sameRepo ? job.lease : undefined,
       githubMain: sameRepo ? job.githubMain : undefined,
       updatedAt: now,
     },
@@ -121,11 +122,14 @@ async function notAllowed(job: GitHubPublishJob): Promise<string | undefined> {
   return undefined;
 }
 
-/** Changes the job (and anything else `change` writes) only while `token` holds an unexpired lease. False if not. */
-async function whileHeld(id: string, token: string, change: (job: GitHubPublishJob) => GitHubPublishJob | undefined | Promise<GitHubPublishJob | undefined>): Promise<boolean> {
+/**
+ * Changes the job (and anything else `change` writes) only while `token` holds an unexpired lease on it, for `repo`.
+ * False if not.
+ */
+async function whileHeld(id: string, token: string, repo: string, change: (job: GitHubPublishJob) => GitHubPublishJob | undefined | Promise<GitHubPublishJob | undefined>): Promise<boolean> {
   return await transaction(async () => {
     const job = await get<GitHubPublishJob>('kv', id);
-    if (!job || job.lease?.token !== token || job.lease.until <= Date.now()) return false;
+    if (!job || job.repo !== repo || job.lease?.token !== token || job.lease.until <= Date.now()) return false;
     const next = await change(job);
     if (next) await put('kv', { ...next, updatedAt: new Date().toISOString() }, OUTBOX);
     return true;
@@ -168,12 +172,12 @@ async function runJob(id: string, opts: RunOptions): Promise<void> {
   });
   if (!job) return;
   const stop = (status: GitHubPublishJob['status'], reason?: string, notBefore?: number) =>
-    whileHeld(id, token, (j) => ({ ...j, status: j.seq === job.seq || status === 'pending' ? status : 'pending', reason, notBefore, lease: undefined }));
+    whileHeld(id, token, job.repo, (j) => ({ ...j, status: j.seq === job.seq || status === 'pending' ? status : 'pending', reason, notBefore, lease: undefined }));
 
   const checkpoint = async () => {
     const why = await notAllowed(job);
     if (why) throw new Cancelled(why);
-    if (!(await whileHeld(id, token, (j) => ({ ...j, lease: { token, until: Date.now() + LEASE_MS } })))) throw new LeaseLost('another worker took over this job');
+    if (!(await whileHeld(id, token, job.repo, (j) => ({ ...j, lease: { token, until: Date.now() + LEASE_MS } })))) throw new LeaseLost('another worker took over this job');
   };
   try {
     await checkpoint();
@@ -184,7 +188,7 @@ async function runJob(id: string, opts: RunOptions): Promise<void> {
     // Each write counts against the hour it is made in.
     const spend = async (keep: number) => await reserveCounters([{ id: `github-writes:${new Date().toISOString().slice(0, 13)}`, max: WRITES_PER_HOUR - keep }], OUTBOX);
     const confirm = async (main: string) => {
-      if (!(await whileHeld(id, token, (j) => ({ ...j, githubMain: main })))) throw new LeaseLost('another worker took over this job');
+      if (!(await whileHeld(id, token, job.repo, (j) => ({ ...j, githubMain: main })))) throw new LeaseLost('another worker took over this job');
     };
     await publishToGitHub(
       { repo: job.repo, token: config.github.publishToken!, commit: job.commit, confirmedMain: job.githubMain, releases },
@@ -192,7 +196,7 @@ async function runJob(id: string, opts: RunOptions): Promise<void> {
     );
     // Done: in one transaction, and only while this worker still holds the job, give each release its link (on the
     // release as it is now) and close the job, unless a newer target came.
-    const closed = await whileHeld(id, token, async (j) => {
+    const closed = await whileHeld(id, token, job.repo, async (j) => {
       for (const releaseId of job.releaseIds) {
         const r = await get<Release>('releases', releaseId);
         if (r?.status === 'published' && !r.githubUrl) await put('releases', { ...r, githubUrl: `https://github.com/${job.repo}/releases/tag/v${r.version}` }, r.ontologyId);

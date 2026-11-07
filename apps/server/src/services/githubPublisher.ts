@@ -163,9 +163,12 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
     nextHour.setUTCMinutes(60, 0, 0);
     return new PublishPaused('used this hour’s share of GitHub writes; publishing carries on later.', nextHour.getTime());
   };
-  /** Checks publishing is still allowed, then takes a write; `keep` writes of the hour are left for moving main. */
-  const grant = async (keep = 0) => {
-    if (writes % every === 0) await hooks.checkpoint();
+  /**
+   * Checks publishing is still allowed, then takes a write; `keep` writes of the hour are left for moving main.
+   * Uploads may check every `every` writes; a ref (`always`) is checked every time, as what makes uploads visible.
+   */
+  const grant = async (keep = 0, always = false) => {
+    if (always || writes % every === 0) await hooks.checkpoint();
     if (!(await hooks.spend(keep))) throw outOfWrites();
     writes++;
   };
@@ -201,6 +204,9 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
   const confirmed = target.confirmedMain;
   if (confirmed && remote !== confirmed && !(remote && (await isAncestor(confirmed, remote))))
     throw new PublishRefused(`main on github.com/${target.repo} was moved back (to ${remote ?? 'nothing'}) after Concord published ${confirmed}, so nothing was published: publishing again would undo that.`);
+  // Where main is now, checked, is recorded before anything else: main already at the target (an update that took
+  // effect just before a crash, say) is otherwise never confirmed, and moving it back later would go unnoticed.
+  if (remote && remote !== confirmed) await hooks.confirm?.(remote);
 
   /**
    * Moves main from exactly what was read to `after`, then reads it back. main anywhere but `before` or `after` was
@@ -208,7 +214,7 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
    * Only an update GitHub didn't answer, with main still where it was read, is tried again later.
    */
   const moveMain = async (before: string | undefined, after: string) => {
-    await grant();
+    await grant(0, true);
     let answer: Awaited<ReturnType<typeof gh.graphql>> | undefined;
     try {
       answer = await gh.graphql('mutation ($input: UpdateRefsInput!) { updateRefs(input: $input) { clientMutationId } }', {
@@ -226,7 +232,7 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
   };
   /** Creates a release tag's ref, only if it doesn't exist; then it must be Concord's tag. */
   const createTag = async (t: { name: string; sha: string }) => {
-    await grant();
+    await grant(0, true);
     const ref = `refs/tags/${t.name}`;
     const res = await gh.rest<{ message?: string }>('POST', '/git/refs', { ref, sha: t.sha });
     if (res.status === 201) return;
@@ -236,6 +242,21 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
     if (at) throw new PublishRefused(`${t.name} on github.com/${target.repo} is another tag (${at}) than the one Concord made, so it was left as it is.`);
     throw refused(`creating ${ref}`, res);
   };
+
+  /**
+   * The release tags still to make. A tag on GitHub that names anything else is a conflict, which stops publishing:
+   * checked before the first upload, and again before main moves at all (to the target or to partial progress).
+   */
+  const tagsToMake = async () => {
+    const have = await readTags();
+    return target.releases.filter((r) => {
+      const t = releaseTag(r);
+      const at = have.get(`refs/tags/${t.name}`);
+      if (at && at !== t.sha) throw new PublishRefused(`${t.name} on github.com/${target.repo} is another tag (${at}) than the one Concord made, so it was left as it is.`);
+      return !at;
+    });
+  };
+  await tagsToMake();
 
   // Commits, parents first. A commit's tree is sent where it differs from its first parent's (already on GitHub).
   const commits = await toSend(target.commit, remote);
@@ -274,6 +295,7 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
     // publishing instead.
     if (err instanceof PublishPaused && lastOnLine && lastOnLine !== remote) {
       try {
+        await tagsToMake();
         await moveMain(remote, lastOnLine);
       } catch (moveErr) {
         if (!(moveErr instanceof PublishPaused)) throw moveErr;
@@ -281,14 +303,7 @@ export async function publishToGitHub(target: PublishTarget, hooks: PublishHooks
     }
     throw err;
   }
-  // A tag on GitHub that names anything else is a conflict: found before main moves, nothing moves.
-  const have = await readTags();
-  const toTag = target.releases.filter((r) => {
-    const t = releaseTag(r);
-    const at = have.get(`refs/tags/${t.name}`);
-    if (at && at !== t.sha) throw new PublishRefused(`${t.name} on github.com/${target.repo} is another tag (${at}) than the one Concord made, so it was left as it is.`);
-    return !at;
-  });
+  const toTag = await tagsToMake();
   if (remote !== target.commit) await moveMain(remote, target.commit);
 
   // Then each release tag, its object and its ref together, so a run that stops keeps the tags it finished.

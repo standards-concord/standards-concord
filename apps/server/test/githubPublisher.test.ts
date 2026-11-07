@@ -516,6 +516,81 @@ describe('GitHub publisher, when refs move under it', () => {
       gh.close();
     }
   });
+
+  it('records where main is when a run starts, so moving it back after an update that was never confirmed is noticed', async () => {
+    // r4 review of #83: main already at the target (moved just before a crash, its confirmation lost) was never
+    // recorded, so after a pause at the tags someone could move it back and the next run moved it forward again.
+    const { r1, r2, releases } = await history();
+    const gh = gitHubStandIn({ refsDown: () => true });
+    const api = await gh.listen();
+    let confirmed: string | undefined;
+    const confirm = async (main: string) => void (confirmed = main);
+    try {
+      await publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases: [] }, { ...unlimited, api }); // nothing recorded
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, confirm })).rejects.toBeInstanceOf(PublishPaused);
+      expect(confirmed).toBe(r2);
+      gh.git(['update-ref', 'refs/heads/main', r1]); // someone moves main back
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases, confirmedMain: confirmed }, { ...unlimited, api, confirm })).rejects.toThrow(/was moved back/);
+      expect(gh.sha('refs/heads/main')).toBe(r1);
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('checks publishing is allowed before every ref update, even when uploads check less often', async () => {
+    // r4 review of #83: with checks every few writes, a hold that came during the last upload let main move unchecked.
+    const { r2, releases } = await history();
+    let held = false;
+    const gh = gitHubStandIn({ onWrite: async (_n, path) => void (path.endsWith('/git/commits') && (held = true)) });
+    const api = await gh.listen();
+    const checkpoint = async () => {
+      if (held) throw new Error('held for approval meanwhile');
+    };
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, checkpoint, every: 1000 })).rejects.toThrow('held for approval meanwhile');
+      expect(gh.calls.filter((c) => c.startsWith('POST /git/commits')).length).toBeGreaterThan(0);
+      expect(gh.calls).not.toContain('POST /graphql');
+      expect(gh.sha('refs/heads/main')).toBeUndefined();
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('finds a conflicting tag before saving partial progress, so main doesn’t move', async () => {
+    // r4 review of #83: when the writes ran out, main moved to the last commit sent before tags were looked at.
+    const { r1, r2, releases } = await history();
+    const first = gitHubStandIn();
+    const firstApi = await first.listen();
+    await publishToGitHub({ repo: 'example/pub', token: 't', commit: r1, releases: [] }, { ...unlimited, api: firstApi });
+    // Someone makes their own v1.0.0 while the uploads are going.
+    let gh: ReturnType<typeof gitHubStandIn> | undefined;
+    gh = gitHubStandIn({ onWrite: async (n) => void (n === 1 && gh!.git(['tag', 'v1.0.0', r1])) });
+    gh.git(['fetch', '-q', first.bare, '+refs/*:refs/*']);
+    first.close();
+    const api = await gh.listen();
+    try {
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: allowance(6).spend })).rejects.toThrow(/v1\.0\.0 .* another tag/);
+      expect(gh.sha('refs/heads/main')).toBe(r1);
+      expect(gh.calls).not.toContain('POST /graphql');
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('finds a conflicting tag before uploading anything', async () => {
+    const { r1, r2, releases } = await history();
+    const gh = gitHubStandIn();
+    const api = await gh.listen();
+    try {
+      await publishToGitHub({ repo: 'example/pub', token: 't', commit: r1, releases: [] }, { ...unlimited, api });
+      gh.git(['tag', 'v1.0.0', r1]);
+      gh.calls.length = 0;
+      await expect(publishToGitHub({ repo: 'example/pub', token: 't', commit: r2, releases }, { ...unlimited, api, spend: allowance(6).spend })).rejects.toThrow(/v1\.0\.0 .* another tag/);
+      expect(gh.calls.filter((c) => !c.startsWith('GET'))).toEqual([]);
+    } finally {
+      gh.close();
+    }
+  });
 });
 
 describe('GitHub publishing outbox', () => {
@@ -691,6 +766,32 @@ describe('GitHub publishing outbox', () => {
       await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
       await withToken(() => runGitHubPublish(project.id, { api }));
       expect(await githubPublishJob(project.id)).toMatchObject({ status: 'pending', lease: { token: 'another-worker' } });
+      expect((await get<Release>('releases', releases[1].id))!.githubUrl).toBeUndefined();
+    } finally {
+      gh.close();
+    }
+  });
+
+  it('leaves a job moved to another repository alone when a worker still publishing to the old one finishes', async () => {
+    // r4 review of #83: the old worker kept its lease, so it recorded its repository's main in the new job (which
+    // then looked moved back, and was quarantined) and could even mark it done.
+    const { project, releases } = await setUp();
+    const moved = { ...project, github: { repo: 'example/other' } } as OntologyProject;
+    const gh = gitHubStandIn({
+      onWrite: async (_n, path) => {
+        if (path !== '/graphql') return;
+        await put('ontologies', moved);
+        await transaction(async () => await enqueueGitHubPublish(moved, releases[1]));
+      },
+    });
+    const api = await gh.listen();
+    try {
+      await transaction(async () => await enqueueGitHubPublish(project, releases[1]));
+      await withToken(() => runGitHubPublish(project.id, { api }));
+      const job = (await githubPublishJob(project.id))!;
+      expect(job).toMatchObject({ repo: 'example/other', status: 'pending', releaseIds: [releases[1].id] });
+      expect(job.githubMain).toBeUndefined();
+      expect(job.lease).toBeUndefined();
       expect((await get<Release>('releases', releases[1].id))!.githubUrl).toBeUndefined();
     } finally {
       gh.close();
