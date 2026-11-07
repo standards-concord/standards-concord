@@ -537,6 +537,8 @@ export function apiRouter(): Router {
     const m = await visible(req);
     // A simulated call is carried on by whoever reads it (see meetings.simulateCall).
     if (m && meetings.simulationRunning(m)) void keepAlive(meetings.advanceSimulation(m.id)).catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
+    // An analysis whose run died is started again (see meetings.recoverAnalysis).
+    if (m) meetings.recoverAnalysis(m);
     res.json(m);
   });
   r.patch('/meetings/:id', async (req, res) => {
@@ -582,6 +584,7 @@ export function apiRouter(): Router {
   r.get('/meetings/:id/updates', async (req, res) => {
     const m = await visible(req);
     if (meetings.simulationRunning(m)) void keepAlive(meetings.advanceSimulation(m.id)).catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
+    meetings.recoverAnalysis(m);
     const asked = Math.floor(Number(req.query.from));
     // A cursor past the end (or none) gets the whole transcript.
     const from = Number.isFinite(asked) && asked >= 0 && asked <= m.transcript.length ? asked : 0;

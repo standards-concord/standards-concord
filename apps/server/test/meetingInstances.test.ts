@@ -82,6 +82,19 @@ describe('analysing a call on several servers', () => {
     expect(out.analysis?.competencyQuestions.length).toBeGreaterThan(0);
     expect(out.analysisClaim).toBeUndefined();
   });
+
+  // Review r1 of step 5: a takeover only happened if someone asked for the analysis again, and the page keeps its
+  // analyse button off while a call is "processing", so a call whose analysing instance died stayed stuck.
+  // Reading the call now starts it again (the page polls while it shows "processing").
+  it('starts a stuck analysis again when the call is read, and leaves one still running alone', async () => {
+    const { recoverAnalysis } = await import('../src/services/meetings.js');
+    const running = await meeting({ status: 'processing', analysisClaim: { token: 'another-server', until: Date.now() + 60_000 } });
+    recoverAnalysis(await getMeeting(running.id));
+    const stuck = await meeting({ status: 'processing', analysisClaim: { token: 'gone', until: Date.now() - 1 } });
+    recoverAnalysis(await getMeeting(stuck.id));
+    await expect.poll(async () => (await getMeeting(stuck.id)).status, { timeout: 5000 }).toBe('analysed');
+    expect((await getMeeting(running.id))).toMatchObject({ status: 'processing', analysisClaim: { token: 'another-server' } });
+  });
 });
 
 describe('a simulated call on several servers', () => {

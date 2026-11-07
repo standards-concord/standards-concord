@@ -214,6 +214,15 @@ export const ANALYSIS_CLAIM_MS = 10 * 60_000;
 export const analysing = (m: Meeting) => m.status === 'processing' && (m.analysisClaim?.until ?? 0) > Date.now();
 
 /**
+ * An analysis whose run died (its claim lapsed with the call still 'processing') is started again by whoever reads
+ * the call: the meeting page polls while it shows "processing", so a stuck call recovers without anyone acting.
+ */
+export function recoverAnalysis(m: Meeting) {
+  if (m.status !== 'processing' || analysing(m) || !m.transcript.length || botActive(m) || botOutstanding(m)) return;
+  void keepAlive(analyseMeeting(m)).catch((err) => console.warn(`[meetings] analysis of ${m.id} could not restart: ${(err as Error).message}`));
+}
+
+/**
  * Analyses a call once. The run claims it on the record (any server instance sees the claim), so a second ask
  * while it runs gets the call as it is; a claim whose run died lapses after ANALYSIS_CLAIM_MS, and only the run
  * holding the claim saves its result.
