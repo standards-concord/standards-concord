@@ -497,28 +497,54 @@ export const CHAT_CLAIM_MS = 2 * 60_000;
 const held = (c?: { until: number }) => !!c && c.until > Date.now();
 
 /** Posts one prompt into the meeting chat. Only that prompt is updated, on the latest copy of the meeting. */
+export const MAYBE_POSTED = 'This suggestion may already be in the call’s chat: posting it was interrupted before Concord heard back. Check the chat, and post it again only if it isn’t there.';
 export async function postPrompt(meetingId: string, index: number, opts: { quiet?: boolean } = {}) {
   const token = newToken();
   let claimed = false;
+  let uncertain = false;
   const m = await mutateMeeting(meetingId, (x) => {
     const q = x.facilitatorPrompts[index];
     if (!q || q.posted || held(q.postClaim)) return;
+    // A claim that lapsed: its run may have posted and died before recording it, and Recall.ai's chat has no
+    // idempotency key. That is recorded, and the first request after it is refused, so a facilitator posts it
+    // again only knowingly (the next request goes ahead). Automatic posts never repeat it.
+    if (q.postClaim) {
+      delete q.postClaim;
+      q.postUncertain = true;
+      uncertain = true;
+      return;
+    }
+    if (q.postUncertain && opts.quiet) return;
     q.postClaim = { token, until: Date.now() + CHAT_CLAIM_MS };
     claimed = true;
   });
   const p = m.facilitatorPrompts[index];
   if (!p) throw new HttpError(404, 'No such prompt');
   if (p.posted) return m;
-  if (!claimed) throw new HttpError(409, 'That prompt is being posted already');
+  if (uncertain) {
+    emit(m, { type: 'meeting', meeting: m });
+    if (opts.quiet) return m;
+    throw new HttpError(409, MAYBE_POSTED);
+  }
+  if (!claimed) {
+    if (opts.quiet) return m;
+    throw new HttpError(409, 'That prompt is being posted already');
+  }
   const r = await sendToChat(m, p.text);
   const fresh = await mutateMeeting(meetingId, (x) => {
     const q = x.facilitatorPrompts[index];
-    if (q.postClaim?.token === token) delete q.postClaim;
+    // Only the run whose claim still stands records how it went. One whose claim lapsed (it stalled) only records
+    // a post that went through, which is true whoever else is trying.
+    if (q.postClaim?.token === token) {
+      delete q.postClaim;
+      if (!r.ok && !q.posted) q.postError = r.error;
+    } else if (!r.ok) return;
     if (r.ok) {
       q.posted = true;
       q.postedAt = clock.iso();
       delete q.postError;
-    } else if (!q.posted) q.postError = r.error;
+      delete q.postUncertain;
+    }
   });
   emit(fresh, { type: 'meeting', meeting: fresh });
   if (!r.ok && !opts.quiet) throw new HttpError(409, r.error);
@@ -540,6 +566,9 @@ export async function announceChatMode(meetingId: string) {
   const m = await mutateMeeting(meetingId, (x) => {
     want = !!x.postPromptsToChat;
     if (!noticeDue(x)) return;
+    // A lapsed claim: that notice may or may not have reached the call. It is sent again (a repeated notice only
+    // restates the setting, and the call must know it), and the record says so until one is confirmed.
+    if (x.chatNoticeClaim) x.chatNoticeError = 'An earlier notice about chat posting was interrupted before Concord heard back, so it may have been sent twice.';
     x.chatNoticeClaim = { token, until: Date.now() + CHAT_CLAIM_MS };
     claimed = true;
   });
@@ -551,7 +580,10 @@ export async function announceChatMode(meetingId: string) {
       : `${config.meetBot.botName}: I'll stop posting questions in the chat. I'm still transcribing; my suggestions now go to the facilitator in Concord.`,
   );
   const fresh = await mutateMeeting(meetingId, (x) => {
-    if (x.chatNoticeClaim?.token === token) delete x.chatNoticeClaim;
+    // Only the run whose claim still stands records the outcome: one that stalled past its claim may report a
+    // setting that a newer notice has since replaced.
+    if (x.chatNoticeClaim?.token !== token) return;
+    delete x.chatNoticeClaim;
     if (r.ok) {
       x.chatModeAnnounced = want;
       delete x.chatNoticeError;

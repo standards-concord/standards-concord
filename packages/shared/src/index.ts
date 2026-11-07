@@ -641,6 +641,8 @@ export interface FacilitatorPrompt {
   postError?: string;
   /** A server run posting it right now, until when (ms): one post at a time, whichever server instance asks. */
   postClaim?: { token: string; until: number };
+  /** A post was interrupted before Concord heard whether it went through, so it may already be in the chat. */
+  postUncertain?: boolean;
 }
 
 /** Where a calendar-invited call came from: the bot's calendar feed or an uploaded .ics invite. */

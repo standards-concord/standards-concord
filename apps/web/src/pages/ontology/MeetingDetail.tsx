@@ -212,6 +212,7 @@ export function MeetingDetailPage() {
                 {fmtT(p.t)} {p.posted ? `· posted in the Meet chat${mt.source === 'simulation' ? ' (simulated)' : ''}` : '· suggested to the facilitator'}
               </p>
               {p.postError && !p.posted && <p className="mt-0.5 text-xs text-danger">Couldn’t post: {p.postError}</p>}
+              {p.postUncertain && !p.posted && <p className="mt-0.5 text-xs text-warn">This may already be in the call’s chat: posting it was interrupted. Check the chat before posting it again.</p>}
               {!p.posted && canPostNow && mayRun && (
                 <Button size="sm" variant="ghost" icon={Send} className="-ml-2 mt-1" loading={posting === i} disabled={posting !== undefined} onClick={() => void postPrompt.run(i)}>
                   Post in the Meet chat

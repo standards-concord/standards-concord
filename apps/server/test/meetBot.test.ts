@@ -432,6 +432,60 @@ describe('invite-by-email', () => {
 
   // Review r1 of step 4: when the last transcript line arrived was kept in the memory of the instance that took
   // the webhook, so another instance's tick saw none and ended a call still in full flow once its slot was over.
+  /** A calendar call with its bot in the call, and a suggestion waiting to be posted. */
+  const liveWithPrompt = async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:50:00Z'));
+    await dispatchDue(at('2026-11-10T15:00:30Z'));
+    const [m] = await calendarMeetings();
+    const secret = (await list<{ id: string; secret: string }>('kv')).find((k) => k.id === `meeting-secret:${m.id}`)!.secret;
+    for (let i = 0; i < 4; i++) await recallWebhook(m.id, secret, { event: 'transcript.data', data: { data: { participant: { name: 'Aisha Rahman' }, words: [{ text: `A shift is a slot on a rota, part ${i}.`, start_timestamp: { relative: 5 } }] } } });
+    return getMeeting(m.id);
+  };
+
+  // Review r1 of step 5: a run that posted a suggestion and died before recording it left a claim that lapsed, and
+  // the next request posted it again (Recall.ai's chat has no idempotency key). Now that outcome is unknown, and
+  // says so: the first request after it is refused, and a facilitator who posts again does so knowingly.
+  it('marks a suggestion whose post was interrupted as maybe posted, and posts it again only when asked twice', async () => {
+    const m = await liveWithPrompt();
+    expect(m.facilitatorPrompts).toHaveLength(1);
+    await saveMeeting({ ...m, facilitatorPrompts: [{ ...m.facilitatorPrompts[0], postClaim: { token: 'died', until: Date.now() - 1 } }] });
+    const s = await steward('Steward Pip');
+    calls.length = 0;
+    const first = await s.post(`/api/meetings/${m.id}/prompts/0/post`);
+    expect(first.status).toBe(409);
+    expect(first.body.error).toMatch(/may already be in the call’s chat/);
+    expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: false, postUncertain: true });
+    expect(calls.filter((c) => c.url.includes('send_chat_message'))).toEqual([]);
+    const again = await s.post(`/api/meetings/${m.id}/prompts/0/post`);
+    expect(again.status).toBe(200);
+    expect(calls.filter((c) => c.url.includes('send_chat_message'))).toHaveLength(1);
+    expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: true });
+    expect((await getMeeting(m.id)).facilitatorPrompts[0].postUncertain).toBeUndefined();
+  });
+
+  // Review r1 of step 5: a notice sender that stalled past its claim still recorded its outcome, so it could set
+  // what the call was told back to a setting a newer notice had replaced.
+  it('ignores the outcome of a chat notice whose claim another run has taken over', async () => {
+    const { announceChatMode, mutateMeeting } = await import('../src/services/meetings.js');
+    const m = await liveWithPrompt();
+    expect(m.chatModeAnnounced).toBe(false);
+    await mutateMeeting(m.id, (x) => (x.postPromptsToChat = true));
+    stubMode.chatDelayMs = 200;
+    const slow = announceChatMode(m.id);
+    await expect.poll(async () => (await getMeeting(m.id)).chatNoticeClaim).toBeTruthy();
+    // Its claim lapses; another run takes over and the setting changes back meanwhile.
+    await mutateMeeting(m.id, (x) => {
+      x.chatNoticeClaim = { token: 'newer-run', until: Date.now() + 60_000 };
+      x.postPromptsToChat = false;
+    });
+    await slow;
+    const after = await getMeeting(m.id);
+    expect(after.chatModeAnnounced).toBe(false);
+    expect(after.chatNoticeClaim?.token).toBe('newer-run');
+  });
+
   it('keeps a call going past its slot while lines still arrive, whichever instance took them', async () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-10T14:00:00Z'));
