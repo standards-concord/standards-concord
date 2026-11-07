@@ -1,16 +1,12 @@
 import { createApp } from './app.js';
 import { config } from './config.js';
 import { list, openDb } from './db.js';
-import { migrateClientSecrets } from './oauth.js';
 import { importVerified } from './migrate/index.js';
 import { acquireProcessLock } from './processLock.js';
-import { refreshReleasePages } from './public/routes.js';
 import { claimGitStore, ontologyStore } from './services/ontologyStore.js';
-import { seedDemo } from './services/simulation.js';
 import { runDue } from './services/scheduler.js';
+import { defaultStartupTasks, runStartupTasks } from './startup.js';
 import type { OntologyProject } from '@concord/shared';
-import { syncFeedbackSharing } from './services/feedback.js';
-import { backfillDemoAvatars } from './services/users.js';
 
 acquireProcessLock(config.dataDir);
 await openDb();
@@ -41,16 +37,11 @@ async function startWritable() {
     // Git is a projection of the database: repair anything a crash left half-done.
     for (const p of await list<OntologyProject>('ontologies')) await ontologyStore.ensureSynced(p);
   }
-  const secrets = await migrateClientSecrets();
-  if (secrets.hashed) console.log(`[oauth] hashed ${secrets.hashed} stored client secret(s)`);
-  if (!secrets.scrubbed) console.warn('[oauth] could not scrub old copies of client secrets from the database (another connection was busy); will retry at the next start');
-  if (config.demoMode) {
-    const pictures = await backfillDemoAvatars();
-    if (pictures) console.log(`[seed] gave ${pictures} demo account(s) a profile picture`);
-    await seedDemo().catch((err) => console.error('[seed] failed', err));
-  }
-  // Release pages written by an older renderer (or without a use case snapshot) are regenerated.
-  await refreshReleasePages().catch((err) => console.error('[public] refresh failed', err));
+  // Start-up work (src/startup.ts) runs at every start here, as one server; feedback sharing (slow: it writes to
+  // pods) carries on after the server is listening.
+  const tasks = await defaultStartupTasks();
+  const later = tasks.filter((t) => t.name === 'feedback-sharing');
+  await runStartupTasks(tasks.filter((t) => !later.includes(t)), { always: true });
 
   const app = createApp();
   app.listen(config.port, () => {
@@ -64,8 +55,5 @@ async function startWritable() {
     void runDue().catch((err) => console.warn('[schedule]', (err as Error).message));
   }
 
-  // ADMIN_WEBIDS may have changed since the last start: share testers' pod feedback folders with exactly that list.
-  void syncFeedbackSharing()
-    .then((c) => (c.shared || c.failed ? console.log(`[solid] feedback folders shared with ${config.adminWebIds.length} admin WebID(s): ${c.shared} updated, ${c.unchanged} unchanged, ${c.failed} failed`) : undefined))
-    .catch((err) => console.warn('[solid] feedback sharing sync failed', (err as Error).message));
+  void runStartupTasks(later, { always: true }).catch((err) => console.warn('[startup]', (err as Error).message));
 }

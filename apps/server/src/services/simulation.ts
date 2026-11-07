@@ -28,6 +28,7 @@ import { generateRequirements, markPublished } from './requirements.js';
 import { addLink, createUseCase, getUseCase, proposeAnonymised, publishAnonymised } from './useCases.js';
 import { aggregationCompetencyQuestions, aggregationExampleData, AGGREGATION_USE_CASE, WEEKLY_SHIFTS_QUESTIONS, WEEKLY_SHIFTS_TERMS, WEEKLY_SHIFTS_USE_CASE } from './demoUseCases.js';
 import { createUser, getUser, listActivity, personas } from './users.js';
+import { withLease } from '../lease.js';
 
 const FIXTURE = path.join(config.repoRoot, 'packages/core/fixtures/volunteering.ttl');
 const VOL = 'https://w3id.org/odi/volunteering#';
@@ -53,15 +54,17 @@ export const personaFor = (u: User | undefined) => PERSONAS.find((p) => p.name =
 
 /** The demo ontology every alpha tester lands in: the volunteering standard, mid-flight. */
 export async function seedDemo(): Promise<OntologyProject | undefined> {
-  const existing = (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
+  const find = async () => (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
+  const existing = await find();
   if (existing) return existing;
   if (!fs.existsSync(FIXTURE)) {
     console.warn('[seed] volunteering fixture not found; skipping demo seed');
     return undefined;
   }
+  // One instance seeds (Vercel starts several at once); the others wait for it and find its demo.
   // Seed history in the recent past so review periods are partly elapsed, on a clock of its own: requests
   // meanwhile (and other instances) keep the shared one.
-  return await clock.withShift(-21 * DAY_MS, seedHistory);
+  return await withLease('demo-seed', 60_000, async () => (await find()) ?? (await clock.withShift(-21 * DAY_MS, seedHistory)), { renew: true, waitMs: 5 * 60_000 });
 }
 
 async function seedHistory() {
