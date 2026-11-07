@@ -35,7 +35,9 @@ export function unseal<T>(purpose: string, sealed: string, boundTo?: string): T 
   if (!master()) return undefined;
   try {
     const raw = Buffer.from(sealed, 'base64url');
-    const decipher = crypto.createDecipheriv('aes-256-gcm', keyFor(purpose), raw.subarray(0, 12));
+    if (raw.length < 28) return undefined;
+    // The whole 16-byte tag, always: a shorter one (from a cut-off value) is never accepted.
+    const decipher = crypto.createDecipheriv('aes-256-gcm', keyFor(purpose), raw.subarray(0, 12), { authTagLength: 16 });
     if (boundTo !== undefined) decipher.setAAD(Buffer.from(boundTo, 'utf8'));
     decipher.setAuthTag(raw.subarray(12, 28));
     return JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8')) as T;

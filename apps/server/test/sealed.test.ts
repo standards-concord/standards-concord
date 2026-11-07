@@ -21,6 +21,16 @@ describe('sealed values', () => {
     expect(unseal('admin-login', sealed)).toBeUndefined();
   });
 
+  it('opens only for what it was bound to, and never with a cut-off tag', () => {
+    process.env.CONCORD_ENCRYPTION_KEY = '01'.repeat(32);
+    const sealed = seal('user-login', { refreshToken: 'rt' }, 'account a');
+    expect(unseal('user-login', sealed, 'account a')).toEqual({ refreshToken: 'rt' });
+    expect(unseal('user-login', sealed, 'account b')).toBeUndefined();
+    expect(unseal('user-login', sealed)).toBeUndefined();
+    const raw = Buffer.from(sealed, 'base64url');
+    expect(unseal('user-login', raw.subarray(0, 20).toString('base64url'), 'account a')).toBeUndefined();
+  });
+
   it('seals nothing without a key of the right length', () => {
     expect(sealingAvailable()).toBe(false);
     expect(() => seal('admin-login', {})).toThrow(/CONCORD_ENCRYPTION_KEY/);
