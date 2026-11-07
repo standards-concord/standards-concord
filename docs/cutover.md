@@ -22,6 +22,7 @@ Run it as `node --import tsx src/migrate/cli.ts …` from `apps/server`. Anythin
 ## Before the day
 
 1. Steps 4 and 5 are merged and deployed to a Vercel preview that uses a Neon branch. Scheduled work runs without per-minute timers, and the API runs as functions.
+1. **Step 5e is merged:** people who sign in with Solid keep their private data in their own pod, written as them. Until then the function would keep their private data in the database, against the agreed policy (Google and GitHub accounts' private data goes to the database; Solid accounts' goes to their pod). No cutover before it.
 2. The VM's keys are in Vercel's production environment variables, pasted by Jesse from the Mac and never shown.
 3. Rehearse against a scratch Neon branch while the VM is still live. Run `copy --from /data` on the VM in a one-off container from the running image, with the tool's source mounted over the image's, `DATABASE_URL` pointing at the branch and the data volume mounted read-only. Then open the preview against that branch and check the ontologies, histories, releases, forks and sign-in. Note how long the copy took, because the read-only window will last about that long.
 
