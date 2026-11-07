@@ -207,8 +207,9 @@ export function WebIdIcon({ className = 'size-4' }: { className?: string }) {
 /**
  * Concord's mark: the top view of a delta-winged supersonic airliner (a nod to Concorde, whose
  * name it shares), split down the middle into two halves that meet, as parties do in concord.
- * It climbs at 45° with a slipstream behind it. Drawn nose-up on a 64-unit grid; index.html's
- * favicon uses the same plane without the slipstream, which turns to noise at 16px.
+ * It climbs at 45° with a slipstream behind it. Drawn nose-up on a 64-unit grid; the tab icon
+ * and the MCP connector's icon (scripts/make-icons.mjs) use the same plane without the
+ * slipstream, which turns to noise at 16px.
  */
 export const LOGO_LEFT =
   'M31 5.5C30.3 8.5 29.7 12 29.6 16L29.4 21C28.8 31 25.5 38 18 45C14 48.6 10.6 50.5 8 52.6L8 55.2L29 55.6L29.8 59L31 60.2Z';

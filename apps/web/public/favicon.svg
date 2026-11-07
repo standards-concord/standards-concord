@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Concord</title>
+  <rect width="64" height="64" rx="12" fill="#005a9c"/>
+  <g fill="white" transform="translate(6.7 -6.7) rotate(45 32 32) translate(32 32) scale(.96) translate(-32 -32)">
+    <path d="M31 5.5C30.3 8.5 29.7 12 29.6 16L29.4 21C28.8 31 25.5 38 18 45C14 48.6 10.6 50.5 8 52.6L8 55.2L29 55.6L29.8 59L31 60.2Z"/>
+    <path fill-opacity=".62" d="M33 5.5C33.7 8.5 34.3 12 34.4 16L34.6 21C35.2 31 38.5 38 46 45C50 48.6 53.4 50.5 56 52.6L56 55.2L35 55.6L34.2 59L33 60.2Z"/>
+  </g>
+</svg>

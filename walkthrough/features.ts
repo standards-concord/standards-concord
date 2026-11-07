@@ -112,12 +112,12 @@ export const featureActions: Record<string, Action> = {
   async 'f-title-card'(c) {
     await signInAs(c, 'Priya Shah');
     await c.d.chapter({ eyebrow: 'Concord · A closer look', title: 'One change, start to finish', sub: 'Checks, review, git history, releases, and checking your data.' }, 0);
-    await sleep(900);
+    await c.d.pause(900);
     await c.d.goto(o(c), { keepCard: true });
   },
   async 'f-open-overview'(c) {
     await show(c, o(c));
-    await sleep(400);
+    await c.d.pause(400);
   },
 
   /* ------------------------------ health ------------------------------ */
@@ -150,13 +150,13 @@ export const featureActions: Record<string, Action> = {
     await c.d.clearHighlight();
     await c.d.goto(o(c, '/browse'));
     await c.d.click(c.d.page.getByRole('radio', { name: /Diagram/ }), 'the Diagram view');
-    await sleep(800);
+    await c.d.pause(800);
     if (await c.d.claimVisible(c.d.page.getByRole('main').locator('svg').first(), 'the class diagram is drawn')) await c.d.scroll(280, 1400);
   },
   async 'f-open-term'(c) {
     await signInAs(c, 'Tom Okafor');
     await c.d.goto(o(c, `/browse?term=${encodeURIComponent(VOL + TERM.localName)}`));
-    await sleep(400);
+    await c.d.pause(400);
     await c.d.claimVisible(c.d.page.getByRole('main').getByText(/that a person can apply to a task/), 'the term page shows the current definition');
     await ringAround(c, /that a person can apply to a task/);
   },
@@ -224,7 +224,7 @@ export const featureActions: Record<string, Action> = {
     await c.d.goto(o(c, `/changes/${story.crId}`));
     const btn = c.d.page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Approve' });
     if (!(await c.d.click(btn, 'Approve'))) return;
-    await sleep(600);
+    await c.d.pause(600);
     await ringAround(c, /^Decision$/);
   },
   async 'f-day-passes'(c) {
@@ -271,7 +271,7 @@ export const featureActions: Record<string, Action> = {
     story.release = (await btn.innerText()).replace(/^(Draft|Update) v/, '').trim();
     c.d.claim(/^\d+\.\d+\.\d+$/.test(story.release) && story.release.split('.')[2] !== '0', `the release is a patch version (${story.release})`);
     await c.d.highlight(dlg, 'the Draft a release dialog');
-    await sleep(1800);
+    await c.d.pause(1800);
     await c.d.clearHighlight();
     await c.d.click(btn, 'the Draft button');
   },
@@ -328,7 +328,7 @@ export const featureActions: Record<string, Action> = {
     if (!(await c.d.click(editor, 'the data editor', { settle: false }))) return;
     await c.d.page.keyboard.press('ControlOrMeta+a');
     await c.d.page.keyboard.insertText(SAMPLE);
-    await sleep(400);
+    await c.d.pause(400);
   },
   async 'f-check'(c) {
     await c.d.clearHighlight();
@@ -352,16 +352,16 @@ export const featureActions: Record<string, Action> = {
   },
   async 'f-fix'(c) {
     // The value is selected: typing replaces it, the way the report suggests.
-    await sleep(300);
+    await c.d.pause(300);
     await c.d.page.keyboard.insertText('"16"^^xsd:nonNegativeInteger');
-    await sleep(600);
+    await c.d.pause(600);
     // Checked again as it's typed.
     const ok = c.d.page.getByTestId('validation-verdict').getByText('Conforms to the shapes', { exact: true });
     if (await c.d.claimVisible(ok, 'the fixed data conforms', 20_000)) await c.d.highlight(ok, 'Conforms');
   },
   async 'f-open-validate'(c) {
     await c.d.clearHighlight();
-    await sleep(500);
+    await c.d.pause(500);
     await c.d.scroll(500, 1600);
   },
 
