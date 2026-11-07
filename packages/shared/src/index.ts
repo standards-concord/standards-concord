@@ -1563,6 +1563,11 @@ export interface PodFeedbackReport {
 
 export interface SessionInfo {
   user?: User;
+  /**
+   * Names this browser session without revealing its token: a sign-out made with no connection
+   * sends it later, so only that session ends (POST /api/auth/logout `{ session }`).
+   */
+  sessionId?: string;
   providers: { google: boolean; github: boolean; solid: boolean; demo: boolean };
   /**
    * WebIDs that can read testers' feedback: the deployment's administrators. Testers are

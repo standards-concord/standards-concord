@@ -67,30 +67,45 @@ function forgetOfflineSession() {
   }
 }
 /**
- * Signing out with no connection can't end the server's session. The account is remembered here and
- * its session ended as soon as the server answers (fetchSession), so it doesn't come back signed in.
+ * Signing out with no connection can't end the server's session. The session it meant (its handle,
+ * SessionInfo.sessionId) is remembered here and ended as soon as the server can be reached: the server
+ * ends that session only, so a newer sign-in or another account's session in this browser is never
+ * touched. Each pending sign-out has its own id, and only that one is cleared when it is done.
  */
 const SIGN_OUT_PENDING = 'concord.signOutPending';
-export function markSignOutPending(userId: string) {
+interface PendingSignOut {
+  id: string;
+  session: string;
+}
+export function markSignOutPending(session: string | undefined) {
+  if (!session) return;
   try {
-    localStorage.setItem(SIGN_OUT_PENDING, userId);
+    localStorage.setItem(SIGN_OUT_PENDING, JSON.stringify({ id: crypto.randomUUID(), session } satisfies PendingSignOut));
   } catch {
     /* storage unavailable */
   }
 }
-function signOutPending(): string | null {
+function signOutPending(): PendingSignOut | undefined {
   try {
-    return localStorage.getItem(SIGN_OUT_PENDING);
+    const p = JSON.parse(localStorage.getItem(SIGN_OUT_PENDING) ?? 'null') as PendingSignOut | null;
+    return p && typeof p.id === 'string' && typeof p.session === 'string' ? p : undefined;
   } catch {
-    return null;
+    return undefined;
   }
 }
-function clearSignOutPending() {
+function clearSignOutPending(id: string) {
   try {
-    localStorage.removeItem(SIGN_OUT_PENDING);
+    if (signOutPending()?.id === id) localStorage.removeItem(SIGN_OUT_PENDING);
   } catch {
     /* storage unavailable */
   }
+}
+/** Ends the session a sign-out with no connection meant, now the server answers; done whatever it says. */
+async function finishPendingSignOut() {
+  const pending = signOutPending();
+  if (!pending) return;
+  await api.logout(pending.session);
+  clearSignOutPending(pending.id);
 }
 
 /** The saved session, its clock moved on by the time since it was saved; undefined if there is none. */
@@ -158,13 +173,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
    */
   const fetchSession = useCallback(async () => {
     const before = signOuts();
-    let s = await api.session();
-    // Signed out here with no connection: the server's session is ended now that it can be reached.
-    if (s.user && signOutPending() === s.user.id) {
-      await api.logout();
-      clearSignOutPending();
-      s = await api.session();
-    }
+    // A sign-out made with no connection goes first, so its session never signs this tab back in.
+    await finishPendingSignOut();
+    const s = await api.session();
     return s.user && signOuts() !== before ? undefined : s;
   }, []);
 

@@ -4,7 +4,7 @@ import { allTerms, compactIRI, expandIRI, FORMAT_INFO, serialize, usedBy, valida
 import type { OutputFormat } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
-import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, setSessionCookie } from '../auth.js';
+import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, sessionHandle, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { detached, transaction, get, HttpError, list, put } from '../db.js';
@@ -82,9 +82,10 @@ const str = (v: unknown, name: string, max = 20000) => {
 };
 const optStr = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
-async function sessionInfo(user?: User): Promise<SessionInfo> {
+async function sessionInfo(user?: User, token?: unknown): Promise<SessionInfo> {
   return {
     user,
+    sessionId: user ? sessionHandle(token) : undefined,
     providers: providers(),
     feedbackReaders: config.adminWebIds,
     serverTranscription: config.stt.provider === 'openai' && config.stt.openaiKey ? 'openai' : null,
@@ -149,7 +150,7 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------------ auth ------------------------------ */
-  r.get('/session', async (req, res) => res.json(await sessionInfo(req.user)));
+  r.get('/session', async (req, res) => res.json(await sessionInfo(req.user, req.cookies?.[SESSION_COOKIE])));
 
   // Walkthrough videos for the alpha landing page (public; see services/media.ts).
   r.get('/media/index.json', async (_req, res) => {
@@ -192,16 +193,20 @@ export function apiRouter(): Router {
       if (demo) await setRoles(demo.id, user.id, [...new Set(roles)]);
     }
     endAdminLogin(req.cookies?.[SESSION_COOKIE]);
-    await setSessionCookie(res, user.id, 'demo');
+    const token = await setSessionCookie(res, user.id, 'demo');
     await rememberTester(req, res, testerBefore, user);
-    res.json(await sessionInfo(user));
+    res.json(await sessionInfo(user, token));
   });
 
   r.post('/auth/logout', async (req, res) => {
+    // A sign-out made earlier with no connection names the session it meant (SessionInfo.sessionId):
+    // if this browser's session is now another one (a newer sign-in, another account, or none), nothing ends.
+    const meant = optStr(req.body?.session);
+    if (meant !== undefined && meant !== sessionHandle(req.cookies?.[SESSION_COOKIE])) return void res.json({ ended: false });
     endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     await clearTesterCookie(req, res);
     await destroySession(req.cookies?.[SESSION_COOKIE]);
-    res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
+    res.clearCookie(SESSION_COOKIE, { path: '/' }).json({ ended: true });
   });
 
   /*
@@ -888,13 +893,13 @@ export function apiRouter(): Router {
     const days = Number(req.body?.advanceDays);
     if (!Number.isFinite(days) || days <= 0 || days > 60) throw new HttpError(400, 'advanceDays must be between 0 and 60');
     await advanceClock(days);
-    res.json(await sessionInfo(req.user));
+    res.json(await sessionInfo(req.user, req.cookies?.[SESSION_COOKIE]));
   });
   r.post('/simulation/reset', async (req, res) => {
     demoOnly();
     if (!req.user?.isPlatformAdmin && !['1', 'true'].includes(process.env.ALLOW_PUBLIC_RESET ?? '')) throw new HttpError(403, 'Only an administrator can reset the shared demo');
     await resetAll();
-    res.clearCookie(SESSION_COOKIE, { path: '/' }).json({});
+    res.clearCookie(SESSION_COOKIE, { path: '/' }).json({ ended: true });
   });
 
   /* ------------------------------ activity --------------------------- */

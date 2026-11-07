@@ -90,7 +90,7 @@ function UserMenu() {
       await api.logout();
     } catch (e) {
       // No connection: the server's session is ended when it can next be reached.
-      if (e instanceof ApiError && e.offline) markSignOutPending(user.id);
+      if (e instanceof ApiError && e.offline) markSignOutPending(session?.sessionId);
     }
     finishSignOut(user.id);
     const s = await refresh();

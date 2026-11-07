@@ -247,7 +247,8 @@ export const api = {
   // Auth
   session: () => get<SessionInfo>('/api/session'),
   demoLogin: (body: { userId?: string; name?: string; role?: Role } = {}) => post<SessionInfo>('/api/auth/demo', body),
-  logout: () => post<Record<string, never>>('/api/auth/logout'),
+  /** Ends this browser's session; with `session`, only if it is still that one (see SessionInfo.sessionId). */
+  logout: (session?: string) => post<{ ended: boolean }>('/api/auth/logout', session ? { session } : {}),
   /** The walkthrough videos for the latest release (see /welcome). */
   mediaIndex: () => get<MediaIndex>('/api/media/index.json'),
   /** The feature clips' playlist, when the release has one. */
