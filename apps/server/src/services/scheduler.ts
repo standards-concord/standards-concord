@@ -91,10 +91,9 @@ export interface RunResult {
  *
  * The lease is renewed while the jobs run. It is not a fence: a runner that stalls past LEASE_MS (renewals
  * failing, or the instance frozen) and then resumes carries on beside the run that took over, until its jobs
- * end. On one server (the VM, where this runs from a timer) that overlap is harmless: the jobs' locks are held in
- * the process. Across instances it is not yet: the Meet bot's calendar lock is held in the process too, so two
- * runs at once could each create a meeting for the same new invite. Running on several instances (Vercel) is
- * therefore gated on the store-backed locks and atomic occurrence creation of the next step (docs/deploy.md).
+ * end. That overlap is an accepted limit because each job guards its own writes: meeting changes run in
+ * transactions, bot lanes are idempotent compare-and-sets, a calendar invite's meeting is looked for and created in
+ * one transaction, and a calendar read older than one already applied is dropped (docs/deploy.md).
  */
 export async function runDue(opts: { force?: boolean; now?: () => number; renewEvery?: number } = {}): Promise<RunResult> {
   // Read-only (the cutover): no scheduled work at all, since jobs call out (Recall.ai, GitHub, pods) before they

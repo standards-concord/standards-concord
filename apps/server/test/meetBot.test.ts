@@ -319,6 +319,44 @@ describe('invite-by-email', () => {
     expect(await calendarMeetings()).toEqual([]);
   });
 
+  // Review r1 of step 5: the feed is read before the calendar lease is taken, so a slow reply could be applied after
+  // a newer one and bring back a call the newer one had cancelled. Each read is numbered as it starts, and a read
+  // older than one already applied is dropped (each write checks it is still the newest, under the writer lock).
+  it('drops a slow calendar read that a newer one overtook, so it can’t bring back a cancelled call', async () => {
+    writeFeed(oneOff({ uid: 'slow', start: '2026-11-14T15:00:00Z', end: '2026-11-14T16:00:00Z' }));
+    await sync(at('2026-11-14T09:00:00Z'));
+    expect(await calendarMeetings()).toHaveLength(1);
+    // The next read gets the feed as it is now (still listing the call), but its reply is held up.
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let asked!: () => void;
+    const requested = new Promise<void>((r) => (asked = r));
+    const slow = http.createServer((_req, res) => {
+      const body = fs.readFileSync(feed);
+      asked();
+      void gate.then(() => res.writeHead(200, { 'content-type': 'text/calendar' }).end(body));
+    });
+    await new Promise<void>((r) => slow.listen(0, '127.0.0.1', r));
+    try {
+      config.meetBot.calendarIcsUrl = `http://127.0.0.1:${(slow.address() as AddressInfo).port}/calendar/ical/bot/private-x/basic.ics`;
+      const behind = syncNow(at('2026-11-14T09:05:00Z'));
+      await requested;
+      // Meanwhile the call is cancelled, and a newer read applies that.
+      config.meetBot.calendarIcsUrl = pathToFileURL(feed).href;
+      writeFeed();
+      await syncNow(at('2026-11-14T09:06:00Z'));
+      await meetBotIdle();
+      expect(await calendarMeetings()).toEqual([]);
+      open();
+      await behind;
+      await meetBotIdle();
+      expect(await calendarMeetings()).toEqual([]);
+    } finally {
+      open();
+      slow.close();
+    }
+  });
+
   it('goes live when the call starts, keeps prompts out of the chat unless asked, and ends after the call', async () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-10T14:00:00Z'));
