@@ -4,15 +4,13 @@ import { list, openDb } from './db.js';
 import { migrateClientSecrets } from './oauth.js';
 import { importVerified } from './migrate/index.js';
 import { acquireProcessLock } from './processLock.js';
-import { meetBotTick } from './services/meetBot.js';
 import { refreshReleasePages } from './public/routes.js';
 import { claimGitStore, ontologyStore } from './services/ontologyStore.js';
-import { processOutstanding } from './services/feedbackIssues.js';
-import { runTick, seedDemo } from './services/simulation.js';
+import { seedDemo } from './services/simulation.js';
+import { runDue } from './services/scheduler.js';
 import type { OntologyProject } from '@concord/shared';
 import { syncFeedbackSharing } from './services/feedback.js';
 import { backfillDemoAvatars } from './services/users.js';
-import { sweepRuns } from './services/appGithub.js';
 
 acquireProcessLock(config.dataDir);
 await openDb();
@@ -59,31 +57,15 @@ async function startWritable() {
     console.log(`Concord listening on ${config.publicUrl} (LLM: ${config.llm.provider}${config.llm.provider === 'anthropic' ? ` ${config.llm.model}` : ''}; Solid: ${config.solid.serverUrl ?? 'local'}; demo: ${config.demoMode})`);
   });
 
-  // The governance clock: close review periods and votes, auto-merge, auto-draft releases.
-  setInterval(() => {
-    runTick().catch((err) => console.warn('[tick]', (err as Error).message));
-  }, 60_000).unref();
-  void runTick();
+  // Scheduled work (the governance clock, the Meet bot's calendar, GitHub App runs, feedback retries): a minute
+  // timer here; on Vercel, after requests and a daily cron call instead (services/scheduler.ts).
+  if (config.schedule === 'timer') {
+    setInterval(() => void runDue().catch((err) => console.warn('[schedule]', (err as Error).message)), 60_000).unref();
+    void runDue().catch((err) => console.warn('[schedule]', (err as Error).message));
+  }
 
   // ADMIN_WEBIDS may have changed since the last start: share testers' pod feedback folders with exactly that list.
   void syncFeedbackSharing()
     .then((c) => (c.shared || c.failed ? console.log(`[solid] feedback folders shared with ${config.adminWebIds.length} admin WebID(s): ${c.shared} updated, ${c.unchanged} unchanged, ${c.failed} failed`) : undefined))
     .catch((err) => console.warn('[solid] feedback sharing sync failed', (err as Error).message));
-
-  // The co-lead bot's calendar: pick up invites to its address, book bots before calls start.
-  setInterval(() => {
-    meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
-  }, 60_000).unref();
-  void meetBotTick().catch((err) => console.warn('[meet-bot]', (err as Error).message));
-
-  // Apps connected through the Concord GitHub App: start runs a request didn't (a gap, a retry due, another process).
-  setInterval(() => {
-    sweepRuns().catch((err) => console.warn('[github-app]', (err as Error).message));
-  }, 60_000).unref();
-
-  // Public feedback summaries that couldn't be posted straight away (GitHub down, hourly cap, rate limit) are retried.
-  setInterval(() => {
-    processOutstanding().catch((err) => console.warn('[feedback]', (err as Error).message));
-  }, 60_000).unref();
-  void processOutstanding().catch(() => undefined);
 }

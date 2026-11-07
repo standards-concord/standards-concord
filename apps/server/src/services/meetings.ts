@@ -383,10 +383,8 @@ export async function uploadTranscript(project: OntologyProject, user: User, tit
 /* ------------------------------------------------------------------------ */
 
 const lastPromptAt = new Map<string, number>();
-const lastLineAt = new Map<string, number>();
-
-/** When the last transcript line of a live call arrived (this process only). */
-export const lastLineTime = (meetingId: string) => lastLineAt.get(meetingId);
+/** When the last transcript line of a live call arrived, whichever server instance it reached. */
+export const lastLineTime = (m: Meeting) => m.lastLineAt;
 
 /** Called for every new transcript line from a live call (bot webhook or simulation). */
 export async function onLiveLine(
@@ -410,10 +408,10 @@ export async function onLiveLine(
     }
     opts.before?.(x);
     x.transcript.push(line);
+    x.lastLineAt = Date.now();
     return save(x);
   });
   if (!accepted) return false;
-  lastLineAt.set(m.id, Date.now());
   emit(m, { type: 'line', line });
   // A notice about chat posting that failed earlier is retried as the call goes on.
   if (m.chatNoticeError || (m.bot?.status === 'in-call' && m.source !== 'simulation' && !!m.postPromptsToChat !== !!m.chatModeAnnounced)) await announceChatMode(meetingId).catch(() => undefined);
@@ -547,6 +545,7 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
   });
   for (const c of changes) await logActivity({ ontologyId: m.ontologyId, actorId: user.id, type: 'meeting.updated', message: `${c} ${named ? `“${m.title}”` : 'a call waiting for approval'}`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   emit(m, { type: 'meeting', meeting: m });
+  const approved = patch.approve && m.calendar?.approval === 'approved' ? [m.id] : [];
   // The other weeks of an approved series, with the same organiser and Meet link, are approved too.
   if (patch.approve && m.calendar?.uid) {
     for (const other of await list<Meeting>('meetings', m.ontologyId)) {
@@ -558,8 +557,11 @@ export async function updateMeeting(meetingId: string, user: User, patch: { post
         delete x.calendar!.approvalNote;
       });
       emit(o, { type: 'meeting', meeting: o });
+      approved.push(o.id);
     }
   }
+  // Booked now, to join at the call's start, rather than when the scheduler next looks.
+  if (approved.length) await (await import('./meetBot.js')).planApproved(approved);
   if (patch.skip) await drive(meetingId);
   if (patch.postPromptsToChat !== undefined) await announceChatMode(meetingId).catch(() => undefined);
   return await getMeeting(meetingId);

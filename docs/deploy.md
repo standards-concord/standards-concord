@@ -60,6 +60,7 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | `RECALL_API_KEY` | The live Google Meet co-facilitator bot (Recall.ai). Its webhook comes in through Vercel. |
 | `MEET_BOT_EMAIL`, `MEET_BOT_ICS_URL` | Invite the bot by email: its Google account's address, and that calendar's secret iCal address. See [meet-bot.md](meet-bot.md). |
 | `OPENAI_API_KEY` with `STT_PROVIDER=openai` | Voice feedback in browsers without built-in speech recognition (Firefox). |
+| `CONCORD_SCHEDULE`, `CRON_SECRET` | How scheduled work starts (see [Scheduled work](#scheduled-work)): `timer` (the default on a server) or `requests` (the default on Vercel). `CRON_SECRET` is the secret Vercel Cron sends to `GET /api/cron/daily`. Without it, that endpoint refuses every call. |
 | `DEMO_MODE`, `ALLOW_PUBLIC_RESET` | Demo sign-in and the simulated working group (on by default); whether any tester can reset the shared demo (off). |
 | `GHCR_USER`, `GHCR_TOKEN` | Only if the image is made private again: a token with `read:packages`. |
 
@@ -73,9 +74,24 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 - **Moving Concord's public address** (the domain people and agents use): add the domain in Vercel, set `PUBLIC_URL` to it with `set-key.sh`, run `node scripts/public-url.mjs https://<new-origin>` and merge so the plugins and MCP Registry entry follow. Keep the old domain serving Concord for a few weeks: installed plugins only move when they update, and every agent has to sign in again at the new address, because OAuth tokens are tied to the address they were issued for.
 - **Removing it:** `az group delete -n concord` deletes the VM, its IP address, disk and snapshots.
 
+## Scheduled work
+
+Some of Concord's work runs on a schedule: the governance clock (closing review periods and votes, auto-merging, drafting releases, publishing to GitHub), the Meet bot's calendar, GitHub App runs a request didn't start, and retries of public feedback summaries. All of it lives in [scheduler.ts](../apps/server/src/services/scheduler.ts). Each job says how often it is due, and a run does whatever is due:
+
+- **On the server**, a timer looks every minute (`CONCORD_SCHEDULE=timer`).
+- **On Vercel**, there is no long-running process (`CONCORD_SCHEDULE=requests`). Each instance looks for due work after a request, at most every 30 seconds. So deadlines are met as soon as anyone visits, including on public pages, and a failed job is retried on the next request. A Vercel Cron call to `GET /api/cron/daily` once a day (the Hobby plan's limit) runs every job, due or not, to catch up after a quiet day.
+
+Only one run goes at a time across every instance. A run takes a lease in the database and renews it every 100 seconds while its jobs run, so the lease lapses only when its runner has died or stalled for five minutes; then another run may start. The lease is not a fence: a runner that stalls that long and then resumes finishes its jobs beside the new run, and logs that it lost the lease. On one server that is harmless, because the jobs' own locks are held in the process. Across instances it is not yet: the Meet bot's calendar lock is also held in the process, so two runs at once could each create a meeting (and book a bot) for the same new invite. So the backend must not run on several instances until the calendar and meeting locks are in the database and an invite's meeting is created atomically (see the next section). Work a job starts and doesn't wait for, such as a Meet bot's requests to Recall.ai, is kept running after the response that started it, with Vercel's `waitUntil`, once the Vercel entry point sets it.
+
+What waits for a visitor or the daily call on Vercel (accepted, issue #112):
+
+- **Booking the Meet bot.** Approving a call books its bot straight away, with the time to join, so the bot joins on time even if nobody visits Concord afterwards. A series that is already approved has its calls found up to two weeks ahead, and the daily call books them in time. A brand-new invite waits for a facilitator to approve it on the Meetings page.
+- **Ending a call.** A call past its slot that has gone quiet for ten minutes, or that has overrun by three hours, is ended by the next scheduled run, and a quiet call sends no requests to start one. Until a visitor or the daily call comes, the bot can stay in the call. Recall.ai takes it out by itself only when everyone has left, or after six hours in the call, which is a much weaker limit. The call's summary and any retries also wait for that run. Recall.ai's status webhook would end that wait; it is the follow-up in #112.
+- **Governance deadlines** (a review period ending, a vote closing) are applied just after the next visit's response, and in the daily call.
+
 ## Before the backend runs on more than one instance
 
-The backend assumes one process. Changes to one meeting (bookings, transcript lines from the bot's webhook, skips, cancellations from the calendar) are serialised by locks held in that process ([locks.ts](../apps/server/src/locks.ts)), and the Meet bot's clock runs in it. That is correct on the single server above. Serverless functions (Vercel) run several instances at once, so before the backend moves there, the meeting and calendar locks must also take the database's writer lock (a transaction) around each read and write, and the bot's per-minute tick needs its own trigger. Until then, run one backend instance.
+The backend assumes one process. Changes to one meeting (bookings, transcript lines from the bot's webhook, skips, cancellations from the calendar) are serialised by locks held in that process ([locks.ts](../apps/server/src/locks.ts)), and the Meet bot's clock runs in it. That is correct on the single server above. Serverless functions (Vercel) run several instances at once, so before the backend moves there, the meeting and calendar locks must also take the database's writer lock (a transaction) around each read and write, and a calendar invite's meeting must be created atomically, one record per occurrence, so that two scheduled runs can't each create one. Its scheduled work already runs without a timer (see [Scheduled work](#scheduled-work)). Until then, run one backend instance.
 
 ## Alternative: AWS
 

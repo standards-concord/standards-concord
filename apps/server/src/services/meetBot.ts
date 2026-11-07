@@ -525,7 +525,7 @@ function planOne(meetingId: string, now: Date) {
     } else if (m.status === 'live' && botActive(m)) {
       // A calendar call ends by itself once it's past its slot and quiet (or long overrun). The bot
       // is released here; taking it out happens in the call's lane, beside every other call's.
-      const quietFor = t - (lastLineTime(m.id) ?? 0);
+      const quietFor = t - (lastLineTime(m) ?? 0);
       if ((t > end + QUIET_MS && quietFor > QUIET_MS) || t > end + OVERRUN_MAX_MS) beginRelease(m, 'leave', 'done');
     }
     if (JSON.stringify(m) === before) return;
@@ -546,6 +546,19 @@ export async function dispatchDue(now = new Date(), opts: { wait?: boolean } = {
   await pruneSecrets();
   const runs = await driveDue(now.getTime());
   if (opts.wait !== false) await Promise.all(runs);
+}
+
+/**
+ * Books the bot for calls a facilitator just approved, straight away rather than on the next tick (on Vercel that
+ * can wait for the next visit, or the daily run). The request to Recall.ai runs beside the approval's response.
+ */
+export async function planApproved(ids: string[], now = new Date()) {
+  for (const id of ids) {
+    await planOne(id, now);
+    // Only a booking just begun: an old bot still being let go keeps to its own retry times.
+    const m = await get<Meeting>('meetings', id);
+    if (m && tracked(m) && m.bot.phase === 'booking') void background(drive(id));
+  }
 }
 
 /** Resolves once every call's lane, and work started in the background, has finished. For tests and shutdown. */
