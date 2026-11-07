@@ -242,3 +242,52 @@ e:Short a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype
     expect(shapes).toMatch(/^# Note: .*but not the xsd:minInclusive facet/m);
   });
 });
+
+/** An ontology where e:Parent's e:p values are `parent` and its subclass e:Child's are `child`, as SHACL shapes. */
+async function parentChildShapes(parent: string, child: string) {
+  const g = await OntologyGraph.fromTurtle(`${PREFIXES}<https://example.org/e> a owl:Ontology .
+e:Parent a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:p ; owl:allValuesFrom ${parent} ] .
+e:Child a owl:Class ; rdfs:subClassOf e:Parent , [ a owl:Restriction ; owl:onProperty e:p ; owl:allValuesFrom ${child} ] .
+e:p a owl:DatatypeProperty .`);
+  await toShaclc(g);
+  return toShacl(g);
+}
+
+describe('one datatype on a property (#27)', () => {
+  // Used to: one datatype was one sh:datatype, which checks the literal's datatype IRI exactly, so values OWL allows
+  // were rejected: a byte where an integer was asked for, a timestamp for a date-time, and anything at all for a
+  // datatype the ontology defines (no literal is written as one).
+  it('takes values written as a built-in datatype derived from the one asked for', async () => {
+    const shapes = await shapesFor(['xsd:integer']);
+    expectValues(shapes, ['"1"^^xsd:integer', '"1"^^xsd:byte', '"7"^^xsd:positiveInteger', '"-3"^^xsd:long'], ['"1.5"^^xsd:decimal', '"1"^^xsd:string']);
+    const nonNegative = await shapesFor(['xsd:nonNegativeInteger']);
+    expectValues(nonNegative, ['"3"^^xsd:unsignedByte', '"3"^^xsd:positiveInteger'], ['"3"^^xsd:string']);
+    const when = await shapesFor(['xsd:dateTime']);
+    expectValues(when, ['"2026-11-07T10:00:00"^^xsd:dateTime', '"2026-11-07T10:00:00Z"^^xsd:dateTimeStamp'], ['"2026-11-07"^^xsd:date']);
+  });
+
+  it('keeps one exact check where nothing derives from the datatype, and for text', async () => {
+    expect(await shapesFor(['xsd:boolean'])).toMatch(/sh:datatype xsd:boolean/);
+    // Literals written as xsd:token or xsd:NCName are rare; ten alternatives on every text property would be hard to read.
+    const text = await shapesFor(['xsd:string']);
+    expect(text).toMatch(/sh:datatype xsd:string/);
+    expect(text).not.toMatch(/sh:or/);
+  });
+
+  it('checks a datatype the ontology defines by the built-in it is based on, with its facets', async () => {
+    const alias = await shapesFor(['e:Text'], 'e:Text a rdfs:Datatype ; owl:equivalentClass xsd:string .');
+    expectValues(alias, ['"hello"^^xsd:string'], ['"5"^^xsd:integer']);
+    expect(alias).not.toMatch(/e:Text/);
+    const code = await shapesFor(['e:Code'], 'e:Code a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:string ; owl:withRestrictions ( [ xsd:pattern "[A-Z]{2}" ] ) ] .');
+    expectValues(code, ['"GB"^^xsd:string'], ['"gb"^^xsd:string', '"GBR"^^xsd:string']);
+    const age = await shapesFor(['e:Age'], 'e:Age a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:integer ; owl:withRestrictions ( [ xsd:minInclusive 0 ] [ xsd:maxInclusive 150 ] ) ] .');
+    expectValues(age, ['"30"^^xsd:integer', '"30"^^xsd:byte'], ['"-1"^^xsd:integer', '"151"^^xsd:integer']);
+  });
+
+  it('a parent asking for xsd:integer accepts a child whose values are xsd:byte', async () => {
+    const shapes = await parentChildShapes('xsd:integer', 'xsd:byte');
+    // An e:Child is an e:Parent too, so both node shapes apply to it.
+    const data = `${PREFIXES}<https://example.org/x> a e:Child , e:Parent ; e:p "5"^^xsd:byte .`;
+    expect((JSON.parse(engine.validate(data, shapes, 'turtle')) as { conforms: boolean }).conforms).toBe(true);
+  });
+});

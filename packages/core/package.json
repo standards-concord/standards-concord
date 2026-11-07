@@ -9,7 +9,8 @@
     "./reasoner": "./src/reasonTurtle.ts",
     "./data-formats": "./src/dataFormats.ts",
     "./terms": "./src/termIndex.ts",
-    "./data-check": "./src/dataCheck.ts"
+    "./data-check": "./src/dataCheck.ts",
+    "./xsd-types": "./src/xsdTypes.ts"
   },
   "scripts": {
     "test": "vitest run",

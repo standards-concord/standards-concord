@@ -126,7 +126,10 @@ describe('SHACL compact syntax', () => {
     expect(text).toContain('BASE <https://w3id.org/odi/volunteering/shapes>');
     expect(text).toContain('PREFIX vol: <https://w3id.org/odi/volunteering#>');
     expect(text).toMatch(/shape volsh:ApplicationShape -> vol:Application \{[\s\S]*?vol:submittedBy vol:Person \[1\.\.1\] \./);
-    expect(text).toContain('vol:submittedAt xsd:dateTime [0..1] .');
+    // A built-in datatype takes the built-ins derived from it too (#27).
+    expect(text).toContain('vol:submittedAt [0..1] xsd:dateTime|datatype=xsd:dateTimeStamp .');
+    // Text stays one exact check.
+    expect(text).toContain('vol:title xsd:string .');
     // Datatypes outside the short-form list are written explicitly, so they don't read back as classes.
     expect(text).toContain('vol:joiningUrl datatype=xsd:anyURI .');
     expect(text).not.toContain('codeIdentifier');
@@ -219,8 +222,11 @@ describe('SHACL compact syntax', () => {
     const objs = (p: string, pred: string) => on(p).flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + pred), null)).map((o) => o.value);
     // A narrower datatype makes the other redundant: one exact check.
     expect(objs('wp', 'datatype')).toEqual([NS.xsd + 'byte']);
-    // Three types that reduce to one (SZ) give one shape.
-    expect(objs('xs', 'datatype')).toEqual(['https://example.org/e#SZ']);
+    // Three types that reduce to one (SZ) give one shape. SZ is the ontology's own datatype, which no literal is
+    // written as (#27): it is checked as the xsd:string it restricts, with its facets.
+    expect(objs('xs', 'datatype')).toEqual([NS.xsd + 'string']);
+    expect(objs('xs', 'minLength')).toEqual(['1']);
+    expect(objs('xs', 'maxLength')).toEqual(['3']);
     // xsd:nonNegativeInteger and xsd:nonPositiveInteger overlap only in 0: checked by value, not by two exact
     // datatype checks that no literal can pass.
     expect(objs('xn', 'datatype')).toEqual([]);
@@ -259,7 +265,7 @@ describe('SHACL compact syntax', () => {
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
     const ttl = await toShacl(await loadFixture());
     expect(ttl).toMatch(/volsh:VolunteeringOpportunityShape a sh:NodeShape ;[\s\S]*?sh:codeIdentifier "VolunteeringOpportunity"/);
-    expect(ttl).toMatch(/sh:codeIdentifier "minimumAge" ;\s+sh:datatype xsd:nonNegativeInteger/);
+    expect(ttl).toMatch(/sh:codeIdentifier "minimumAge" ;\s+sh:maxCount 1 ;\s+sh:or \(\s+\[ sh:datatype xsd:nonNegativeInteger \]/);
   });
 });
 
@@ -389,9 +395,11 @@ describe('Generated JavaScript classes', () => {
     // Datatype constraints from two superclasses: xsd:positiveInteger from DB narrows xsd:integer from DA.
     expect(cls('DC').extends).toBeUndefined();
     expect(mod.ts).toMatch(/export class DC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#positiveInteger"\)/);
-    // The ontology's own datatypes count too: e:MyToken restricts xsd:string, so it narrows TA's xsd:string.
-    expect(cls('TC').extends).toBeUndefined();
-    expect(mod.ts).toMatch(/export class TC extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#MyToken"\)/);
+    // The ontology's own datatypes count too: e:MyToken restricts xsd:string, so it narrows TA's xsd:string. No literal
+    // is written as e:MyToken (#27), so values are written as xsd:string, as TA's are, and TC can extend TA.
+    expect(cls('TC').extends).toBe('TA');
+    // None of the ontology's own datatypes (MyToken, MyToken2, SZ) is written as a literal's datatype.
+    expect(mod.ts).not.toContain('literalWriter("https://example.org/e#');
     // Types neither of which is narrower can't both be expressed: the first is used, and the module says so.
     expect(mod.notes).toEqual(expect.arrayContaining([
       expect.stringMatching(/^UC <https:\/\/example\.org\/e#up>: values must be both <http:\/\/www\.w3\.org\/2001\/XMLSchema#string> and <http:\/\/www\.w3\.org\/2001\/XMLSchema#integer>/),
@@ -402,11 +410,11 @@ describe('Generated JavaScript classes', () => {
     // Values both non-negative and non-positive: whole numbers, checked by value.
     expect(mod.ts).toMatch(/export class XN extends TermWrapper \{\s+get xn\(\): Set<number> \{[^}]*LiteralFrom\.integer\)/);
     // Three restrictions, one narrower than both others (SZ derives from SA1 and SB3), reduce to it, with no note.
-    expect(mod.ts).toMatch(/export class XC extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#SZ"\)/);
+    expect(mod.ts).toMatch(/export class XC extends TermWrapper[\s\S]*?get xs\(\): Set<string>/);
     // Two restrictions on the same class narrow too: xsd:byte within xsd:integer.
     expect(mod.ts).toMatch(/export class WC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#byte"\)/);
     // A datatype with several definitions (an alias and a restriction) derives from each: e:MyToken2 narrows xsd:string.
-    expect(mod.ts).toMatch(/export class VA extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#MyToken2"\)/);
+    expect(mod.ts).toMatch(/export class VA extends TermWrapper[\s\S]*?get vp\(\): Set<string>/);
     expect(mod.ts).toMatch(/^ \* Note: UC <https:\/\/example\.org\/e#up>: values must be both/m);
     // Every class has the dataset getter it advertises.
     for (const c of mod.classes.filter((c) => c.datasetGetter)) expect(mod.ts).toContain(`get ${c.datasetGetter}(): Iterable<${c.name}>`);
@@ -443,7 +451,7 @@ describe('Generated JavaScript classes', () => {
       expect(dtOf('https://x/dchild', 'https://example.org/e#dq').datatype.value).toBe(XSD + 'positiveInteger');
       const tchild = new m.TChild('https://x/tchild', store, DataFactory);
       tchild.tq = 'ABC';
-      expect(dtOf('https://x/tchild', 'https://example.org/e#tq').datatype.value).toBe('https://example.org/e#MyToken');
+      expect(dtOf('https://x/tchild', 'https://example.org/e#tq').datatype.value).toBe(XSD + 'string');
       const dc = new m.DC('https://x/dc', store, DataFactory);
       dc.dp.add(5);
       expect(dtOf('https://x/dc', 'https://example.org/e#dp').datatype.value).toBe(XSD + 'positiveInteger');

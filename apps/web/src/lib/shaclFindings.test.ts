@@ -368,6 +368,23 @@ describe('review regressions', () => {
     expect(g.text).not.toMatch(/must be a ex:A or a xsd:integer value$/);
   });
 
+  // #27: one datatype became an sh:or of it and every type derived from it, and the finding listed all thirteen.
+  it('names one datatype when the alternatives are it and the types derived from it', () => {
+    const X = 'http://www.w3.org/2001/XMLSchema#';
+    const family = ['integer', 'nonPositiveInteger', 'negativeInteger', 'long', 'int', 'short', 'byte', 'nonNegativeInteger', 'unsignedLong', 'unsignedInt', 'unsignedShort', 'unsignedByte', 'positiveInteger'];
+    const shapes = (types: string[]) => `@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix ex: <${EX}> .\nex:S sh:targetClass ex:C ; sh:property [ sh:path ex:q ; sh:or ( ${types.map((t) => `[ sh:datatype <${X}${t}> ]`).join(' ')} ) ] .\n`;
+    const text = '@prefix ex: <http://e/> .\nex:a a ex:C ; ex:q 1.5 .\n';
+    const result = { focusNode: `<${EX}a>`, path: `<${EX}q>`, value: `"1.5"^^<${X}decimal>`, sourceConstraintComponent: sh('Or'), message: 'Value does not conform to any member shape' };
+    const [f] = describeFindings([result], exCtx(text, shapes(family)));
+    expect(f.text).toBe('Value "1.5" is of type xsd:decimal but must be of type xsd:integer or a type derived from it');
+    // A value of a derived type that isn't valid as that type is named as such, not as the wrong type.
+    const [h] = describeFindings([{ ...result, value: `"lots"^^<${X}byte>` }], exCtx('@prefix ex: <http://e/> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\nex:a a ex:C ; ex:q "lots"^^xsd:byte .\n', shapes(family)));
+    expect(h.text).toBe('Value "lots" isn’t a valid xsd:byte');
+    // Missing one of the family, it is a plain list again: the sentence never claims more than the shape allows.
+    const [g] = describeFindings([result], exCtx(text, shapes(family.slice(0, -1))));
+    expect(g.text).toMatch(/^Value 1\.5 must be a xsd:integer value, a xsd:nonPositiveInteger value, .* or a xsd:unsignedByte value$/);
+  });
+
   // Review 2. sh:node named the shape's sh:targetClass as the type the value had to be.
   it('never presents a shape’s target class as a requirement', () => {
     const text = '@prefix ex: <http://e/> .\nex:a ex:n ex:b .\nex:b ex:x 1 .\n';
