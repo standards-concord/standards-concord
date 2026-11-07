@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { expect, expectNoCrash, signIn, test, type Page } from './fixtures';
+import { expect, expectNoCrash, networkQuiet, signIn, test, type Page } from './fixtures';
 
 /**
  * The validator: paste or upload RDF data and check it against the ontology's
@@ -180,7 +180,7 @@ test.describe('Validate data', () => {
     const marker = `private-${Date.now()}`;
     await setEditor(page, `@prefix vol: <${VOL}> .\n<https://example.org/${marker}> a vol:Role .\n`);
     // Give the version's ontology and shapes time to download, then cut the server off.
-    await page.waitForLoadState('networkidle');
+    await networkQuiet(page);
     const sent: string[] = [];
     await page.route('**/*', async (route) => {
       const r = route.request();
@@ -341,9 +341,8 @@ test.describe('Validate data', () => {
   test('shows how to call the API at the ontology address', async ({ page, baseURL }) => {
     await page.goto('/o/volunteering/validate');
     await page.getByRole('button', { name: /Validate from your own code/ }).click();
-    const examples = page.getByTestId('validate-api-example');
-    await expect(examples.first()).toContainText(`curl -X POST ${baseURL}/def/volunteering/1.0.0`);
-    await expect(examples.nth(2)).toContainText("Accept-Profile: <http://www.w3.org/ns/shacl#>");
+    await expect(page.getByRole('region', { name: 'Validate a file (JSON report)' })).toContainText(`curl -X POST ${baseURL}/def/volunteering/1.0.0`);
+    await expect(page.getByRole('region', { name: 'Get the SHACL shapes by content negotiation' })).toContainText('Accept-Profile: <http://www.w3.org/ns/shacl#>');
     await page.getByRole('link', { name: 'connecting an agent' }).click();
     await expect(page).toHaveURL(/\/o\/volunteering\/connect$/);
   });
