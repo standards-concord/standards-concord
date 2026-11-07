@@ -242,7 +242,7 @@ export function clientIdDocument() {
     client_id: clientIdUrl() ?? `${config.publicUrl}/auth/solid/client.jsonld`,
     client_name: 'Concord',
     client_uri: config.webUrl,
-    logo_uri: `${config.webUrl}/favicon.svg`,
+    logo_uri: `${config.webUrl}/icon-192.png`,
     redirect_uris: [redirectUrl()],
     scope: SCOPE,
     grant_types: ['authorization_code', 'refresh_token'],
