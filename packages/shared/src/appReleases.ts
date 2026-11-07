@@ -53,6 +53,24 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.44.0',
+    date: '2026-11-07',
+    title: 'Read Concord with no connection',
+    pr: 116,
+    changes: [
+      {
+        id: 'offline-reading',
+        type: 'feat',
+        title: 'Pages you have opened work offline',
+        detail:
+          'Concord now saves the app and the pages you open while signed in on this device. With no connection, or after a reload on a train, it opens as you and shows what it saved: lists, change requests, releases, use cases, meetings, the ontology itself. A notice says you’re offline. Changes still need a connection for now. Only your account can see what was saved, and signing out deletes it.',
+        roles: [],
+        to: '{o}/changes',
+        ask: 'Did Concord show what you expected when you were offline? Was anything missing that you needed?',
+      },
+    ],
+  },
+  {
     version: '0.43.0',
     date: '2026-11-07',
     title: 'Fewer words on the welcome page and around the hub',

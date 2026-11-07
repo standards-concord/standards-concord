@@ -21,7 +21,7 @@ export function RequirementsDocPage() {
   const { version = '' } = useParams();
   const { id, hasRole, view } = useOntology();
   const { hash } = useLocation();
-  const doc = useAsync(() => api.requirementsDoc(id, version), [id, version]);
+  const doc = useAsync(() => api.requirementsDoc(id, version), [id, version], { keep: `requirementsDoc|${id}|${version}` });
   const rewrite = useAction(async () => {
     if (!doc.data?.releaseId) return;
     doc.setData(await api.generateRequirements(doc.data.releaseId));

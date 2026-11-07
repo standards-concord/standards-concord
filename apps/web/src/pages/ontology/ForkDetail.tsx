@@ -171,7 +171,7 @@ export function ForkPage() {
   const { forkSlug = '' } = useParams();
   const { id, ontology, reload } = useOntology();
   const { session, now } = useSession();
-  const state = useAsync(() => api.fork(id, forkSlug), [id, forkSlug]);
+  const state = useAsync(() => api.fork(id, forkSlug), [id, forkSlug], { keep: `fork|${id}|${forkSlug}` });
   const check = useAsync(() => api.checkFork(id, forkSlug), [id, forkSlug, state.data?.head, state.data?.status]);
   const [notice, setNotice] = useState<string>();
   const [syncConflicts, setSyncConflicts] = useState<ForkConflict[]>([]);

@@ -170,14 +170,35 @@ test.describe('moving around the ontology is instant', () => {
   // answered. The page already holds the whole ontology, so these now never wait on it.
   test('picking terms, following links and searching show results with the server cut off', async ({ page, consoleGuard }) => {
     consoleGuard.allow(/Failed to load resource|ERR_INTERNET_DISCONNECTED/);
+    // The tester record (lib/tester.tsx) loads /api/alpha/me and then posts /api/alpha/visit in the
+    // background, whatever page is open. That post sometimes came after the cut-off and was counted
+    // as browsing asking the server (1 in 4 full CI runs). Holding /api/alpha/me until after the
+    // cut-off makes that happen every time, so the test shows it isn't counted.
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route('**/api/alpha/me', async (route) => {
+      await held;
+      await route.continue();
+    });
+    // Not settle(), whose wait for the network to go quiet would sit out the held request. Instead,
+    // wait for the lists the ontology loads ahead in the background (pages/ontology/Layout.tsx),
+    // which aren't browsing either.
+    const ahead = ['change-requests', 'releases', 'forks', 'use-cases', 'requirements', 'meetings'].map((list) =>
+      page.waitForResponse((r) => new URL(r.url()).pathname.endsWith(`/${list}`)),
+    );
     await page.goto(`${base}?term=${encodeURIComponent(`${VOL}Skill`)}`);
-    await settle(page);
     await expect(page.getByRole('heading', { level: 2, name: 'skill' })).toBeVisible();
+    await expect(page.locator('[aria-busy="true"]')).toHaveCount(0, { timeout: 20_000 });
+    await Promise.all(ahead);
     const asked: string[] = [];
     await page.route('**/api/**', (route) => {
-      asked.push(route.request().url());
+      // The tester record isn't the page asking for anything: leave it out of the count.
+      if (new URL(route.request().url()).pathname !== '/api/alpha/visit') asked.push(route.request().url());
       return route.abort('internetdisconnected');
     });
+    const visit = page.waitForRequest('**/api/alpha/visit');
+    release();
+    await visit;
 
     // "Used by" is worked out here, and its links open the term.
     await page.locator('summary', { hasText: /^Usage/ }).click();

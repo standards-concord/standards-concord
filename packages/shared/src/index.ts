@@ -1692,6 +1692,11 @@ export interface PodFeedbackReport {
 
 export interface SessionInfo {
   user?: User;
+  /**
+   * Names this browser session without revealing its token: a sign-out made with no connection
+   * sends it later, so only that session ends (POST /api/auth/logout `{ session }`).
+   */
+  sessionId?: string;
   providers: { google: boolean; github: boolean; solid: boolean; demo: boolean };
   /**
    * WebIDs that can read testers' feedback: the deployment's administrators. Testers are
@@ -1716,7 +1721,7 @@ export interface SessionInfo {
  *  GET  /auth/google, /auth/github                -> OAuth redirect
  *  GET  /auth/solid?webId=<WebID or provider URL>  -> Solid-OIDC redirect (DPoP); /auth/solid/client.jsonld is the Client ID Document
  *  POST /api/auth/demo {userId? , name?, role?}   -> SessionInfo   (log in as a persona or create a demo user)
- *  POST /api/auth/logout                           -> {}
+ *  POST /api/auth/logout {session?} (JSON only)    -> {ended}   (with session: only if it is still that one)
  *  GET  /api/personas                              -> User[] (simulated personas available for demo login)
  *
  * Ontologies
