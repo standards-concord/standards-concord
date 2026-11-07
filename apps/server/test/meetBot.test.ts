@@ -486,6 +486,23 @@ describe('invite-by-email', () => {
     expect(after.chatNoticeClaim?.token).toBe('newer-run');
   });
 
+  // Review r2 of step 5: a calendar read that found the invite cancelled ended a live call without checking that no
+  // newer read had applied since (only a scheduled call's withdrawal was checked), so a read held up behind a newer
+  // one that kept the call could still take the bot out. The check now goes with the decision, in one transaction.
+  it('doesn’t end a live call for a calendar read a newer one has overtaken', async () => {
+    const { endLiveMeeting } = await import('../src/services/meetings.js');
+    const m = await liveWithPrompt();
+    calls.length = 0;
+    expect(await endLiveMeeting(m.id, async () => false)).toBeUndefined();
+    const after = await getMeeting(m.id);
+    expect(after.status).toBe('live');
+    expect(after.bot).toMatchObject({ status: 'in-call', gen: m.bot!.gen });
+    expect(calls.filter((c) => c.url.includes('leave_call'))).toEqual([]);
+    // A read that is still the newest ends it.
+    await endLiveMeeting(m.id, async () => true).catch(() => undefined);
+    expect((await getMeeting(m.id)).bot?.gen).not.toBe(m.bot!.gen);
+  });
+
   it('keeps a call going past its slot while lines still arrive, whichever instance took them', async () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-10T14:00:00Z'));

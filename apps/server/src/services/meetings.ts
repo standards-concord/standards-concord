@@ -834,14 +834,22 @@ export function finishCall(meetingId: string): Promise<Meeting> {
  * refused from now on), and the call is analysed only once Recall.ai confirms the
  * bot has gone. Until then this throws, and the clock keeps trying.
  */
-export async function endLiveMeeting(meetingId: string) {
+/**
+ * End a live call: take its bot out, then analyse what it heard. `guard` (a calendar read ending the call because the
+ * invite was cancelled) is checked in the transaction that records the decision: when it says the read has been
+ * overtaken by a newer one, nothing is ended and this returns undefined.
+ */
+export async function endLiveMeeting(meetingId: string, guard?: () => Promise<boolean>) {
   if ((await getMeeting(meetingId)).bot?.provider === 'recall') {
-    await meetingLock(meetingId, async () => {
+    const decided = await meetingLock(meetingId, async () => { return transaction(async () => {
+      if (guard && !(await guard())) return false;
       const m = await getMeeting(meetingId);
       const gen = m.bot?.gen;
       beginRelease(m, 'leave', 'done');
       if (m.bot?.gen !== gen) emit(await save(m), { type: 'meeting', meeting: m });
-    });
+      return true;
+    }); });
+    if (!decided) return undefined;
     await drive(meetingId);
     const m = await getMeeting(meetingId);
     // Every bot of the call's, strays included, must be confirmed gone.
@@ -851,9 +859,13 @@ export async function endLiveMeeting(meetingId: string) {
     }
     return finishCall(meetingId);
   }
-  const m = await mutateMeeting(meetingId, (x) => {
-    if (x.bot && x.bot.status !== 'done') x.bot = { ...x.bot, status: 'done' };
+  const m = await transaction(async () => {
+    if (guard && !(await guard())) return undefined;
+    return await mutateMeeting(meetingId, (x) => {
+      if (x.bot && x.bot.status !== 'done') x.bot = { ...x.bot, status: 'done' };
+    });
   });
+  if (!m) return undefined;
   emit(m, { type: 'meeting', meeting: m });
   return finishCall(meetingId);
 }

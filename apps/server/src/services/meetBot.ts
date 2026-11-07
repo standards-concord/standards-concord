@@ -179,8 +179,9 @@ async function withdrawCall(meetingId: string, guard?: () => Promise<boolean>): 
   if (!live) return async () => 'done';
   if (live.status !== 'scheduled') {
     if (!botActive(live) && !botOutstanding(live)) return async () => 'done';
+    // The freshness check goes with the decision to end it, in endLiveMeeting's transaction.
     return () =>
-      endLiveMeeting(meetingId).then(
+      endLiveMeeting(meetingId, guard).then(
         () => 'done' as const,
         () => 'retrying' as const,
       );
