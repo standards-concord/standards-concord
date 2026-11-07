@@ -166,7 +166,7 @@ function download(name: string, text: string, type: string) {
 export function ValidateTab() {
   const { id, ontology, view } = useOntology();
   const [params, setParams] = useSearchParams();
-  const releases = useAsync(() => api.releases(id), [id]);
+  const releases = useAsync(() => api.releases(id), [id], { keep: `releases|${id}` });
   const published = (releases.data ?? []).filter((r) => r.status === 'published');
   const latest = ontology.currentVersion !== '0.0.0' ? ontology.currentVersion : published[0]?.version;
   const version = params.get('version') ?? latest ?? 'draft';

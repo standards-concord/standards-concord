@@ -28,8 +28,8 @@ export function OverviewTab() {
   const { id, ontology: o, label, myRoles, hasRole } = useOntology();
   const { session, now } = useSession();
   const me = session?.user?.id;
-  const validation = useAsync(() => api.validation(id, 'working'), [id]);
-  const changes = useAsync(() => api.changeRequests(id), [id]);
+  const validation = useAsync(() => api.validation(id, 'working'), [id], { keep: `validation|${id}|working` });
+  const changes = useAsync(() => api.changeRequests(id), [id], { keep: `changeRequests|${id}|` });
   const loc = useLocation();
   const wantsHealth = loc.hash === '#health';
   const healthRef = useRef<HTMLElement>(null);

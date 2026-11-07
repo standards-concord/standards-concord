@@ -357,7 +357,7 @@ export function AppsTab() {
   const canDisconnect = myRoles.includes('owner') || myRoles.includes('steward');
   const { session } = useSession();
   const uid = session?.user?.id;
-  const state = useAsync(() => api.apps(id), [id]);
+  const state = useAsync(() => api.apps(id), [id], { keep: `apps|${id}` });
   const githubApp = useAsync(() => api.githubApp(), []);
   // Back from installing the Concord app on GitHub: say how it went.
   const [params, setParams] = useSearchParams();

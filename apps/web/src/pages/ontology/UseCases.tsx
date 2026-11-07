@@ -27,8 +27,8 @@ export function UseCasesTab() {
   const nav = useNavigate();
   const [params] = useSearchParams();
   const highlight = params.get('start') === '1';
-  const list = useAsync(() => api.useCases(id), [id]);
-  const docs = useAsync(() => api.requirementsDocs(id), [id]);
+  const list = useAsync(() => api.useCases(id), [id], { keep: `useCases|${id}` });
+  const docs = useAsync(() => api.requirementsDocs(id), [id], { keep: `requirementsDocs|${id}` });
   const [filter, setFilter] = useState<Filter>('open');
   const shown = useMemo(() => (list.data ?? []).filter((u) => FILTERS[filter].test(u, session?.user?.id)), [list.data, filter, session?.user?.id]);
   const counts = useMemo(

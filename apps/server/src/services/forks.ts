@@ -19,7 +19,7 @@ import { PUBLIC_BASE } from '../public/w3id.js';
 import { get, HttpError, list, mustGet, put, putIf, withFence } from '../db.js';
 import { newId, slugify } from '../ids.js';
 import type { ProposedTerm } from '../llm/schemas.js';
-import { createChangeRequest, draftFromNaturalLanguage, getCR, submit, updateOps } from './changeRequests.js';
+import { createChangeRequest, draftFromNaturalLanguage, getCR, MAX_EDITS, submit, updateOps } from './changeRequests.js';
 import { reasonInWorker } from '../reasoner/pool.js';
 import { fairContext } from './fairResolution.js';
 import { competencyTests, findProject, getProject, rolesFor, setRoles } from './ontologies.js';
@@ -591,6 +591,9 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
       message ||= drafted.title;
     }
     if (!ops.length) throw new HttpError(400, 'No edits could be worked out. Describe the terms to add (for example “Add a class Shift as a subclass of Session”), or pass them as structured terms.');
+    // A fork is proposed as one change request, so it holds no more edits than one may (and checking them all is as slow).
+    if (f.ops.length + ops.length > MAX_EDITS)
+      throw new HttpError(413, `A fork can hold at most ${MAX_EDITS} edits, the most one change request can propose, and this would make ${f.ops.length + ops.length}. Propose what the fork has first, or discard some of its edits.`);
     const own = [...new Set(ops.flatMap((o) => (o.op === 'setMetadata' ? Object.keys(o.set).filter((k) => STAMPED.has(k)) : [])))];
     if (own.length) throw new HttpError(400, `The fork sets its own ${own.join(', ')}, which identify it as a fork version; they can't be edited on a fork. Change them on the main ontology with a change request.`);
 
@@ -651,6 +654,9 @@ export async function proposeFork(fork: OntologyFork, user: User | undefined, in
   requireOwner(fork, user, 'propose it upstream');
   return locked(fork.id, async (f, from) => {
     requireOpen(f);
+    // Checked before planning, which is itself slow on a long list: the plan only ever drops edits.
+    if (f.ops.length > MAX_EDITS)
+      throw new HttpError(413, `A change request can have at most ${MAX_EDITS} edits, and this fork has ${f.ops.length}. Discard some of its edits, or split it into smaller change requests.`);
     const p = await getProject(f.ontologyId);
     const plan = await rebasePlan(p, f, user.name);
     if (plan.conflicts.length) throw new HttpError(409, `Resolve the fork's conflicts with the latest draft first (sync it, then discard or redo the conflicting edits). ${conflictText(plan.conflicts)}`);
