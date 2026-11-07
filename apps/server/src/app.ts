@@ -4,7 +4,7 @@ import cookieParser from 'cookie-parser';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { mountAuth, sessionMiddleware } from './auth.js';
 import { config } from './config.js';
-import { HttpError } from './db.js';
+import { HttpError, ReadOnlyError } from './db.js';
 import { mcpHandler } from './mcp.js';
 import { oauthRoutes } from './oauth.js';
 import { reportRouter } from './public/report.js';
@@ -24,6 +24,13 @@ export function createApp(): express.Express {
   // same Docker network in production, Vite in development). TRUST_PROXY overrides it, in Express's syntax.
   app.set('trust proxy', process.env.TRUST_PROXY ?? 'loopback, linklocal, uniquelocal');
   app.use(cookieParser());
+  // Read-only while Concord moves (CONCORD_READ_ONLY): anything that would change something is turned away.
+  if (config.readOnly)
+    app.use((req, res, next) => {
+      if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+      res.setHeader('Retry-After', '300');
+      res.status(503).json({ error: new ReadOnlyError().message });
+    });
   app.use(sessionMiddleware);
 
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
@@ -67,6 +74,10 @@ export function createApp(): express.Express {
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     // Another writer held the database for longer than this request waits: it is busy, not
     // broken, and the same request will work again shortly.
+    if (err instanceof ReadOnlyError) {
+      res.setHeader('Retry-After', '300');
+      return void res.status(503).json({ error: err.message });
+    }
     if (isDatabaseBusy(err)) {
       res.setHeader('Retry-After', '2');
       return void res.status(503).json({ error: 'The server is busy with another change. Try again in a moment.' });

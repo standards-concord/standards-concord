@@ -431,6 +431,9 @@ export const gitStore = {
    * read calls it.
    */
   async ensureSynced(project: Pick<OntologyProject, 'slug'>): Promise<void> {
+    // Read-only (the cutover): the repositories are left exactly as they are, pins and refs included. Reads go by
+    // the database's head and the objects, which don't need the checkout.
+    if (config.readOnly) return;
     const dir = repoDir(project);
     const head = await this.head(project);
     let stamp = '';

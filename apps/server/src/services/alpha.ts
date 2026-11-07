@@ -201,6 +201,8 @@ const podUrlOf = (u: User, rel: string) => (podKind(u) === 'solid' && u.podUrl ?
  */
 const mirrors = new Map<string, Promise<void>>();
 export function mirrorToPod(user: User): Promise<void> {
+  // Read-only (the cutover): nothing is copied, and the next visit after it catches up.
+  if (config.readOnly) return Promise.resolve();
   return runSerially(mirrors, user.id, async () => {
     try {
       const h = await history(user.id);

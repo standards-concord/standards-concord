@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { User } from '@concord/shared';
 import { config } from '../config.js';
-import { get, list, put } from '../db.js';
+import { get, list, put, refuseWhenReadOnly } from '../db.js';
 import { DataFactory, Parser, Writer, type Quad } from 'n3';
 import { slugify } from '../ids.js';
 import { clientCredentialsLogin, podFetch, podRequester, type PodRequest, type SolidLogin } from '../solidOidc.js';
@@ -182,6 +182,7 @@ export const solid = {
 
   /** Provision a pod + WebID for a user. Idempotent. Returns {webId, podUrl}. */
   async provision(user: Pick<User, 'id' | 'name'>): Promise<{ webId: string; podUrl?: string }> {
+    refuseWhenReadOnly(); // a pod or a private file, written before any database write
     if (!this.enabled) return { webId: this.localWebId(user.id), podUrl: `${config.publicUrl}/people/${user.id}/` };
     const existing = await get<PodRecord>('kv', `pod:${user.id}`);
     if (existing) return { webId: existing.webId, podUrl: existing.podUrl };
@@ -204,6 +205,7 @@ export const solid = {
 
   /** Write a private resource (path relative to the user's pod / private area). Returns its URL. */
   async write(userId: string, relPath: string, body: string | Buffer, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
+    refuseWhenReadOnly(); // a pod or a private file, written before any database write
     const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (this.enabled && rec) {
       try {
@@ -257,6 +259,7 @@ export const solid = {
    * work when the folder is already shared with exactly these readers.
    */
   async shareRead(userId: string, relFolder: string, readers: string[], opts: { create?: boolean; force?: boolean } = {}): Promise<'shared' | 'unchanged' | 'missing' | 'local'> {
+    refuseWhenReadOnly(); // a pod or a private file, written before any database write
     const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (!this.enabled || !rec) return 'local';
     const want = [...new Set(readers)].sort();
@@ -278,6 +281,7 @@ export const solid = {
    * pod can't say, so the caller writes nothing.
    */
   async keepExisting(userId: string, relPath: string): Promise<WriteCondition> {
+    refuseWhenReadOnly(); // a pod or a private file, written before any database write
     const rec = await get<PodRecord>('kv', `pod:${userId}`);
     const asideName = (n: number) => relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}-${n}${ext}`);
     if (this.enabled && rec) {
@@ -333,6 +337,7 @@ export const solid = {
    * doesn't hold: the resource changed, or already exists).
    */
   async writeExisting(userId: string, relPath: string, body: string | ArrayBuffer, contentType = 'text/turtle', when: WriteCondition = {}): Promise<{ kind: 'solid' | 'local'; url: string }> {
+    refuseWhenReadOnly(); // a pod or a private file, written before any database write
     const rec = await get<PodRecord>('kv', `pod:${userId}`);
     if (!(this.enabled && rec)) {
       const bytes = typeof body === 'string' ? Buffer.from(body) : Buffer.from(body);
