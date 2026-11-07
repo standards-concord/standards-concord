@@ -39,6 +39,8 @@ export type Collection =
   | 'oidcTokens'
   | 'appFollowUps'
   | 'forks'
+  | 'federations'
+  | 'federationReleases'
   | 'gitObjects'
   | 'gitRefs'
   | 'kv';

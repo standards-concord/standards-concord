@@ -24,6 +24,13 @@ import type {
   CompetencyQuestion,
   FeedbackQuestion,
   ForkCheck,
+  Federation,
+  FederationCheck,
+  FederationComparison,
+  FederationDetail,
+  FederationMember,
+  FederationRelease,
+  FederationReleasePlan,
   ForkSummary,
   ForkSyncResult,
   FeedbackSubmission,
@@ -358,6 +365,24 @@ export const api = {
   merge: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/merge`),
   withdraw: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/withdraw`),
   revise: (id: string, instruction: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/revise`, { instruction }),
+
+  // Federations (Advanced features)
+  federations: () => get<Federation[]>('/api/federations'),
+  federation: (fed: string) => get<FederationDetail>(`/api/federations/${e(fed)}`),
+  createFederation: (body: { title: string; description?: string; members?: FederationMember[]; parentId?: string }) => post<FederationDetail>('/api/federations', body as unknown as Json),
+  updateFederation: (fed: string, body: { title?: string; description?: string; members?: FederationMember[]; parentId?: string | null }) => patch<FederationDetail>(`/api/federations/${e(fed)}`, body as unknown as Json),
+  forkFederation: (fed: string, body: { title?: string; kind: 'development' | 'divergent' }) => post<FederationDetail>(`/api/federations/${e(fed)}/forks`, body),
+  proposeFederationBack: (fed: string, note?: string) => post<FederationDetail>(`/api/federations/${e(fed)}/propose-back`, { note }),
+  decideFederationProposal: (fed: string, proposal: string, accept: boolean) => post<FederationDetail>(`/api/federations/${e(fed)}/proposals/${e(proposal)}`, { accept }),
+  proposeUpstream: (fed: string, body: { ontologyId: string; terms: string[]; title?: string; description?: string }) =>
+    post<{ changeRequest: ChangeRequestDetail; mapping: Record<string, string>; warnings: string[] }>(`/api/federations/${e(fed)}/upstream`, body),
+  compareFederations: (fed: string, other: string) => get<FederationComparison>(`/api/federations/${e(fed)}/compare/${e(other)}`),
+  federationCheck: (fed: string) => get<FederationCheck>(`/api/federations/${e(fed)}/check`),
+  federationReleases: (fed: string) => get<Omit<FederationRelease, 'manifest' | 'shapes'>[]>(`/api/federations/${e(fed)}/releases`),
+  federationReleasePlan: (fed: string) => get<FederationReleasePlan>(`/api/federations/${e(fed)}/release-plan`),
+  releaseFederation: (fed: string, body: { version?: string; notes?: string }) => post<Omit<FederationRelease, 'manifest' | 'shapes'>>(`/api/federations/${e(fed)}/releases`, body),
+  ontologyFederations: (id: string) => get<(Federation & { committed: boolean })[]>(`/api/ontologies/${e(id)}/federations`),
+  setFederationCommitment: (id: string, fed: string, committed: boolean) => post<FederationDetail>(`/api/ontologies/${e(id)}/federations/${e(fed)}/commitment`, { committed }),
 
   // Development forks
   forks: (id: string) => get<ForkSummary[]>(`/api/ontologies/${e(id)}/forks`),

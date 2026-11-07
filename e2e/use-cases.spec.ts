@@ -36,6 +36,10 @@ test.describe('use cases', () => {
     await expect(await useCaseCard(page, 'Aggregate volunteering opportunities across platforms')).toBeVisible();
     await expect(await useCaseCard(page, 'Find weekly shifts that need volunteers')).toBeVisible();
     await expect(page.getByText('Anonymised', { exact: true }).first()).toBeVisible();
+    // Each row says who and when. Its source, completeness, questions and terms used to be listed too; they're on its page.
+    const facts = page.getByRole('main').getByText(/ · updated /);
+    await expect(facts.first()).toBeVisible();
+    for (const line of await facts.allInnerTexts()) expect(line).toMatch(/^[^·]+ · updated [^·]+$/);
     // Working group only: not for contributors.
     await expect(page.getByRole('link', { name: 'Publish recurring shifts once' })).toHaveCount(0);
     await filters.getByRole('button', { name: /^Closed/ }).click();

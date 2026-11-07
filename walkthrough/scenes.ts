@@ -320,7 +320,8 @@ export const actions: Record<string, Action> = {
   async 'open-governance'(c) {
     await c.d.goto(o(c, '/governance'));
     await c.d.pause(600);
-    await ringAround(c, /Policy template/);
+    // The policy as readers see it: its name and what each kind of change needs (templates show only while editing).
+    await ringAround(c, /^In short$/);
   },
   async 'open-releases'(c) {
     await c.d.goto(o(c, '/releases'));
@@ -633,10 +634,11 @@ export const actions: Record<string, Action> = {
   },
   async 'point-how-it-works'(c) {
     await c.d.clearHighlight();
-    const steps = c.d.page.locator('section[aria-labelledby="how-title"]');
-    await glideTo(c, steps);
-    await c.d.claim((await steps.locator('li').count()) === 4, 'the welcome page lists four steps');
-    await c.d.highlight(steps.locator('ol'), 'the four steps');
+    // The four steps are spoken, not listed on the page any more; the note under the buttons says there's no account.
+    const note = c.d.page.getByTestId('welcome-confidential');
+    await glideTo(c, note);
+    await c.d.claimVisible(note.getByText(/No account is needed/), 'the welcome page says no account is needed');
+    await c.d.highlight(note, 'the note that no account is needed');
   },
   async 'point-start-walkthrough'(c) {
     await c.d.clearHighlight();

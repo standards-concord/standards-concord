@@ -60,10 +60,13 @@ import { ontologyStore } from '../services/ontologyStore.js';
 import { admitQueryChat, boundedQueryChatRequest, queryChat } from '../services/queryChat.js';
 import { PERSONAS } from '../services/personas.js';
 import * as forks from '../services/forks.js';
+import { listFederationReleases, publishFederationRelease, releaseOut, releasePlanOut } from '../services/federationReleases.js';
+import { checkFederationNow, compareFederations, createFederation, decideProposal, forkFederation, proposeBack, proposeUpstream, federationDetail, federationsOf, findFederation, listFederations, setCommitment, updateFederation } from '../services/federations.js';
 import * as releases from '../services/releases.js';
 import * as requirements from '../services/requirements.js';
 import { releaseTrace, useCaseDetail, useCasesForCR } from '../services/useCaseDetail.js';
 import { fairContext } from '../services/fairResolution.js';
+import { hostedImportClosure } from '../services/importClosure.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
@@ -333,7 +336,7 @@ export function apiRouter(): Router {
     // viewer may see that use case now: a report that was running when one was withdrawn drops it.
     if (!ref || ref === 'working') return void res.json(await useCases.validationForViewer(await workingValidation(p), req.user));
     const graph = await ontologyStore.at(p, ref);
-    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI) }), req.user));
+    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI), imports: await hostedImportClosure(graph) }), req.user));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {
@@ -802,6 +805,76 @@ export function apiRouter(): Router {
     res.json(await relOut(req, await releases.publishRelease(await releases.getRelease(String(req.params.id)), requireUser(req))));
   });
 
+  /* -------------------------- federations (Advanced) ------------------- */
+  r.get('/federations', async (req, res) => {
+    requireUser(req);
+    res.json(await listFederations());
+  });
+  r.post('/federations', async (req, res) => {
+    const f = await createFederation(requireUser(req), { title: str(req.body?.title, 'title', 120), description: optStr(req.body?.description), members: req.body?.members, parentId: req.body?.parentId });
+    res.status(201).json(await federationDetail(f, req.user));
+  });
+  r.get('/federations/:fed', async (req, res) => res.json(await federationDetail(await findFederation(String(req.params.fed)), requireUser(req))));
+  r.patch('/federations/:fed', async (req, res) => {
+    const f = await updateFederation(await findFederation(String(req.params.fed)), requireUser(req), {
+      title: req.body?.title === undefined ? undefined : str(req.body.title, 'title', 120),
+      description: req.body?.description === undefined ? undefined : String(req.body.description).slice(0, 4000),
+      members: req.body?.members,
+      parentId: req.body?.parentId,
+    });
+    res.json(await federationDetail(f, req.user));
+  });
+  r.get('/federations/:fed/check', async (req, res) => {
+    requireUser(req);
+    res.json(await checkFederationNow(await findFederation(String(req.params.fed))));
+  });
+  r.post('/federations/:fed/forks', async (req, res) => {
+    const f = await forkFederation(await findFederation(String(req.params.fed)), requireUser(req), { title: optStr(req.body?.title), kind: optStr(req.body?.kind) });
+    res.status(201).json(await federationDetail(f, req.user));
+  });
+  r.post('/federations/:fed/propose-back', async (req, res) => {
+    const original = await proposeBack(await findFederation(String(req.params.fed)), requireUser(req), optStr(req.body?.note));
+    res.json(await federationDetail(original, req.user));
+  });
+  r.post('/federations/:fed/proposals/:proposal', async (req, res) => {
+    const f = await decideProposal(await findFederation(String(req.params.fed)), String(req.params.proposal), requireUser(req), req.body?.accept === true);
+    res.json(await federationDetail(f, req.user));
+  });
+  r.post('/federations/:fed/upstream', async (req, res) => {
+    const out = await proposeUpstream(await findFederation(String(req.params.fed)), requireUser(req), {
+      ontologyId: str(req.body?.ontologyId, 'ontologyId', 100),
+      terms: Array.isArray(req.body?.terms) ? req.body.terms.map(String).slice(0, 100) : [],
+      title: optStr(req.body?.title),
+      description: optStr(req.body?.description),
+    });
+    res.status(201).json({ ...out, changeRequest: await crOut(out.changeRequest, req) });
+  });
+  r.get('/federations/:fed/compare/:other', async (req, res) => {
+    requireUser(req);
+    res.json(await compareFederations(await findFederation(String(req.params.other)), await findFederation(String(req.params.fed))));
+  });
+  r.get('/federations/:fed/releases', async (req, res) => {
+    requireUser(req);
+    res.json((await listFederationReleases((await findFederation(String(req.params.fed))).id)).map(releaseOut));
+  });
+  r.get('/federations/:fed/release-plan', async (req, res) => {
+    requireUser(req);
+    res.json(await releasePlanOut(await findFederation(String(req.params.fed))));
+  });
+  r.post('/federations/:fed/releases', async (req, res) => {
+    const rel = await publishFederationRelease(await findFederation(String(req.params.fed)), requireUser(req), { version: optStr(req.body?.version), notes: optStr(req.body?.notes) });
+    res.status(201).json(releaseOut(rel));
+  });
+  r.get('/ontologies/:id/federations', async (req, res) => {
+    const p = await project(req);
+    res.json((await federationsOf(p.id)).map((f) => ({ ...f, committed: !!p.committedFederations?.includes(f.id) })));
+  });
+  r.post('/ontologies/:id/federations/:fed/commitment', async (req, res) => {
+    const f = await findFederation(String(req.params.fed));
+    await setCommitment(await project(req), f, req.body?.committed === true, requireUser(req));
+    res.json(await federationDetail(f, req.user));
+  });
+
   /* -------------------------- development forks ---------------------- */
   const fork = async (req: Request) => await forks.mustFindFork(String(req.params.fork), await project(req));
   r.get('/ontologies/:id/forks', async (req, res) => {
@@ -820,7 +893,7 @@ export function apiRouter(): Router {
     const p = await project(req);
     const f = await fork(req);
     const graph = await ontologyStore.graphAt(p, f.head);
-    res.json(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI) }));
+    res.json(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI), imports: await hostedImportClosure(graph) }));
   });
   r.post('/ontologies/:id/forks/:fork/edits', async (req, res) => {
     const b = req.body ?? {};
