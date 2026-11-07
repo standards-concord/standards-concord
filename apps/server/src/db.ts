@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { config } from './config.js';
 import { type DocStore, openStore, type StoreOptions } from './store/index.js';
+import { keepAlive } from './keepAlive.js';
 
 /**
  * Platform metadata (users, roles, change requests, votes) as JSON documents. Ontologies themselves live in
@@ -230,7 +231,9 @@ export async function withoutWaiting<T>(fn: () => T | Promise<T>): Promise<T> {
  * inside one, which would otherwise inherit it and be refused once it rolls back or while it commits.
  */
 export async function detached<T>(fn: () => T | Promise<T>): Promise<T> {
-  return (await conn()).detached(async () => insideTransaction.run(false, fn));
+  // Background work, often not awaited (a pod mirror, drafting requirements): on Vercel it is kept running after
+  // the response that started it (keepAlive: waitUntil), not frozen with the instance.
+  return keepAlive((async () => (await conn()).detached(async () => insideTransaction.run(false, fn)))());
 }
 
 /** Rewrite storage so old copies of rewritten or deleted rows are gone. False if blocked: retry later. */

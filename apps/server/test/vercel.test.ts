@@ -4,7 +4,9 @@ import type { Request } from 'express';
 import request from 'supertest';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { config } from '../src/config.js';
-import { openDb } from '../src/db.js';
+import { detached, openDb } from '../src/db.js';
+import { setKeepAlive } from '../src/keepAlive.js';
+import { background } from '../src/services/botLifecycle.js';
 import { clientIp, publicOrigin } from '../src/oauth.js';
 import { createHandler } from '../src/vercel.js';
 
@@ -78,6 +80,27 @@ describe('the Vercel function', () => {
       expect(kept.length).toBe(before);
     } finally {
       await fn.close();
+    }
+  });
+});
+
+describe('work that outlives its request', () => {
+  // A function instance can be frozen as soon as its response is sent. Work started and not awaited (a pod mirror,
+  // drafting requirements, a request to Recall.ai) is handed to Vercel's waitUntil, which keeps it running.
+  it('hands background work to waitUntil, and never a failure the caller already handles', async () => {
+    const kept: Promise<unknown>[] = [];
+    setKeepAlive((p) => void kept.push(p));
+    try {
+      await detached(async () => 'mirrored');
+      await background(Promise.resolve('analysed'));
+      const failing = detached(async () => {
+        throw new Error('pod unreachable');
+      });
+      await expect(failing).rejects.toThrow('pod unreachable');
+      expect(kept).toHaveLength(3);
+      await expect(Promise.all(kept)).resolves.toBeDefined(); // the platform's copy never rejects
+    } finally {
+      setKeepAlive(() => undefined);
     }
   });
 });
