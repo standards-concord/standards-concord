@@ -1231,7 +1231,12 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
       await withdrawUseCase(await getUseCase(id), await userNamed('Notes Race Author'));
       read.mockRestore();
       resume();
-      await publishing;
+      // The withdrawal landed after the notes were made (as one on another server, whose lease had lapsed,
+      // could): the transaction that publishes sees it, and nothing is published. Publishing again makes the
+      // notes afresh, from what anyone may see now.
+      await expect(publishing).rejects.toMatchObject({ status: 409 });
+      expect((await get<Release>('releases', r.id))!.status).not.toBe('published');
+      await publishRelease((await get<Release>('releases', r.id))!, steward);
     } finally {
       read.mockRestore();
       write.mockRestore();
@@ -1406,8 +1411,11 @@ describe('eighth review: requests made from calls, interview saves, untagged res
   // lock's holder waited to write: both stalled until the store gave up. Now it is refused at once.
   it('refuses to wait for the consent lock inside a transaction, and takes it outside one', async () => {
     await expect(transaction(async () => withConsentLock('lock-test-3', async () => 1))).rejects.toThrow(/inside a transaction/);
-    // Background work started from a transaction runs outside it, so it may take the lock.
-    await expect(transaction(async () => detached(() => withConsentLock('lock-test-3', async () => 2)))).resolves.toBe(2);
+    // Background work started from a transaction runs outside it, so it may take the lock (once the transaction
+    // is done: across instances the lock is a database lease, which waits for the writer lock like any write).
+    let background!: Promise<number>;
+    await transaction(async () => void (background = detached(() => withConsentLock('lock-test-3', async () => 2))));
+    await expect(background).resolves.toBe(2);
     // The order everything uses: the consent lock, then a transaction, which may write while the lock is held.
     await expect(withConsentLock('lock-test-3', () => transaction(async () => { await put('kv', { id: 'lock-test-3' }); return 3; }))).resolves.toBe(3);
   });

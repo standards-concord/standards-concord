@@ -9,11 +9,13 @@ export interface LeaseOptions {
    * Then only an instance that stops running (frozen or killed) lets it lapse early.
    */
   renew?: boolean;
+  /** How long to wait for another holder before giving up (default `ttlMs`). */
+  waitMs?: number;
 }
 
 /**
  * A short lease in the database (`kv lease:<id>`), for work only one instance at a time may do and that is never
- * part of a transaction (it calls out over the network). Waits up to `ttlMs` for another holder, then throws. A
+ * part of a transaction (it calls out over the network). Waits up to `waitMs` for another holder, then throws. A
  * holder that dies leaves a lease that lapses after `ttlMs`. Not a fence: work under it must still be safe if it
  * overruns the lease (here, refreshing a token one extra time).
  */
@@ -22,7 +24,7 @@ export async function withLease<T>(id: string, ttlMs: number, fn: () => Promise<
 export async function withLease<T>(id: string, ttlMs: number, fn: () => Promise<T>, opts: LeaseOptions = {}): Promise<T | undefined> {
   const key = `lease:${id}`;
   const token = randomUUID();
-  const deadline = Date.now() + ttlMs;
+  const deadline = Date.now() + (opts.waitMs ?? ttlMs);
   for (let wait = 25; ; wait = Math.min(wait * 2, 500)) {
     const took = await transaction(async () => {
       const held = await get<{ until: number }>('kv', key);

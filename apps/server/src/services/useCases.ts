@@ -93,8 +93,10 @@ interface Holding {
   inner: Promise<unknown>;
 }
 const holdings = new AsyncLocalStorage<Map<string, Holding>>();
-/** How long another instance waits for the consent lock, and how soon a holder that stopped running lets it go. */
-export const CONSENT_LEASE_MS = 2 * 60_000;
+/** How soon a holder of the consent lock that stopped running (killed, frozen) lets it go; renewed while it runs. */
+export const CONSENT_LEASE_MS = 20_000;
+/** How long another instance waits for the consent lock (a merge or release can hold it a while). */
+export const CONSENT_WAIT_MS = 3 * 60_000;
 /**
  * Runs `fn` exclusively for an ontology. Everything that commits material
  * derived from use cases (a release, a merge, a drafted change request) and
@@ -142,7 +144,7 @@ export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T)
   if (inTransaction()) return Promise.reject(new Error('withConsentLock called inside a transaction: take the consent lock first'));
   // Queued here behind this instance's holders, then held across instances (each Vercel function instance has
   // a queue of its own) with a lease in the database, kept while the holder runs.
-  const acrossInstances = () => withLease(`consent:${ontologyId}`, CONSENT_LEASE_MS, runHeld, { renew: true });
+  const acrossInstances = () => withLease(`consent:${ontologyId}`, CONSENT_LEASE_MS, runHeld, { renew: true, waitMs: CONSENT_WAIT_MS });
   const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(acrossInstances);
   const tail = run.catch(() => undefined);
   consentLocks.set(ontologyId, tail);

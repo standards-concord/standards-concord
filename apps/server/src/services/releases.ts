@@ -99,6 +99,16 @@ export async function releaseApproval(r: Release): Promise<{ governance: Governa
  * them is withheld from the viewer (a use case it came from is no longer shared with them), the
  * notes they see are written again from the requests as they may see them. Stored notes are kept.
  */
+/** Which of a release's change requests are withheld from the public right now (a key to compare). */
+async function withheldNow(r: Release) {
+  const out: string[] = [];
+  for (const id of r.changeRequestIds) {
+    const c = await get<ChangeRequest>('changeRequests', id);
+    if (c && (await crWithheld(c, undefined))) out.push(id);
+  }
+  return out.join(' ');
+}
+
 export async function releaseForViewer(r: Release, viewer?: User): Promise<Release> {
   const crs = (await Promise.all(r.changeRequestIds.map((id) => get<ChangeRequest>('changeRequests', id)))).filter((c): c is ChangeRequest => !!c);
   if (!await someAsync(crs, (c) => crWithheld(c, viewer))) return r;
@@ -292,6 +302,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   // What goes into the public files is what anyone may see: nothing from a use case withdrawn since. The
   // consent lock is held for all of this (publishRelease), so nothing can be withdrawn before the commit.
   const publicNotes = (await releaseForViewer(r, undefined)).notes;
+  const withheldInNotes = await withheldNow(r);
   files['RELEASE_NOTES.md'] = `# ${project.title} ${r.version}\n\nVersion IRI: <${r.versionIRI}>\n\n${publicNotes}\n`;
   const doc = await prepareForRelease(project, r);
   if (doc) files['USE_CASES.md'] = renderMarkdown(doc);
@@ -324,7 +335,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     if (!now.ok) throw new HttpError(409, `No longer ready to publish: ${now.why}`);
     // Consent once more, where no withdrawal can land in between (it commits in a transaction too): the consent
     // lock is a lease across instances, and one that lapsed must not publish from a withdrawn use case.
-    if ((await releaseForViewer({ ...latest, notes: publishedNotes }, undefined)).notes !== publicNotes || (doc && !(await stillPublishable(doc))))
+    if ((await withheldNow(latest)) !== withheldInNotes || (doc && !(await stillPublishable(doc))))
       throw new HttpError(409, 'A use case stopped being public while the release was being published, so it was not published. Try again.');
     // Made from a working draft still waiting for approval: it waits too. The draft is the one this
     // release was made from (advanceTo checks), so whether it's held now is whether this release is.
