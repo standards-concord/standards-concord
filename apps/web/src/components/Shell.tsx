@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
 import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Shield, UserRound, Compass, Palette } from 'lucide-react';
-import { api } from '../api';
-import { beginSignOut, finishSignOut, useSession } from '../lib/session';
+import { api, ApiError } from '../api';
+import { beginSignOut, finishSignOut, markSignOutPending, useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
 import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
 import { useAction, useTick } from '../lib/hooks';
@@ -10,6 +10,7 @@ import { formatDate, roleLabel } from '../lib/format';
 import { Logo, OdiLogo } from './badges';
 import { Avatar, Button, buttonClasses, cx, LinkButton } from './ui';
 import { WalkthroughDock } from './Walkthrough';
+import { useOffline } from '../lib/offline';
 import { Popover } from './Disclosure';
 
 function OntologySwitcher() {
@@ -87,8 +88,9 @@ function UserMenu() {
     beginSignOut(user.id);
     try {
       await api.logout();
-    } catch {
-      /* ignore */
+    } catch (e) {
+      // No connection: the server's session is ended when it can next be reached.
+      if (e instanceof ApiError && e.offline) markSignOutPending(session?.sessionId);
     }
     finishSignOut(user.id);
     const s = await refresh();
@@ -154,6 +156,19 @@ function MenuLink({ to, icon, children }: { to: string; icon: ReactNode; childre
       {icon}
       {children}
     </Link>
+  );
+}
+
+/** Says so while Concord can't reach its server: pages show what this device saved for you. */
+function OfflineBanner() {
+  const offline = useOffline();
+  if (!offline) return null;
+  return (
+    <div role="status" className="border-b border-warn/30 bg-warn-soft text-sm">
+      <p className="mx-auto max-w-7xl px-4 py-1.5 sm:px-6">
+        <strong>You’re offline.</strong> Concord is showing what this device saved. Changes need a connection for now.
+      </p>
+    </div>
   );
 }
 
@@ -248,6 +263,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <UserMenu />
         </div>
       </header>
+      <OfflineBanner />
       <DemoBanner />
       <main id="main" tabIndex={-1} className="flex-1 scroll-mt-16 outline-none">
         {children}

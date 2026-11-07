@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { GovernanceTemplateId } from '@concord/shared';
-import { BookOpen, Compass, Plus } from 'lucide-react';
+import { BookOpen, Compass, Network, Plus } from 'lucide-react';
 import { api } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { useOntologies } from '../lib/ontologies';
 import { useSession } from '../lib/session';
+import { useAdvancedFeatures } from '../lib/advanced';
 import { plural, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { HealthChip } from '../components/Phase';
@@ -117,6 +118,7 @@ export function HubPage() {
   const ontologies = useOntologies();
   const { now, isDemo } = useSession();
   const [open, setOpen] = useState(false);
+  const [advanced] = useAdvancedFeatures();
   return (
     <Page wide>
       <PageHeader
@@ -124,9 +126,17 @@ export function HubPage() {
         title="Ontologies"
         subtitle="Shared vocabularies designed in the open: use cases first, every change validated, classified and governed."
         actions={
-          <Button variant="primary" icon={Plus} onClick={() => setOpen(true)}>
-            New ontology
-          </Button>
+          <>
+            {/* Federations are an Advanced feature: linked only with Advanced features on (the pages open from any link). */}
+            {advanced && (
+              <LinkButton to="/f" icon={Network}>
+                Federations
+              </LinkButton>
+            )}
+            <Button variant="primary" icon={Plus} onClick={() => setOpen(true)}>
+              New ontology
+            </Button>
+          </>
         }
       />
       {isDemo && (

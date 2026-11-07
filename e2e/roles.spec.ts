@@ -146,15 +146,14 @@ test.describe('role-based views', () => {
     expect(put.status()).toBe(403);
   });
 
-  test('the Overview always shows a link to the governance policy', async ({ page }) => {
+  test('the governance policy is one click from the Overview, in the section nav', async ({ page }) => {
     await signIn(page, { name: 'Policy finder', role: 'contributor' });
     await page.goto(`/o/${demo.id}`);
     await settle(page);
-    // The summary sentence under the description names the policy, outside any disclosure.
-    const line = page.getByTestId('overview-summary');
-    await expect(line).toBeVisible();
-    const o = (await (await page.request.get(`/api/ontologies/${demo.id}`)).json()) as { governance: { name: string } };
-    await line.getByRole('link', { name: o.governance.name }).click();
+    // The line under the description used to name the policy too; now it gives just the counts, and the
+    // section nav (shown to everyone) leads to the policy.
+    await expect(page.getByTestId('overview-summary')).not.toContainText('run as');
+    await page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Governance' }).click();
     await expect(page).toHaveURL(new RegExp(`/o/${demo.id}/governance$`));
   });
 

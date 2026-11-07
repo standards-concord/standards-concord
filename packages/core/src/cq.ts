@@ -8,6 +8,7 @@ import { writeNTriples } from './turtle.js';
 import { lint } from './lint.js';
 import { fairCheck } from './fair.js';
 import { owlReasoner, structuralReasoner } from './reasoner.js';
+import { checkImports, type ImportClosure } from './imports.js';
 
 export interface CompetencyQuestion {
   question: string;
@@ -68,6 +69,11 @@ export interface ValidateOptions {
   owlReasoner?: (graph: OntologyGraph) => Promise<ReasonerResult>;
   /** Network facts for the FAIR checks (whether the ontology IRI resolves). */
   fair?: FairContext;
+  /**
+   * The ontology's owl:imports, resolved (imports.ts resolveImportClosure). When given and the
+   * ontology imports anything, the reasoner runs on the ontology together with its imports.
+   */
+  imports?: ImportClosure;
 }
 
 /**
@@ -78,8 +84,10 @@ export interface ValidateOptions {
 export async function validate(graph: OntologyGraph, opts: ValidateOptions = {}): Promise<ValidationReport> {
   const issues = lint(graph, { strict: true });
   const fair = fairCheck(graph, opts.fair);
-  const reasoner = opts.reasoner === 'structural' ? structuralReasoner(graph) : await (opts.owlReasoner ?? owlReasoner)(graph);
+  const reason = (g: OntologyGraph) => (opts.reasoner === 'structural' ? Promise.resolve(structuralReasoner(g)) : (opts.owlReasoner ?? owlReasoner)(g));
+  const withImports = opts.imports && (opts.imports.imported.length > 0 || opts.imports.unresolved.length > 0) ? await checkImports(graph, opts.imports, reason) : undefined;
+  const reasoner = withImports?.reasoner ?? (await reason(graph));
   const competencyQuestions = opts.cqs?.length ? await runCompetencyQuestions(graph, opts.cqs) : [];
   const passed = !issues.some((i) => i.severity === 'error') && reasoner.available && reasoner.consistent && reasoner.unsatisfiable.length === 0;
-  return { lint: issues, fair, reasoner, competencyQuestions, passed };
+  return { lint: issues, fair, reasoner, competencyQuestions, passed, ...(withImports ? { imports: withImports.check } : {}) };
 }

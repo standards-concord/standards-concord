@@ -9,6 +9,7 @@
     "dev": "pnpm --parallel -r dev",
     "start": "pnpm --filter @concord/server start",
     "test:e2e": "playwright test -c e2e --project=local",
+    "test:e2e:smoke": "playwright test -c e2e --project=local app.spec alpha.spec reasoner.spec validate.spec",
     "test:e2e:live": "playwright test -c e2e --project=live",
     "test:e2e:solid": "playwright test -c e2e/solid.config.ts",
     "walkthrough": "pnpm --filter @concord/walkthrough record",

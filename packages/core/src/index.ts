@@ -29,6 +29,10 @@ export { fairCheck } from './fair.js';
 export { structuralReasoner, owlReasoner } from './reasoner.js';
 export type { OwlReasonerOptions } from './reasoner.js';
 export { runCompetencyQuestions, validate } from './cq.js';
+export { checkImports, foreignAxioms, MAX_IMPORTS, resolveImportClosure, unionGraph } from './imports.js';
+export type { ImportClosure, ImportResolver, ResolvedImport, UnresolvedReason } from './imports.js';
+export { checkFederation, federationRoot, federationUnion } from './federation.js';
+export type { FederationMemberInput } from './federation.js';
 export type { CompetencyQuestion, ValidateOptions } from './cq.js';
 
 // Queries
@@ -60,6 +64,13 @@ export type { DataFormat, ParseDataOptions, Severity, ShaclReport, ShaclResult, 
 
 // Helpers
 export { compactIRI, expandIRI, localName, isValidLocalName, XSD, NS } from './ns.js';
-export { toShaclc, deriveShapes } from './shacl.js';
+export { toShaclc, deriveShapes, shaclStore } from './shacl.js';
 export { toWrapperClasses, withWrapperImport, npmPackage, WRAPPER_VERSION, WRAPPER_CDN } from './codegen.js';
 export type { GeneratedModule, GeneratedClass, CodegenOptions, PackageOptions } from './codegen.js';
+export { canonicalNQuads, rdfcHash, sha256Hex } from './canon.js';
+export { fedVersionIRI, manifestGraph, suggestFederationVersion, versionStep } from './fedRelease.js';
+export type { FederationPin, ManifestInput } from './fedRelease.js';
+export { AGREEING, compareGraphs } from './compare.js';
+export type { GraphComparison, TermComparison, TermRelation } from './compare.js';
+export { upstreamOps } from './upstream.js';
+export type { UpstreamPlan } from './upstream.js';

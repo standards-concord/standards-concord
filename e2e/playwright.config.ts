@@ -49,15 +49,21 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   reporter: process.env.CI ? [['list'], ['html', { open: 'never', outputFolder: '../playwright-report' }], ['github']] : [['list']],
   use: {
-    trace: 'retain-on-failure',
+    // Recording every test's trace and video and throwing them away when it passes took about a
+    // third of the suite's CPU. In CI (one retry) a failing test is recorded on its retry instead;
+    // a local run without retries keeps recording, so a failure there still has its trace.
+    trace: process.env.CI ? 'on-first-retry' : 'retain-on-failure',
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    video: process.env.CI ? 'on-first-retry' : 'retain-on-failure',
     ...devices['Desktop Chrome'],
     viewport: { width: 1400, height: 950 },
     // Hint fonts fully, as GitHub's Linux runners do, wherever the tests run. Hinted glyph widths
     // round to whole pixels at each zoom level, which once made zoomed and saved diagrams draw
     // text wider or narrower than its box; with this, a local run catches that too.
     launchOptions: { args: ['--font-render-hinting=full'] },
+    // The production build registers a service worker (apps/web/sw/sw.js). Requests it answers bypass
+    // page.route, which many specs rely on, so it is off except where offline.spec.ts turns it on.
+    serviceWorkers: 'block',
   },
   projects: [
     {

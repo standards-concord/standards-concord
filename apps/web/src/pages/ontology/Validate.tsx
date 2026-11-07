@@ -490,14 +490,12 @@ export function ValidateTab() {
               {checks.announced}
             </p>
           )}
-          <p className="flex flex-wrap items-center gap-x-3 text-xs text-muted">
-            <span>Up to 5 MB (JSON-LD 2 MB) or 25,000 distinct triples. Your data is checked here in your browser as you type, and never leaves this device. This is also the sample data Query runs over.</span>
-            {turtleMode && checks.formatNote && (
-              <span role="status" className="text-fg">
-                {checks.formatNote}
-              </span>
-            )}
-          </p>
+          {/* No standing line about limits: the error says what the limit is when data goes over it. */}
+          {turtleMode && checks.formatNote && (
+            <p role="status" className="text-xs">
+              {checks.formatNote}
+            </p>
+          )}
           {turtleMode && checks.live.length > 0 && (
             <ol className="space-y-1" aria-label="Problems in the Turtle" data-testid="data-lint">
               {checks.live.map((l, i) => (

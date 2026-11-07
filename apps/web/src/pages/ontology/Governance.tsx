@@ -491,44 +491,41 @@ export function GovernanceTab() {
 
       <PolicySummary policy={policy} preview={editing && dirty} />
 
-      <CollapsibleCard icon={Scale} title="Policy template" subtitle={editing ? 'Start from a template, then fine-tune the rules below.' : 'The template this policy started from.'} summary={<>Using <strong className="font-medium">{policy.name}</strong></>} defaultOpen={editing} openKey={editing || undefined}>
-        <div className="p-5">
-          {!editing ? (
-            <div>
-              <div className="text-sm font-semibold">{policy.name}</div>
-              <p className="mt-1 text-sm text-muted">{policy.description}</p>
-              {canEdit && <p className="mt-3 text-xs text-muted">Choose “Edit policy” to switch to another template, such as Lazy consensus or Steward-led.</p>}
-            </div>
-          ) : templates.error && !templates.data ? (
-            <ErrorCard error={templates.error} onRetry={templates.reload} />
-          ) : !templates.data ? (
-            <Loading />
-          ) : (
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {templates.data.map((t) => (
-                <button
-                  key={t.templateId}
-                  onClick={() => setPolicy(structuredClone(t))}
-                  aria-pressed={policy.templateId === t.templateId}
-                  className={cx('rounded-xl border p-4 text-left transition-colors', policy.templateId === t.templateId ? 'border-accent bg-accent-soft/50' : 'border-line hover:border-line-strong')}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-semibold">{t.name}</span>
-                    {policy.templateId === t.templateId && <Badge tone="accent">Selected</Badge>}
+      {/* Only while editing: to read the policy, "In short" above already names it and says what it means. */}
+      {editing && (
+        <CollapsibleCard icon={Scale} title="Policy template" subtitle="Start from a template, then fine-tune the rules below." summary={<>Using <strong className="font-medium">{policy.name}</strong></>} defaultOpen>
+          <div className="p-5">
+            {templates.error && !templates.data ? (
+              <ErrorCard error={templates.error} onRetry={templates.reload} />
+            ) : !templates.data ? (
+              <Loading />
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {templates.data.map((t) => (
+                  <button
+                    key={t.templateId}
+                    onClick={() => setPolicy(structuredClone(t))}
+                    aria-pressed={policy.templateId === t.templateId}
+                    className={cx('rounded-xl border p-4 text-left transition-colors', policy.templateId === t.templateId ? 'border-accent bg-accent-soft/50' : 'border-line hover:border-line-strong')}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold">{t.name}</span>
+                      {policy.templateId === t.templateId && <Badge tone="accent">Selected</Badge>}
+                    </div>
+                    <p className="mt-1 text-xs text-muted">{t.description}</p>
+                  </button>
+                ))}
+                {policy.templateId === 'custom' && (
+                  <div className="rounded-xl border border-accent bg-accent-soft/50 p-4">
+                    <div className="text-sm font-semibold">{policy.name}</div>
+                    <p className="mt-1 text-xs text-muted">A customised policy.</p>
                   </div>
-                  <p className="mt-1 text-xs text-muted">{t.description}</p>
-                </button>
-              ))}
-              {policy.templateId === 'custom' && (
-                <div className="rounded-xl border border-accent bg-accent-soft/50 p-4">
-                  <div className="text-sm font-semibold">{policy.name}</div>
-                  <p className="mt-1 text-xs text-muted">A customised policy.</p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </CollapsibleCard>
+                )}
+              </div>
+            )}
+          </div>
+        </CollapsibleCard>
+      )}
 
       <CollapsibleCard icon={GitPullRequest} title="Change request rules" subtitle="Rules by semantic version level. Patch = editorial, minor = backwards-compatible additions, major = breaking.">
         <RulesSection rules={policy.changes} policy={policy} editing={editing} onChange={(changes) => edit({ changes })} label="Change request rules by level" kind="change" />

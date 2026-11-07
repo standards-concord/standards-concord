@@ -1177,19 +1177,27 @@ describe('versions published before approval existed', () => {
     const saved = config.github.publishToken;
     (config.github as { publishToken?: string }).publishToken = 'test-token-not-real';
     const push = vi.spyOn(ontologyStore, 'publish').mockImplementation(async () => undefined);
+    // With ONTOLOGY_STORE=db the outbox publishes, to a GitHub that here never answers (nothing listens there).
+    const api = config.github.publishApi;
+    (config.github as { publishApi: string }).publishApi = 'http://127.0.0.1:9';
+    const { githubPublishJob } = await import('../src/services/githubOutbox.js');
     try {
       await drafted8(project);
       const published = await publishRelease((await (await import('../src/db.js')).get('releases', (await draftRelease((await findProject('volunteering'))!, owner)).id))!, owner);
       expect(published.status).toBe('published');
       expect(push).not.toHaveBeenCalled();
+      if (ontologyStore.kind === 'db') expect(await githubPublishJob(project.id)).toMatchObject({ status: 'cancelled', reason: expect.stringMatching(/predates publication approval/) });
       // An ontology made under the approval rules is pushed as before.
       const fresh = await createProject({ title: 'Ninth pushed vocab', description: '', prefix: 'npv' }, owner);
       await updateProject({ ...fresh, github: { repo: 'example/ninth' } as never });
       await drafted8(fresh);
       await publishRelease((await (await import('../src/db.js')).get('releases', (await draftRelease((await findProject(fresh.slug))!, owner)).id))!, owner);
-      expect(push).toHaveBeenCalledTimes(1);
+      if (ontologyStore.kind === 'git') expect(push).toHaveBeenCalledTimes(1);
+      // It tried GitHub, which didn't answer, so the job waits to try again.
+      else expect(await githubPublishJob(fresh.id)).toMatchObject({ status: 'pending', reason: expect.stringMatching(/didn.t answer/) });
     } finally {
       push.mockRestore();
+      (config.github as { publishApi: string }).publishApi = api;
       (config.github as { publishToken?: string }).publishToken = saved;
       await updateProject({ ...(await findProject('volunteering'))!, github: undefined });
     }

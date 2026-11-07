@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as arctic from 'arctic';
 import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
@@ -40,6 +41,15 @@ export async function sessionMiddleware(req: Request, _res: Response, next: Next
   const s = await sessionOf(req.cookies?.[SESSION_COOKIE]);
   req.user = s && isAdmin(s.user, s.method) ? { ...s.user, isPlatformAdmin: true } : s?.user;
   next();
+}
+
+/**
+ * A name for one browser session that the browser may know (the session token itself stays in its
+ * httpOnly cookie, and can't be worked out from this). A sign-out made with no connection sends it
+ * later, so the server ends that session and no other: not a newer one, nor another account's.
+ */
+export function sessionHandle(token: unknown): string | undefined {
+  return typeof token === 'string' && token ? createHash('sha256').update('concord-session-handle:').update(token).digest('base64url').slice(0, 22) : undefined;
 }
 
 export function requireUser(req: Request): User {

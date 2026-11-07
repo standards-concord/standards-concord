@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
-import { ArrowRight, Clapperboard, Compass, FileText, ListVideo, MessageSquareHeart, Scale, ShieldCheck, SkipForward, Users } from 'lucide-react';
+import { ArrowRight, Clapperboard, Compass, FileText, ListVideo, MessageSquareHeart, SkipForward } from 'lucide-react';
 import { api, type ClipManifest, type MediaIndex } from '../api';
 import { useAsync } from '../lib/hooks';
 import { Button, Card, cx, Select } from '../components/ui';
@@ -203,31 +203,6 @@ function FeatureClips({ index, loading }: { index?: MediaIndex; loading: boolean
   );
 }
 
-const AIMS: { icon: typeof ShieldCheck; title: string; text: string }[] = [
-  {
-    icon: ShieldCheck,
-    title: 'Rigorous by default',
-    text: 'Standards are written in strict OWL. A reasoner keeps them logically consistent, and every change is checked against FAIR principles and the questions the standard has to answer.',
-  },
-  {
-    icon: Users,
-    title: 'Shaped by the people who use them',
-    text: 'Requirements come from use cases, AI-led interviews, meeting transcripts, and coding agents that report concepts a standard is missing.',
-  },
-  {
-    icon: Scale,
-    title: 'Governance without endless meetings',
-    text: 'Each change is classified as a fix, a minor or a major change, then reviewed, signed off or voted on under rules the community sets for itself.',
-  },
-];
-
-const STEPS: [string, string][] = [
-  ['Pick a role', 'A steward, a domain expert, a voting member, ODI oversight or an agent developer. You can switch at any time.'],
-  ['Try the tasks for that role', 'A short checklist points you at the parts of Concord that matter to that role.'],
-  ['Let the others act', 'The other participants are simulated. Make them comment, review and vote, and fast-forward time to close reviews.'],
-  ['Tell us what you think', 'Type or just talk. Take the guided questions (about 8 minutes) or leave a quick note.'],
-];
-
 export function WelcomePage() {
   const media = useAsync(() => api.mediaIndex(), []);
   return (
@@ -249,6 +224,10 @@ export function WelcomePage() {
             Just leave feedback
           </LinkButton>
         </div>
+        <p className="mt-4 text-sm text-muted" data-testid="welcome-confidential">
+          Everything happens in a shared demo that other testers can see, so please don’t enter anything confidential. No account is needed: you’ll play one of the demo
+          participants.
+        </p>
       </section>
 
       {/* Filled in by the returning-tester work: version, sign-in prompt, what's changed. */}
@@ -262,25 +241,13 @@ export function WelcomePage() {
           Data standards, such as a shared vocabulary for volunteering opportunities, are usually agreed in long meetings and edited by a few experts. Concord lets the whole
           community shape a standard, keeps it rigorous, and runs its decisions in the open.
         </p>
-        <div className="mt-6 grid gap-4 md:grid-cols-3">
-          {AIMS.map(({ icon: Icon, title, text }) => (
-            <Card key={title} className="p-5">
-              <Icon className="size-5 text-accent" aria-hidden />
-              <h3 className="mt-3 font-semibold">{title}</h3>
-              <p className="mt-1.5 text-sm text-muted">{text}</p>
-            </Card>
-          ))}
-        </div>
       </section>
 
       <section aria-labelledby="videos-title" className="mt-14">
         <h2 id="videos-title" className="text-xl font-semibold tracking-tight">
           Watch first, if you like
         </h2>
-        <p className="mt-2 max-w-2xl text-muted">
-          Two short narrated videos. They’re optional: the guided walkthrough explains everything as you go.
-          {media.data?.release ? <> Recorded for release {media.data.release.tag}.</> : null}
-        </p>
+        <p className="mt-2 max-w-2xl text-muted">Optional: the guided walkthrough covers the same ground.</p>
         <div className="mt-6 grid gap-6 md:grid-cols-2">
           <Video
             id="tour"
@@ -302,38 +269,6 @@ export function WelcomePage() {
       </section>
 
       <FeatureClips index={media.data} loading={media.loading} />
-
-      <section aria-labelledby="how-title" className="mt-14">
-        <h2 id="how-title" className="text-xl font-semibold tracking-tight">
-          How the alpha works
-        </h2>
-        <ol className="mt-4 max-w-2xl divide-y divide-line border-y border-line text-sm">
-          {STEPS.map(([t, d], i) => (
-            <li key={t} className="flex gap-4 py-3">
-              <span className="font-mono text-xs text-subtle tabular-nums">{String(i + 1).padStart(2, '0')}</span>
-              <span>
-                <span className="font-medium">{t}.</span> <span className="text-muted">{d}</span>
-              </span>
-            </li>
-          ))}
-        </ol>
-        <p className="mt-4 max-w-2xl text-sm text-muted">
-          Everything happens in a shared demo that other testers can see, so please don’t enter anything confidential. No account is needed: you’ll play one of the demo
-          participants.
-        </p>
-      </section>
-
-      <section aria-labelledby="start-title" className="mt-14 rounded-xl border border-line bg-surface-2 p-6 sm:p-8">
-        <h2 id="start-title" className="text-xl font-semibold tracking-tight">
-          Ready?
-        </h2>
-        <p className="mt-2 max-w-xl text-muted">The guided walkthrough takes you through it step by step, and saves your place in this browser.</p>
-        <div className="mt-5">
-          <LinkButton to="/alpha" primary icon={ArrowRight}>
-            Start the guided walkthrough
-          </LinkButton>
-        </div>
-      </section>
     </div>
   );
 }

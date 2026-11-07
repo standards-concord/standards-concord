@@ -105,6 +105,25 @@ describe('fairCheck', () => {
     expect(r.checks.find((c) => c.id === 'A1-rdf')!.status).toBe('not-checked');
   });
 
+  // These messages used to say "1 keyword(s)" and "1 creator(s), 0 contributor(s)".
+  it('counts keywords, imports, creators and contributors in plain English', async () => {
+    const one = await OntologyGraph.fromTurtle(`@prefix owl: <http://www.w3.org/2002/07/owl#> . @prefix dcat: <http://www.w3.org/ns/dcat#> . @prefix dcterms: <http://purl.org/dc/terms/> .
+      <http://example.com/onto> a owl:Ontology ; dcat:keyword "a" ; owl:imports <http://example.com/x> ; dcterms:creator "Ann" .`);
+    const message = (r: ReturnType<typeof fairCheck>, id: string) => r.checks.find((c) => c.id === id)!.message;
+    const r1 = fairCheck(one);
+    expect(message(r1, 'F2-keywords')).toBe('1 keyword');
+    expect(message(r1, 'I2-imports')).toBe('1 import, all HTTP(S) (resolution not checked)');
+    expect(message(r1, 'R1.2-provenance-agents')).toBe('1 creator, 0 contributors');
+    const two = await OntologyGraph.fromTurtle(`@prefix owl: <http://www.w3.org/2002/07/owl#> . @prefix dcat: <http://www.w3.org/ns/dcat#> . @prefix dcterms: <http://purl.org/dc/terms/> .
+      <http://example.com/onto> a owl:Ontology ; dcat:keyword "a", "b" ; owl:imports <http://example.com/x>, <http://example.com/y> ;
+        dcterms:creator "Ann", "Bo" ; dcterms:contributor "Cy" .`);
+    const r2 = fairCheck(two);
+    expect(message(r2, 'F2-keywords')).toBe('2 keywords');
+    expect(message(r2, 'I2-imports')).toBe('2 imports, all HTTP(S) (resolution not checked)');
+    expect(message(r2, 'R1.2-provenance-agents')).toBe('2 creators, 1 contributor');
+    for (const r of [r1, r2]) for (const c of r.checks) expect(c.message).not.toContain('(s)');
+  });
+
   it('scores each principle equally and leaves unchecked items out', async () => {
     const g = await loadFixture();
     const offline = fairCheck(g);

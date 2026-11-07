@@ -24,6 +24,13 @@ import type {
   CompetencyQuestion,
   FeedbackQuestion,
   ForkCheck,
+  Federation,
+  FederationCheck,
+  FederationComparison,
+  FederationDetail,
+  FederationMember,
+  FederationRelease,
+  FederationReleasePlan,
   ForkSummary,
   ForkSyncResult,
   FeedbackSubmission,
@@ -60,6 +67,7 @@ import type {
   User,
   ValidationReport,
 } from '@concord/shared';
+import { setOffline } from './lib/offline';
 
 export class ApiError extends Error {
   status: number;
@@ -96,14 +104,20 @@ async function request<T>(method: string, path: string, body?: Json | BodyInit, 
   try {
     res = await fetch(path, { method, headers, body: payload, credentials: 'include' });
   } catch {
+    setOffline(true);
     throw new ApiError(0, OFFLINE_MESSAGE);
   }
+  // The same outages ApiError.offline counts: no answer, or a gateway that couldn't reach the server.
+  setOffline([502, 503, 504].includes(res.status));
   if (!res.ok) {
     let message = `${res.status} ${res.statusText || 'Request failed'}`;
     let parsed: unknown;
     const text = await res.text().catch(() => '');
     // The Vite dev proxy answers 500 with an empty body when the API is down.
-    if ([500, 502, 503, 504].includes(res.status) && !text.trim()) throw new ApiError(503, OFFLINE_MESSAGE);
+    if ([500, 502, 503, 504].includes(res.status) && !text.trim()) {
+      setOffline(true);
+      throw new ApiError(503, OFFLINE_MESSAGE);
+    }
     try {
       parsed = text ? JSON.parse(text) : undefined;
       if (parsed && typeof parsed === 'object' && 'error' in parsed) {
@@ -113,6 +127,7 @@ async function request<T>(method: string, path: string, body?: Json | BodyInit, 
     } catch {
       // Dev proxy returns plain text/HTML when the server is down.
       if ([500, 502, 503, 504].includes(res.status) && (!text || /ECONNREFUSED|proxy|<html/i.test(text))) {
+        setOffline(true);
         throw new ApiError(503, OFFLINE_MESSAGE);
       }
       if (text && text.length < 300) message = text;
@@ -239,7 +254,8 @@ export const api = {
   // Auth
   session: () => get<SessionInfo>('/api/session'),
   demoLogin: (body: { userId?: string; name?: string; role?: Role } = {}) => post<SessionInfo>('/api/auth/demo', body),
-  logout: () => post<Record<string, never>>('/api/auth/logout'),
+  /** Ends this browser's session; with `session`, only if it is still that one (see SessionInfo.sessionId). */
+  logout: (session?: string) => post<{ ended: boolean }>('/api/auth/logout', session ? { session } : {}),
   /** The walkthrough videos for the latest release (see /welcome). */
   mediaIndex: () => get<MediaIndex>('/api/media/index.json'),
   /** The feature clips' playlist, when the release has one. */
@@ -349,6 +365,24 @@ export const api = {
   merge: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/merge`),
   withdraw: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/withdraw`),
   revise: (id: string, instruction: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/revise`, { instruction }),
+
+  // Federations (Advanced features)
+  federations: () => get<Federation[]>('/api/federations'),
+  federation: (fed: string) => get<FederationDetail>(`/api/federations/${e(fed)}`),
+  createFederation: (body: { title: string; description?: string; members?: FederationMember[]; parentId?: string }) => post<FederationDetail>('/api/federations', body as unknown as Json),
+  updateFederation: (fed: string, body: { title?: string; description?: string; members?: FederationMember[]; parentId?: string | null }) => patch<FederationDetail>(`/api/federations/${e(fed)}`, body as unknown as Json),
+  forkFederation: (fed: string, body: { title?: string; kind: 'development' | 'divergent' }) => post<FederationDetail>(`/api/federations/${e(fed)}/forks`, body),
+  proposeFederationBack: (fed: string, note?: string) => post<FederationDetail>(`/api/federations/${e(fed)}/propose-back`, { note }),
+  decideFederationProposal: (fed: string, proposal: string, accept: boolean) => post<FederationDetail>(`/api/federations/${e(fed)}/proposals/${e(proposal)}`, { accept }),
+  proposeUpstream: (fed: string, body: { ontologyId: string; terms: string[]; title?: string; description?: string }) =>
+    post<{ changeRequest: ChangeRequestDetail; mapping: Record<string, string>; warnings: string[] }>(`/api/federations/${e(fed)}/upstream`, body),
+  compareFederations: (fed: string, other: string) => get<FederationComparison>(`/api/federations/${e(fed)}/compare/${e(other)}`),
+  federationCheck: (fed: string) => get<FederationCheck>(`/api/federations/${e(fed)}/check`),
+  federationReleases: (fed: string) => get<Omit<FederationRelease, 'manifest' | 'shapes'>[]>(`/api/federations/${e(fed)}/releases`),
+  federationReleasePlan: (fed: string) => get<FederationReleasePlan>(`/api/federations/${e(fed)}/release-plan`),
+  releaseFederation: (fed: string, body: { version?: string; notes?: string }) => post<Omit<FederationRelease, 'manifest' | 'shapes'>>(`/api/federations/${e(fed)}/releases`, body),
+  ontologyFederations: (id: string) => get<(Federation & { committed: boolean })[]>(`/api/ontologies/${e(id)}/federations`),
+  setFederationCommitment: (id: string, fed: string, committed: boolean) => post<FederationDetail>(`/api/ontologies/${e(id)}/federations/${e(fed)}/commitment`, { committed }),
 
   // Development forks
   forks: (id: string) => get<ForkSummary[]>(`/api/ontologies/${e(id)}/forks`),
