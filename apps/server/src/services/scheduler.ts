@@ -79,6 +79,9 @@ export interface RunResult {
  * finished; a job that fails is logged, recorded in the result, and tried again when it is next due.
  */
 export async function runDue(opts: { force?: boolean; now?: () => number } = {}): Promise<RunResult> {
+  // Read-only (the cutover): no scheduled work at all, since jobs call out (Recall.ai, GitHub, pods) before they
+  // write to the database, which would refuse.
+  if (config.readOnly) return { ran: [], failed: [] };
   const now = opts.now ?? Date.now;
   const list = await jobs();
   const isDue = (s: SchedulerState | undefined, j: ScheduledJob) => opts.force || now() - (s?.lastRun[j.name] ?? 0) >= j.every - 1000;

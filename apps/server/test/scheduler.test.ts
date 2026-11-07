@@ -49,6 +49,20 @@ describe('scheduled work', () => {
     expect([minute.runs, daily.runs]).toEqual([3, 2]);
   });
 
+  // Review r1 of #118: while Concord is read-only, a job could still call Recall.ai, GitHub or a pod before the
+  // database refused its write.
+  it('runs nothing while Concord is read-only, not even when forced', async () => {
+    const job = counting('read-only', 60_000);
+    restore = useJobs([job]);
+    (config as { readOnly: boolean }).readOnly = true;
+    try {
+      expect(await runDue({ force: true })).toEqual({ ran: [], failed: [] });
+      expect(job.runs).toBe(0);
+    } finally {
+      (config as { readOnly: boolean }).readOnly = false;
+    }
+  });
+
   it('lets one runner at a time run the work, however many instances look at once', async () => {
     let release!: () => void;
     const slow = counting('slow', 60_000, () => new Promise<void>((r) => (release = r)));
