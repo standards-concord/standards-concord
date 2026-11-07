@@ -242,6 +242,39 @@ describe('on Vercel', () => {
     await expect(again.mediaFile('concord-walkthrough.vtt')).rejects.toThrow(/too large/);
   });
 
+  // Step 5 r1: only the declared Content-Length was checked, the body was streamed without counting, and nothing
+  // was ever removed, so a missing or wrong length (or many releases) could fill a function's temporary disk.
+  it('counts the bytes that arrive on a temporary disk, and removes the oldest files to stay under its total', async () => {
+    process.env.CONCORD_MEDIA_REDIRECT = 'true';
+    const body = () => new ReadableStream({ start(c) { for (let i = 0; i < 5; i++) c.enqueue(new Uint8Array(1024 * 1024)); c.close(); } });
+    vi.stubGlobal('fetch', async (url: string) =>
+      url.startsWith('https://api.github.com/')
+        ? new Response(JSON.stringify([release(9204, 'v-unsized', 92004, 'https://dl.example/unsized')]), { status: 200 })
+        : new Response(body(), { status: 200 }),
+    );
+    const media = await fresh();
+    await expect(media.mediaFile('concord-walkthrough.vtt')).rejects.toThrow(/too large/);
+    const root = await cacheDir();
+    const parts = fs.readdirSync(root, { recursive: true }).map(String).filter((f) => f.endsWith('.part'));
+    expect(parts).toEqual([]);
+    // Old releases' files fill the cache: the oldest go first, so the total stays under the limit.
+    const old = path.join(root, 'old-release');
+    fs.mkdirSync(old, { recursive: true });
+    for (let i = 0; i < 10; i++) {
+      const f = path.join(old, `f${i}.vtt`);
+      fs.writeFileSync(f, Buffer.alloc(4 * 1024 * 1024));
+      fs.utimesSync(f, new Date(1000 + i * 1000), new Date(1000 + i * 1000));
+    }
+    stubGitHub(release(9205, 'v-small', 92005, 'https://dl.example/small'), { 'https://dl.example/small': 'WEBVTT small' });
+    const again = await fresh();
+    expect(fs.readFileSync((await again.mediaFile('concord-walkthrough.vtt'))!, 'utf8')).toBe('WEBVTT small');
+    const sizes = fs.readdirSync(root, { recursive: true }).map((f) => fs.statSync(path.join(root, String(f)))).filter((st) => st.isFile());
+    expect(sizes.reduce((n, st) => n + st.size, 0)).toBeLessThanOrEqual(media.MAX_TEMP_TOTAL);
+    expect(fs.existsSync(path.join(old, 'f0.vtt'))).toBe(false);
+    expect(fs.existsSync(path.join(old, 'f9.vtt'))).toBe(true);
+    fs.rmSync(old, { recursive: true, force: true });
+  });
+
   it('serves videos itself on the VM', async () => {
     process.env.CONCORD_MEDIA_REDIRECT = 'false';
     stubGitHub(release(9203, 'v-vm', 92003, 'https://dl.example/v'), {});
