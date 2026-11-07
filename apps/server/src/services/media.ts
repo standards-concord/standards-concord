@@ -169,6 +169,22 @@ export async function mediaIndex(): Promise<MediaIndex> {
 
 const downloads = new Map<string, Promise<string>>();
 
+/**
+ * On Vercel the videos aren't served through the function (a function's response is capped at a few MB, and its
+ * disk is temporary): where they are on GitHub, for a redirect. Captions, transcripts and the clip list are small,
+ * and still come from our origin (caption tracks need CORS, which GitHub doesn't send).
+ */
+export const redirectsVideos = () => !localDir() && (process.env.CONCORD_MEDIA_REDIRECT ? process.env.CONCORD_MEDIA_REDIRECT === 'true' : !!process.env.VERCEL);
+/** The largest file downloaded into a temporary disk (when videos are redirected): text files only. */
+export const MAX_TEMP_DOWNLOAD = 4 * 1024 * 1024;
+
+/** Where a release's video is on GitHub, when videos are redirected (see redirectsVideos). */
+export async function mediaRedirect(name: string): Promise<string | undefined> {
+  if (!redirectsVideos() || !isMediaName(name) || !name.endsWith('.mp4')) return undefined;
+  const index = await mediaIndex();
+  return index.release ? cached?.assets.get(name)?.url : undefined;
+}
+
 /** A local path for one of the media files, downloading it once per release if needed. */
 export async function mediaFile(name: string): Promise<string | undefined> {
   if (!isMediaName(name)) return undefined;
@@ -189,8 +205,11 @@ export async function mediaFile(name: string): Promise<string | undefined> {
       const st = fs.lstatSync(folder, { throwIfNoEntry: false });
       if (st && !st.isDirectory()) fs.unlinkSync(folder);
       fs.mkdirSync(folder, { recursive: true });
-      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60 * 1000) });
+      const small = redirectsVideos();
+      // On a temporary disk, only small files, within a request's time.
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(small ? 20_000 : 10 * 60 * 1000) });
       if (!res.ok || !res.body) throw new Error(`Downloading ${name}: HTTP ${res.status}`);
+      if (small && Number(res.headers.get('content-length') ?? 0) > MAX_TEMP_DOWNLOAD) throw new Error(`Downloading ${name}: too large to keep here`);
       const tmp = `${target}.part`;
       await pipeline(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream), fs.createWriteStream(tmp));
       fs.renameSync(tmp, target);

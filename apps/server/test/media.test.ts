@@ -219,3 +219,32 @@ describe('feature clips', () => {
     expect(index.files.some((f) => f.name.startsWith('concord-clip'))).toBe(false);
   });
 });
+
+describe('on Vercel', () => {
+  afterEach(() => {
+    delete process.env.CONCORD_MEDIA_REDIRECT;
+  });
+  // A function's response is capped at a few MB and its disk is temporary, so serving a video through it
+  // failed or filled the disk. Videos now redirect to GitHub; the small text files are still served here.
+  it('sends the videos to GitHub and keeps serving captions from our origin, refusing large downloads', async () => {
+    process.env.CONCORD_MEDIA_REDIRECT = 'true';
+    stubGitHub(release(9201, 'v-redirect', 92001, 'https://dl.example/r'), { 'https://dl.example/r': 'WEBVTT r' });
+    const media = await fresh();
+    expect(await media.mediaRedirect('concord-walkthrough.mp4')).toBe('https://dl.example/r/concord-walkthrough.mp4');
+    expect(await media.mediaRedirect('concord-walkthrough.vtt')).toBeUndefined();
+    expect(fs.readFileSync((await media.mediaFile('concord-walkthrough.vtt'))!, 'utf8')).toBe('WEBVTT r');
+    vi.stubGlobal('fetch', async (url: string) =>
+      url.startsWith('https://api.github.com/')
+        ? new Response(JSON.stringify([release(9202, 'v-big', 92002, 'https://dl.example/big')]), { status: 200 })
+        : new Response('x', { status: 200, headers: { 'content-length': String(media.MAX_TEMP_DOWNLOAD + 1) } }),
+    );
+    const again = await fresh();
+    await expect(again.mediaFile('concord-walkthrough.vtt')).rejects.toThrow(/too large/);
+  });
+
+  it('serves videos itself on the VM', async () => {
+    process.env.CONCORD_MEDIA_REDIRECT = 'false';
+    stubGitHub(release(9203, 'v-vm', 92003, 'https://dl.example/v'), {});
+    expect(await (await fresh()).mediaRedirect('concord-walkthrough.mp4')).toBeUndefined();
+  });
+});

@@ -38,7 +38,7 @@ import {
   type AdminAction,
 } from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
-import { mediaFile, mediaIndex, MEDIA_TYPES } from '../services/media.js';
+import { mediaFile, mediaIndex, mediaRedirect, MEDIA_TYPES } from '../services/media.js';
 import * as meetBot from '../services/meetBot.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -162,6 +162,8 @@ export function apiRouter(): Router {
     res.set('cache-control', 'public, max-age=300').json(index);
   });
   r.get('/media/:file', async (req, res) => {
+    const away = await mediaRedirect(String(req.params.file));
+    if (away) return void res.set('cache-control', 'public, max-age=300').redirect(302, away);
     const file = await mediaFile(String(req.params.file));
     if (!file) throw new HttpError(404, 'No such video for the current release');
     res.sendFile(file, { headers: { 'content-type': MEDIA_TYPES[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'public, max-age=3600' } });
