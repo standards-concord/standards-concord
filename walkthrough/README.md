@@ -59,6 +59,8 @@ Let's look inside. The Browse page shows the classes and their relationships…
 
 When the app changes, run `pnpm walkthrough --draft --strict`. It takes a few minutes and fails on the first step that no longer works; CI does the same on every pull request that touches the walkthrough.
 
+`pnpm walkthrough --check --strict` (what CI runs) does every step without recording, in about two and a half minutes for all four videos. It skips what only paces a video for a viewer: pauses between shots (`d.pause()`), pointer glides, typing rhythm and the coding agent's typing and thinking time. Settling waits for the page's own requests and spinners instead of fixed delays. Use `sleep()` in a scene only for a real wait, such as polling the app or letting smooth scrolling arrive, and say so in a comment (test/pace.test.ts checks this).
+
 ## Voices
 
 The script is written to be listened to, so the voice matters. In order of preference:

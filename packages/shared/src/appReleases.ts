@@ -54,7 +54,7 @@ export interface AppRelease {
 export const APP_RELEASES: AppRelease[] = [
   {
     version: '0.42.0',
-    date: '2026-11-06',
+    date: '2026-11-07',
     title: 'Ontologies checked with what they import, and federations',
     pr: 109,
     changes: [
@@ -106,6 +106,22 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['steward'],
         to: '/f',
         ask: 'Would handing terms upstream this way work for your standard?',
+      },
+    ],
+  },
+  {
+    version: '0.41.2',
+    date: '2026-11-06',
+    title: 'Concord’s own icon on the connector and in the tab',
+    pr: 106,
+    changes: [
+      {
+        id: 'concord-app-icon',
+        type: 'fix',
+        title: 'Concord’s icon on the MCP connector and the browser tab',
+        detail: 'Claude and other agents now show Concord’s plane for the Concord connector instead of a generic plug, and the browser tab shows it in every look, the ODI look included. The ODI logo stays in the ODI look’s header.',
+        roles: ['agent'],
+        to: '/connect',
       },
     ],
   },

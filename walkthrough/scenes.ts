@@ -125,7 +125,7 @@ export async function show(c: Ctx, url: string) {
 async function showClassificationAndChecks(c: Ctx) {
   if (await c.d.click(c.d.page.getByRole('button', { name: /^Level: / }), 'the level badge')) {
     await ringAround(c, /Rule-based semantic versioning classification/);
-    await sleep(3000);
+    await c.d.pause(3000);
     // Clear the ring before closing the popover it is around.
     await c.d.clearHighlight();
     await c.d.page.keyboard.press('Escape');
@@ -220,7 +220,7 @@ export const actions: Record<string, Action> = {
   async 'title-card'(c) {
     // The card stays up across the navigation, then open-hub fades it to reveal the hub.
     await c.d.chapter({ eyebrow: 'prototype', title: 'Concord', sub: 'Designing data standards together, in the open.' }, 0);
-    await sleep(900);
+    await c.d.pause(900);
     await c.d.goto(`${c.hub}/`, { keepCard: true });
   },
   async 'open-hub'(c) {
@@ -253,13 +253,13 @@ export const actions: Record<string, Action> = {
   },
   async 'open-browse'(c) {
     await c.d.goto(o(c, '/browse'));
-    await sleep(600);
+    await c.d.pause(600);
     await c.d.click(c.d.page.getByText(/^volunteering opportunity$/i), 'the VolunteeringOpportunity class');
   },
   async 'open-formats'(c, format = 'turtle') {
     await c.d.goto(o(c, `/source?format=${format}`));
     await claimFormat(c, format);
-    await sleep(800);
+    await c.d.pause(800);
     await c.d.scroll(320, 1600);
   },
   async 'show-format'(c, format) {
@@ -275,7 +275,7 @@ export const actions: Record<string, Action> = {
       await c.d.settle();
     }
     await claimFormat(c, format);
-    await sleep(700);
+    await c.d.pause(700);
     await c.d.scroll(260, 1400);
   },
   async 'open-query'(c) {
@@ -288,13 +288,13 @@ export const actions: Record<string, Action> = {
     // The assistant's query runs only when the person presses Run, after reading it.
     const prompt = c.d.page.getByTestId('query-run-prompt');
     await prompt.waitFor({ state: 'visible', timeout: 20_000 }).catch(() => c.d.warn('The query assistant wrote no query'));
-    await sleep(600);
+    await c.d.pause(600);
     await c.d.highlight(c.d.page.getByTestId('sparql-editor'), 'the SPARQL it wrote');
-    await sleep(900);
+    await c.d.pause(900);
     await c.d.clearHighlight();
     if (!(await c.d.click(prompt.getByRole('button', { name: 'Run this query' }), 'Run this query', { settle: false }))) return;
     await c.d.claimVisible(c.d.page.locator('[data-testid="query-results"] tbody tr'), 'the query returns rows', 20_000);
-    await sleep(600);
+    await c.d.pause(600);
     await c.d.scroll(380, 1500);
   },
   async 'open-use-cases'(c) {
@@ -311,7 +311,7 @@ export const actions: Record<string, Action> = {
   async 'open-first-change'(c) {
     const link = c.d.page.getByRole('main').locator(`a[href*="/changes/"]`);
     if (!(await c.d.click(link, 'the first change request'))) return;
-    await sleep(500);
+    await c.d.pause(500);
     await showClassificationAndChecks(c);
   },
   async 'highlight-governance-card'(c) {
@@ -319,7 +319,7 @@ export const actions: Record<string, Action> = {
   },
   async 'open-governance'(c) {
     await c.d.goto(o(c, '/governance'));
-    await sleep(600);
+    await c.d.pause(600);
     await ringAround(c, /Policy template/);
   },
   async 'open-releases'(c) {
@@ -330,7 +330,7 @@ export const actions: Record<string, Action> = {
     const ch = CHAPTERS[name];
     if (!ch) return c.d.warn(`No chapter "${name}"`);
     await c.d.chapter({ eyebrow: ch.eyebrow, title: ch.title, sub: ch.sub }, 0);
-    await sleep(900);
+    await c.d.pause(900);
     if (ch.at(c) === c.app.url) await gotoApp(c, { keepCard: true });
     else await c.d.goto(ch.at(c), { keepCard: true });
   },
@@ -340,7 +340,7 @@ export const actions: Record<string, Action> = {
     if (c.d.page.url() === c.app.url) await show(c, c.app.url);
     else await gotoApp(c);
     await claimAppWorks(c, false);
-    await sleep(500);
+    await c.d.pause(500);
     await c.d.pointAt(c.d.page.locator('.card').first(), 'an opportunity card');
   },
   async 'show-app-code'(c) {
@@ -358,7 +358,7 @@ export const actions: Record<string, Action> = {
     await c.mcp.connect();
     // Without the Connect page's sign-in, the hub only takes a bearer token.
     if (!oauth) c.d.warn('The hub has no OAuth sign-in, so the connector shown is not how it would connect');
-    await sleep(1600);
+    await c.d.pause(1600);
     await c.term.closeConnector('Concord');
   },
   async 'open-connect-page'(c) {
@@ -438,6 +438,7 @@ export const actions: Record<string, Action> = {
   async 'show-fork-module'(c) {
     const url = forkJsUrl(c);
     await c.d.goto(url, { settle: false });
+    // A real wait (not pacing): the module's text is read straight after.
     await sleep(500);
     c.d.claim(/class VolunteeringActivity\b/.test((await c.d.page.textContent('body').catch(() => '')) ?? ''), 'the fork module has a VolunteeringActivity class');
     await highlightModule(c);
@@ -465,18 +466,18 @@ export const actions: Record<string, Action> = {
     await gotoApp(c);
     await claimAppWorks(c, true);
     await c.d.claimVisible(c.d.page.locator('#impact'), 'a running total at the top');
-    await sleep(400);
+    await c.d.pause(400);
     await c.d.highlight(c.d.page.locator('.pill.hours'), 'hours given');
-    await sleep(2200);
+    await c.d.pause(2200);
     await c.d.highlight(c.d.page.locator('#impact'), 'your impact');
   },
   async 'log-hours'(c) {
     await c.d.clearHighlight();
     const card = c.d.page.locator('.card').filter({ hasText: /Food bank/i });
     await c.d.click(card.getByRole('button', { name: 'Log hours' }), 'the Log hours button', { settle: false });
-    await sleep(300);
+    await c.d.pause(300);
     await c.d.type(card.getByRole('spinbutton', { name: 'Hours' }), '2', 'the hours field', 6);
-    await sleep(300);
+    await c.d.pause(300);
     // "The totals update straight away": both the opportunity's total and mine.
     const num = async (l: import('@playwright/test').Locator) => Number(((await l.first().textContent({ timeout: 500 }).catch(() => '')) ?? '').match(/(\d+(?:\.\d+)?)/)?.[1] ?? 0);
     const mine = () => num(c.d.page.locator('#impact'));
@@ -491,7 +492,7 @@ export const actions: Record<string, Action> = {
     }
     c.d.claim(after.mine === before.mine + 2, `my running total goes up by 2 hours (${before.mine} → ${after.mine})`);
     c.d.claim(after.given === before.given + 2, `the food bank's hours given go up by 2 (${before.given} → ${after.given})`);
-    await sleep(500);
+    await c.d.pause(500);
     await c.d.highlight(c.d.page.locator('#impact'), 'updated');
   },
 
@@ -508,14 +509,14 @@ export const actions: Record<string, Action> = {
     c.d.claim(detail?.classification?.level === 'minor', `the change is classified minor (got ${detail?.classification?.level})`);
     c.d.claim(detail?.validation?.passed === true, 'validation passed on the proposed change');
     await c.d.goto(o(c, `/changes/${cr.id}`));
-    await sleep(500);
+    await c.d.pause(500);
     await showClassificationAndChecks(c);
   },
   async 'open-app-checks'(c) {
     await c.d.goto(o(c, '/apps'));
     // Other people's apps: the demo seeds one whose owner runs it on autopilot.
     await c.d.highlight(c.d.page.getByText('Autopilot on', { exact: true }), 'an app on autopilot', 'autopilot on');
-    await sleep(2500);
+    await c.d.pause(2500);
     await c.d.clearHighlight();
     // Connect Helping Hands and switch autopilot on. The form is centred first: scrolled only just
     // into view, its Connect button sits under the sticky header and the click lands on the header.
@@ -525,7 +526,7 @@ export const actions: Record<string, Action> = {
       .catch(() => {});
     await c.d.type(c.d.page.getByRole('textbox', { name: /App name/i }), 'Helping Hands', 'the App name field');
     await c.d.click(c.d.page.getByRole('button', { name: /^Connect app$/i }), 'the Connect app button');
-    await sleep(600);
+    await c.d.pause(600);
     await c.d.click(c.d.page.getByRole('switch', { name: /Autopilot/i }), 'the autopilot switch');
   },
   async 'post-app-check'(c) {
@@ -561,7 +562,7 @@ export const actions: Record<string, Action> = {
     await c.d.goto(o(c, `/changes/${cr.id}?view=checks`));
     await c.d.label('Simulated CI: a passing test run was reported to Concord for this demo');
     await ringAround(c, /^App checks$/);
-    await sleep(3000);
+    await c.d.pause(3000);
     await c.d.click(c.d.page.getByRole('tab', { name: /Discussion/ }), 'the Discussion tab');
     await c.d.highlight(c.d.page.getByText('Autopilot', { exact: true }), 'the Autopilot badge', 'autopilot voted yes');
   },
@@ -599,7 +600,7 @@ export const actions: Record<string, Action> = {
     c.app.classes = target;
     await editApp(c, before.replace(/from "[^"]+\/def\/[^"]+\.js";/, `from "${target}";`));
     await c.term.say('Switched to the released standard. The fork is no longer needed.');
-    await sleep(1200);
+    await c.d.pause(1200);
     await gotoApp(c);
     // "The app works exactly as before."
     await claimAppWorks(c, true);
@@ -611,7 +612,7 @@ export const actions: Record<string, Action> = {
   /* ------------------------ alpha testers (feedback.md) ------------------------ */
   async 'title-card-feedback'(c) {
     await c.d.chapter({ eyebrow: 'Concord · Alpha testing', title: 'How to take part', sub: 'Try Concord in a role, then tell us what you think.' }, 0);
-    await sleep(900);
+    await c.d.pause(900);
     await c.d.goto(`${c.hub}/welcome`, { keepCard: true });
   },
   async 'open-welcome'(c) {
@@ -622,7 +623,7 @@ export const actions: Record<string, Action> = {
     const aims = c.d.page.locator('section[aria-labelledby="what-title"]');
     await glideTo(c, aims);
     await c.d.highlight(aims, 'what Concord is for');
-    await sleep(1800);
+    await c.d.pause(1800);
     await c.d.clearHighlight();
     // "…a short tour of the whole platform"
     const tour = c.d.page.locator('#tour-title');
@@ -648,14 +649,14 @@ export const actions: Record<string, Action> = {
     await c.d.clearHighlight();
     await c.d.click(c.d.page.getByRole('link', { name: 'Start the guided walkthrough' }).last(), 'the Start the guided walkthrough button');
     await c.d.claimVisible(c.d.page.getByRole('heading', { name: 'Guided walkthrough' }), 'the guided walkthrough opens');
-    await sleep(1200);
+    await c.d.pause(1200);
     await c.d.click(c.d.page.getByRole('button', { name: /Let’s start/ }), 'the Let’s start button');
     await c.d.claimVisible(c.d.page.getByRole('heading', { name: /Pick your role/ }), 'the walkthrough moves on to picking a role');
   },
   async 'alpha-expand-role'(c) {
     const roles = c.d.page.getByRole('region');
     await c.d.highlight(c.d.page.getByRole('region', { name: 'Ontology steward' }).locator('..'), 'the roles');
-    await sleep(2600);
+    await c.d.pause(2600);
     await c.d.clearHighlight();
     const member = c.d.page.getByRole('region', { name: 'Voting member' });
     await c.d.click(member.getByRole('button').first(), 'the Voting member role');
@@ -665,7 +666,7 @@ export const actions: Record<string, Action> = {
   async 'alpha-pick-person'(c) {
     const person = c.d.page.getByRole('region', { name: 'Voting member' }).getByRole('button').nth(1);
     await c.d.highlight(person, 'a person to play');
-    await sleep(2200);
+    await c.d.pause(2200);
     await c.d.clearHighlight();
     await c.d.click(person, 'a voting member to play');
     await c.d.claimVisible(c.d.page.getByRole('heading', { name: /Explore the demo/ }), 'picking a person moves on to the tasks');
@@ -688,7 +689,7 @@ export const actions: Record<string, Action> = {
     await c.d.click(c.d.page.getByRole('button', { name: 'Keep the guide open while I explore' }), 'Keep the guide open while I explore');
     const dock = c.d.page.locator('aside', { hasText: 'Alpha walkthrough' });
     await c.d.claimVisible(dock, 'the guide stays open on the ontology page');
-    await sleep(800);
+    await c.d.pause(800);
     await c.d.highlight(dock, 'the guide');
   },
   async 'alpha-simulate'(c) {
@@ -701,7 +702,7 @@ export const actions: Record<string, Action> = {
     const body = res?.ok() ? await res.json().catch(() => undefined) : undefined;
     // "…the other participants comment, review and vote."
     c.d.claim(Array.isArray(body?.events) && body.events.length > 0, 'simulating the others makes them act');
-    await sleep(1200);
+    await c.d.pause(1200);
   },
   async 'alpha-fast-forward'(c) {
     const dock = c.d.page.locator('aside', { hasText: 'Alpha walkthrough' });
@@ -727,7 +728,7 @@ export const actions: Record<string, Action> = {
   },
   async 'start-general'(c) {
     await c.d.highlight(c.d.page.getByRole('button', { name: /Just tell us something/ }), 'Just tell us something');
-    await sleep(1400);
+    await c.d.pause(1400);
     await c.d.clearHighlight();
     await c.d.click(c.d.page.getByRole('button', { name: /Just tell us something/ }), 'Just tell us something');
     await c.d.claimVisible(c.d.page.getByPlaceholder('Type or tap the mic and talk…'), 'the feedback chat opens');
@@ -774,7 +775,7 @@ async function glideTo(c: Ctx, target: import('@playwright/test').Locator) {
     return r.top + Math.min(r.height, innerHeight * 0.7) / 2 - innerHeight / 2;
   });
   if (Math.abs(dy) > 8) await c.d.scroll(dy, Math.min(1600, 500 + Math.abs(dy)));
-  await sleep(250);
+  await c.d.pause(250);
 }
 
 /**

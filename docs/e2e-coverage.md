@@ -131,6 +131,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 | #39 | App versions, tester record in the pod, what's changed | tester-versions.spec.ts |
 | #51 | OWL 2 DL reasoning with sparq (no HermiT), in-browser re-check | reasoner.spec.ts |
 | #52 | Concord's logo (climbing two-halves plane) in every look's masthead, after the ODI logo in the ODI look; the plain plane as the tab icon | looks.spec.ts |
+| icons | Concord's plain plane as the tab icon in every look (ODI included) and as the MCP connector's icon (server info and MCP Registry listing); every icon file served; an agent that isn't signed in is refused | app-icon.spec.ts, looks.spec.ts |
 
 ## Known gaps, in priority order
 
