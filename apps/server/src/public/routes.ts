@@ -6,7 +6,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { transaction, list, HttpError } from '../db.js';
+import { get, HttpError, list, put, transaction } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { releaseForViewer } from '../services/releases.js';
@@ -277,11 +277,17 @@ export async function releasePageFiles(
 export const releaseRequirements = (project: OntologyProject, version: string) => publishedRequirements(project, version, { releasing: true });
 export const snapshotFile = (requirements: PublishedRequirements) => `${JSON.stringify(requirements, null, 2)}\n`;
 
-/** Which renderer last wrote each ontology's release pages. Kept in the data directory, never in anything served. */
-const pageStateFile = () => path.join(config.dataDir, 'public-pages.json');
-function readPageState(): Record<string, string> {
+/**
+ * Which renderer last wrote each ontology's release pages. Kept in the database (`kv public-pages`), never in
+ * anything served; it was a file in the data directory, which is read once if the row isn't there yet.
+ */
+const PAGE_STATE = 'public-pages';
+const legacyPageStateFile = () => path.join(config.dataDir, 'public-pages.json');
+async function readPageState(): Promise<Record<string, string>> {
+  const row = await get<{ id: string; state: Record<string, string> }>('kv', PAGE_STATE);
+  if (row) return { ...row.state };
   try {
-    return JSON.parse(fs.readFileSync(pageStateFile(), 'utf8')) as Record<string, string>;
+    return JSON.parse(fs.readFileSync(legacyPageStateFile(), 'utf8')) as Record<string, string>;
   } catch {
     return {};
   }
@@ -292,7 +298,7 @@ function readPageState(): Record<string, string> {
  * renderer, and holds what older versions published without approval.
  *
  * Runs at startup. An ontology whose pages weren't written by this renderer
- * (PAGE_GENERATOR, tracked in the data directory, so page content can't fake
+ * (PAGE_GENERATOR, tracked in the database, so page content can't fake
  * it) has every release page regenerated. Each release is handled on its own,
  * so one bad release can't block the others. Snapshots: a valid one is kept
  * as it is; an unreadable one is kept untouched and the page says the use
@@ -303,7 +309,7 @@ function readPageState(): Record<string, string> {
  * push to GitHub. Tags still point at the original commits.
  */
 export async function refreshReleasePages(): Promise<void> {
-  const state = readPageState();
+  const state = await readPageState();
   for (const project of await list<OntologyProject>('ontologies')) {
     // What older versions published without anyone approving it is held until a steward does (holds.ts).
     try {
@@ -354,8 +360,7 @@ export async function refreshReleasePages(): Promise<void> {
     }
   }
   try {
-    fs.mkdirSync(config.dataDir, { recursive: true });
-    fs.writeFileSync(pageStateFile(), `${JSON.stringify(state, null, 2)}\n`);
+    await put('kv', { id: PAGE_STATE, state });
   } catch (err) {
     console.warn(`[public] could not record page state: ${(err as Error).message}`);
   }
