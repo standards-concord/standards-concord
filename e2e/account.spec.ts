@@ -66,6 +66,40 @@ test.describe('account and hub', () => {
     expect((await page.request.get('/api/agent-tokens')).status()).toBe(401);
   });
 
+  // Used to go wrong (#100): going back to a page that needs sign-in straight after signing out could leave it
+  // blank (main empty, address still the page). The redirect to /login was made, but when the move back landed
+  // before the router had shown /login, the router saw no change at all, so nothing redirected again.
+  test('going back to a page that needs sign-in, straight after signing out, sends you to sign in', async ({ page }) => {
+    const name = `Back tester ${uniq()}`;
+    await signIn(page, { name, role: 'contributor' });
+    const { id } = await demoOntology(page.request);
+    const target = `/o/${id}/validate`;
+    await page.goto(target);
+    await settle(page);
+    await page.getByRole('button', { name: new RegExp(name) }).click();
+    await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
+    await expect(page.getByRole('button', { name: 'Try the demo' })).toBeVisible();
+    // Going back (without reloading) the moment the redirect to sign in is made: the timing a quick Back can hit.
+    await page.evaluate((to) => {
+      const replace = history.replaceState.bind(history);
+      let once = false;
+      history.replaceState = (data, unused, url) => {
+        replace(data, unused, url);
+        if (!once && String(url ?? '').startsWith('/login')) {
+          once = true;
+          queueMicrotask(() => {
+            history.pushState({}, '', to);
+            dispatchEvent(new PopStateEvent('popstate'));
+          });
+        }
+      };
+      history.pushState({}, '', to);
+      dispatchEvent(new PopStateEvent('popstate'));
+    }, target);
+    await expect(page).toHaveURL(new RegExp(`/login\\?next=${encodeURIComponent(target)}$`));
+    await expect(page.getByRole('button', { name: 'Try the demo' })).toBeVisible();
+  });
+
   test('the hub lists ontologies and its activity feed links to what happened', async ({ page, request }) => {
     const demo = await demoOntology(request);
     await signInAsPersona(page, 'Tom Okafor');
