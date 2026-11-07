@@ -97,10 +97,15 @@ interface AdminLoginRow {
   id: string;
   sealed: string;
   adminLoginExpires: number;
+  /** Instead of a login of its own: the own-pod login of the same sign-in (see keepAdminLogin). */
+  ref?: string;
 }
 const loadShared = async (key: string): Promise<SolidLogin | undefined> => {
   const row = await get<AdminLoginRow>('kv', adminLoginRow(key));
-  const stored = row && row.adminLoginExpires > Date.now() ? unseal<StoredLogin>('admin-login', row.sealed) : undefined;
+  if (!row || row.adminLoginExpires <= Date.now()) return undefined;
+  // The same sign-in as the administrator's own-pod login: one login, refreshed in one place (see keepAdminLogin).
+  if (row.ref) return await loadOwnPodLogin(row.ref);
+  const stored = unseal<StoredLogin>('admin-login', row.sealed);
   return stored && { ...(await importLogin(stored)), sharedId: key };
 };
 const saveShared = async (key: string, login: SolidLogin) =>
@@ -127,10 +132,18 @@ export const adminLoginsKept = () => sealingAvailable() || config.adminLoginsInM
  * Keep an administrator's Solid login for their browser session. Returns false when it can't be kept (several
  * instances and no CONCORD_ENCRYPTION_KEY): reading testers' pods is then off, rather than working on one instance only.
  */
-export async function keepAdminLogin(sessionToken: string, login: SolidLogin): Promise<boolean> {
+export async function keepAdminLogin(sessionToken: string, login: SolidLogin, opts: { sharedWith?: string } = {}): Promise<boolean> {
   const key = sessionKey(sessionToken);
   if (sealingAvailable()) {
     await removeWhereAtMost('kv', 'adminLoginExpires', Date.now());
+    // An administrator whose own pod Concord also writes to (step 5e) has one sign-in, so one refresh token, which
+    // the provider may rotate at each use: this session points at that login instead of keeping a second copy whose
+    // token the other's refresh would end.
+    if (opts.sharedWith) {
+      await put<AdminLoginRow>('kv', { id: adminLoginRow(key), sealed: '', ref: opts.sharedWith, adminLoginExpires: Date.now() + ADMIN_LOGIN_DAYS * 86_400_000 });
+      remember(key, { ...login, sharedId: opts.sharedWith });
+      return true;
+    }
     await saveShared(key, login);
     remember(key, { ...login, sharedId: key });
     return true;
@@ -338,12 +351,14 @@ export function mountAuth(router: Router) {
     if (await managedWebId(done.webId)) return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
     const { user, sessionToken } = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
     // Keep an administrator's login for this browser session (to read testers' pods as them); drop everyone else's.
-    if (isAdmin(user, 'solid')) await keepAdminLogin(sessionToken, done.login);
     // Their private data goes to their own pod, written as them (step 5e).
+    let ownLogin: string | undefined;
     if (usesOwnPod(user)) {
       const kept = await keepOwnPodLogin(user.id, done.login, done.storage);
+      if (kept === 'kept') ownLogin = `${USER_LOGIN_PREFIX}${user.id}`;
       if (kept === 'kept' && user.podUrl !== done.storage) await setPodUrl(user.id, done.storage!);
     }
+    if (isAdmin(user, 'solid')) await keepAdminLogin(sessionToken, done.login, { sharedWith: ownLogin });
     res.redirect(`${config.webUrl}${done.returnTo}`);
   });
 }

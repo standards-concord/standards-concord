@@ -182,6 +182,21 @@ describe('a Solid account’s private data in its own pod', () => {
     expect(await loadOwnPodLogin(`user:${a.id}`)).toMatchObject({ refreshToken: 'rt-secret', sharedId: `user:${a.id}` });
   });
 
+  // A Solid sign-in gives one refresh token, which a provider may rotate at each use. An administrator's session
+  // kept its own copy beside the own-pod one, so a refresh through either would have ended the other.
+  it('gives an administrator’s session the same login as their own pod, refreshed in one place', async () => {
+    const { adminLoginFor, keepAdminLogin, SESSION_COOKIE } = await import('../src/auth.js');
+    const { sessionKey } = await import('../src/solidOidc.js');
+    const a = await account();
+    const l = await login(a.webId, { refreshToken: 'rt-shared' });
+    await keepOwnPodLogin(a.id, l, a.pod);
+    const token = `admin-session-${a.id}`;
+    expect(await keepAdminLogin(token, l, { sharedWith: `user:${a.id}` })).toBe(true);
+    const row = await get<{ ref?: string; sealed: string }>('kv', `admin-login:${sessionKey(token)}`);
+    expect(row).toMatchObject({ ref: `user:${a.id}`, sealed: '' });
+    expect(await adminLoginFor({ cookies: { [SESSION_COOKIE]: token } } as never)).toMatchObject({ refreshToken: 'rt-shared', sharedId: `user:${a.id}` });
+  });
+
   it('shares the feedback folder in their own pod with the administrators', async () => {
     const a = await account();
     await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
