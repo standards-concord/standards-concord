@@ -308,13 +308,17 @@ async function readPageState(): Promise<Record<string, string>> {
  * Changes are committed to the ontology's repository and go out with its next
  * push to GitHub. Tags still point at the original commits.
  */
-export async function refreshReleasePages(): Promise<void> {
+export async function refreshReleasePages(): Promise<boolean> {
   const state = await readPageState();
+  // Whether everything was refreshed and recorded: if not, the start-up task isn't recorded as done, so it is tried
+  // again (failures are logged and the other releases still go ahead).
+  let complete = true;
   for (const project of await list<OntologyProject>('ontologies')) {
     // What older versions published without anyone approving it is held until a steward does (holds.ts).
     try {
       await holdLegacy(project);
     } catch (err) {
+      complete = false;
       console.warn(`[public] could not check ${project.slug}: ${(err as Error).message}`);
     }
     const versions = new Set(await ontologyStore.versions(project));
@@ -355,15 +359,19 @@ export async function refreshReleasePages(): Promise<void> {
         console.log(`[public] refreshed ${project.slug} release pages: ${Object.keys(changed).join(', ')}`);
       }
       if (!failed) state[project.slug] = PAGE_GENERATOR;
+      else complete = false;
     } catch (err) {
+      complete = false;
       console.warn(`[public] could not save ${project.slug} release pages: ${(err as Error).message}`);
     }
   }
   try {
     await put('kv', { id: PAGE_STATE, state });
   } catch (err) {
+    complete = false;
     console.warn(`[public] could not record page state: ${(err as Error).message}`);
   }
+  return complete;
 }
 
 /**

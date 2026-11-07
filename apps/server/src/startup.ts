@@ -59,6 +59,13 @@ export async function runStartupTasks(tasks: StartupTask[], opts: { always?: boo
     : withLease('startup', STARTUP_LEASE_MS, runAll, { wait: false, renew: true });
 }
 
+/** The tasks this deployment still has to finish (none once every one has recorded that it is done). */
+export async function unfinishedTasks(tasks: StartupTask[], appVersion = APP_VERSION): Promise<string[]> {
+  const out: string[] = [];
+  for (const t of tasks) if (!doneFor(await get<Done>('kv', `startup:${t.name}`), appVersion)) out.push(t.name);
+  return out;
+}
+
 /** The server's start-up tasks. */
 export async function defaultStartupTasks(): Promise<StartupTask[]> {
   const [{ migrateClientSecrets }, { backfillDemoAvatars }, { seedDemo }, { refreshReleasePages }, { syncFeedbackSharing }] = await Promise.all([

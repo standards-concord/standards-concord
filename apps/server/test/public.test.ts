@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { PAGE_GENERATOR, renderOntologyPage } from '../src/public/render.js';
@@ -486,6 +486,21 @@ describe('re-review fixes', () => {
     } finally {
       fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
     }
+  });
+
+  // Review r1 of step 5: a refresh that couldn't save its pages logged it and returned as if done, so the start-up
+  // task was recorded as finished and the pages were never refreshed. It now says it isn't finished.
+  it('says the refresh isn’t finished when the pages couldn’t be saved, so it is tried again', async () => {
+    await forgetPageState();
+    const spy = vi.spyOn(ontologyStore, 'updateReleaseFiles').mockRejectedValueOnce(new Error('database asleep'));
+    try {
+      expect(await refreshReleasePages()).toBe(false);
+      expect((await getDoc<{ state: Record<string, string> }>('kv', 'public-pages'))?.state.volunteering).not.toBe(PAGE_GENERATOR);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await refreshReleasePages()).toBe(true);
+    expect((await getDoc<{ state: Record<string, string> }>('kv', 'public-pages'))?.state.volunteering).toBe(PAGE_GENERATOR);
   });
 
   it('regenerates release pages from trusted state, keeps unreadable snapshots, and backfills missing ones', async () => {

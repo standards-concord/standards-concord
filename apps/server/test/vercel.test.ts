@@ -84,6 +84,45 @@ describe('the Vercel function', () => {
   });
 });
 
+describe('start-up work on a warm instance', () => {
+  // Review r1 of step 5: start-up tasks ran only when an instance started, so one that failed waited for a new
+  // instance, which a busy warm one may not see for hours. Later requests now try unfinished tasks again.
+  it('tries a start-up task that failed again on a later request, until it is done', async () => {
+    process.env.DATABASE_URL = 'postgres://configured.example/concord';
+    (config as { ontologyStore: string }).ontologyStore = 'db';
+    const name = `flaky-${Date.now()}`;
+    let runs = 0;
+    const tasks = async () => [{ name, run: async () => (++runs === 1 ? false : true) }];
+    const kept: Promise<unknown>[] = [];
+    const fn = await serve(createHandler({ waitUntil: (p) => void kept.push(p), startupTasks: tasks, startupRetryMs: 0 }));
+    try {
+      const settled = async () => {
+        while (kept.length) await Promise.all(kept.splice(0));
+      };
+      // Each request on this one instance tries again (another test's start-up work may hold the lease at first).
+      const until = async (n: number) => {
+        for (let i = 0; i < 400 && runs < n; i++) {
+          await fetch(`${fn.url}/healthz`);
+          await settled();
+          if (runs < n) await new Promise((r) => setTimeout(r, 25));
+        }
+      };
+      await until(1);
+      expect(runs).toBe(1);
+      await until(2);
+      expect(runs).toBe(2);
+      // Done now: later requests start nothing.
+      for (let i = 0; i < 3; i++) {
+        await fetch(`${fn.url}/healthz`);
+        await settled();
+      }
+      expect(runs).toBe(2);
+    } finally {
+      await fn.close();
+    }
+  });
+});
+
 describe('work that outlives its request', () => {
   // A function instance can be frozen as soon as its response is sent. Work started and not awaited (a pod mirror,
   // drafting requirements, a request to Recall.ai) is handed to Vercel's waitUntil, which keeps it running.
