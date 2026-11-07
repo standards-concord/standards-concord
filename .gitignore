@@ -14,3 +14,6 @@ walkthrough/out
 walkthrough/.cache
 ci-local-logs/
 .vercel
+
+# Built by scripts/vercel-build.mjs; never committed
+.vercel/
