@@ -8,16 +8,16 @@ The runbook for moving Concord's data from the Azure VM (SQLite and a git reposi
 
 | Command | What it does |
 | --- | --- |
-| `copy --from <data dir>` | Copies every document from `<data dir>/concord.sqlite` byte for byte (with its creation time), imports every object of every repository under `<data dir>/ontologies`, then runs `verify`. It can run again: documents are replaced and objects are added once. |
-| `verify --from <data dir>` | Checks the copy without changing it. It checks that every document matches its source. It checks that every commit a record names (the draft, forks, releases, change requests and refs) has its whole history in the database, with each object rehashed, and that `git fsck --strict` accepts it. It checks that every object in each source repository was imported, that release tags sit on their releases' commits, and that fork branches match. Then it records the `ontology-import` marker. |
-| `export --to <empty dir>` | Writes the database back out as `concord.sqlite` and a git repository per ontology, for rolling back to the VM. |
+| `copy --from <data dir>` | Copies every document from `<data dir>/concord.sqlite` byte for byte (with its creation time and order), imports every object of every repository under `<data dir>/ontologies` and records each repository's refs, then runs `verify`. Every ontology must have its repository. It can run again: documents are replaced, objects are added once (a damaged copy is replaced), and fork branches are set exactly. |
+| `verify --from <data dir>` | Checks the copy without changing it, after forgetting any earlier verification. It checks that every document matches its source, in the same order. It checks that every ontology has a repository and a working draft, and that every commit a record names (the draft, forks, releases, change requests including the head they were triaged at) and every ref of its repository has its whole history in the database, with each object rehashed. Every object in each repository, reachable or not, must be stored byte for byte, and `git fsck --strict` must accept them all. Release tags must sit on their releases' commits, and the fork branches must be exactly those the records and repository call for. Only then does it record the `ontology-import` marker. |
+| `export --to <empty dir>` | Writes the database back out as `concord.sqlite` and a git repository per ontology, for rolling back to the VM: the draft, fork branches, and the tags and branches the repository had at import, with everything they reach. Objects nothing reached at import (git would collect them anyway) aren't written. |
 
 Run it as `node --import tsx src/migrate/cli.ts …` from `apps/server`. Anything it couldn't settle but didn't treat as an error, such as a record naming a commit that isn't in the history, it prints as a note.
 
 ## Guarantees in the app
 
-- **No serving an unchecked import.** The database store won't start against a database that has ontologies but no verified `ontology-import` marker. A new, empty database is marked as having nothing to import.
-- **Read-only switch.** With `CONCORD_READ_ONLY=true`, the server answers reads but refuses every change. It returns 503 with `Retry-After: 300` for anything but GET, HEAD and OPTIONS, and its store refuses writes. It runs no timers and no start-up writes, so nothing changes the data while it is copied.
+- **No serving an unchecked import.** The database store won't start against a database that has ontologies but no verified `ontology-import` marker. The marker belongs to the database it was recorded in: copy and export leave it out, and copy, import and verify each remove it before they start. A new, empty database is marked as having nothing to import.
+- **Read-only switch.** With `CONCORD_READ_ONLY=true`, the server answers reads but refuses every change. It returns 503 with `Retry-After: 300` for anything but GET, HEAD and OPTIONS, and its store refuses writes. It runs no timers and no start-up writes, and writes nothing outside the database either: nothing goes to pods or private files (a tester's record waits for their next visit), and the git repositories are left as they are, pins and refs included. So nothing changes the data while it is copied.
 
 ## Before the day
 

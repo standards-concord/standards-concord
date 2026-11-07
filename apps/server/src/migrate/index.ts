@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
 import type { ChangeRequest, OntologyFork, OntologyProject, Release } from '@concord/shared';
-import { get, list, put, rawStore, transaction } from '../db.js';
+import { get, list, put, rawStore, remove, transaction } from '../db.js';
 import { getRef, hashObject, listRefs, parseTree, readObject, setRef, writeObject, type ObjectType } from '../services/gitdb.js';
 import type { Collection } from '../db.js';
 import type { DocStore, StoredRow } from '../store/types.js';
@@ -38,11 +38,25 @@ export interface ImportMarker {
 /** Collections only the database store has: kept by a copy, never compared with the source. */
 const TARGET_ONLY: Collection[] = ['gitObjects', 'gitRefs'];
 
+/** The verified marker belongs to the database it was recorded in: never copied, exported or compared. */
+const isMarker = (r: { collection: Collection; id: string }) => r.collection === 'kv' && r.id === IMPORT_MARKER;
+/** Every ref of each source repository, recorded at import (`kv import-refs:<slug>`), for verify and export. */
+const IMPORT_REFS = 'import-refs:';
+interface ImportRefs {
+  id: string;
+  refs: Record<string, string>;
+}
+/** Rows the import itself writes, which the source doesn't have (or needn't match): checked on their own. */
+const madeByImport = (r: { collection: Collection; id: string }) => r.collection === 'kv' && r.id.startsWith(IMPORT_REFS);
+
+/** Forgets that this database was verified: before anything changes what was verified, and before verifying again. */
+const unverify = () => remove('kv', IMPORT_MARKER);
+
 export async function copyDatabase(source: DocStore): Promise<{ rows: number }> {
-  const rows = (await source.rows()).filter((r) => !TARGET_ONLY.includes(r.collection));
+  const rows = (await source.rows()).filter((r) => !TARGET_ONLY.includes(r.collection) && !isMarker(r));
   const target = await rawStore();
   await transaction(async () => {
-    await target.clearAll(TARGET_ONLY);
+    await target.clearAll(TARGET_ONLY); // the marker too
     await target.putRows(rows);
   });
   return { rows: rows.length };
@@ -74,19 +88,23 @@ const UNUSUAL_HEADER = /^(encoding|mergetag|gpgsig|gpgsig-sha256) /m;
 export async function importHistories(dataDir: string): Promise<{ ontologies: number; objects: number; notes: string[] }> {
   const notes: string[] = [];
   let objects = 0;
+  await unverify();
   const ontologies = await list<OntologyProject>('ontologies');
   for (const p of ontologies) {
     const dir = repoDirOf(dataDir, p.slug);
-    if (!fs.existsSync(dir)) {
-      notes.push(`${p.slug}: no repository at ${dir}`);
-      continue;
-    }
+    // Every ontology the git store made has a repository: one without is a copy from the wrong directory.
+    if (!fs.existsSync(dir)) throw new Error(`${p.slug}: no repository at ${dir}`);
     let batch: { sha: string; type: ObjectType; body: Buffer }[] = [];
     const flush = async () => {
       const b = batch;
       batch = [];
       await transaction(async () => {
-        for (const o of b) await writeObject(o.type, o.body);
+        for (const o of b) {
+          // A copy left by an earlier run that doesn't match (damaged since) is replaced, not kept.
+          const had = await readObject(o.sha);
+          if (had && (had.type !== o.type || !had.body.equals(o.body))) await put('gitObjects', { id: o.sha, type: o.type, data: o.body.toString('base64') });
+          else if (!had) await writeObject(o.type, o.body);
+        }
       });
     };
     for (const o of repositoryObjects(dir)) {
@@ -101,27 +119,51 @@ export async function importHistories(dataDir: string): Promise<{ ontologies: nu
     // The working draft, if the database never recorded it (a repository older than the record): its checked-out
     // branch, as the git store reads it.
     if (!(await get('kv', `draft-head:${p.slug}`))) {
-      const sha = execFileSync('git', ['--git-dir', dir, 'rev-parse', 'HEAD']).toString().trim();
+      const sha = diskHead(dir);
+      if (!sha) throw new Error(`${p.slug}: no working draft, recorded or checked out`);
       await put('kv', { id: `draft-head:${p.slug}`, sha });
       notes.push(`${p.slug}: the working draft wasn't recorded; took its branch (${sha})`);
     }
-    // Fork branches: from the fork records (a branch on disk can lag its record after a crash); a branch with no
-    // record (a fork whose creation never finished) is kept as it is, so its name stays taken, as in the git store.
-    const forks = await list<OntologyFork>('forks', p.id);
-    const onDisk = gitRefs(dir, 'refs/heads/forks/');
-    for (const name of new Set([...forks.map((f) => `refs/heads/forks/${f.slug}`), ...onDisk.keys()])) {
-      const record = forks.find((f) => `refs/heads/forks/${f.slug}` === name);
-      const sha = record?.head ?? onDisk.get(name)!;
-      await transaction(async () => {
-        if ((await getRef(p.slug, name)) !== sha) await setRef(p.slug, name, sha);
-      });
-    }
+    // Every ref as it is on disk (tags, branches), kept for export (a rollback gets them back) and checked by verify.
+    await put<ImportRefs>('kv', { id: `${IMPORT_REFS}${p.slug}`, refs: Object.fromEntries(sourceRefs(dir)) });
+    // Fork branches, exactly: from the fork records (a branch on disk can lag its record after a crash); a branch
+    // with no record (a fork whose creation never finished) is kept as it is, so its name stays taken, as in the
+    // git store; anything else (a ref from an earlier copy) goes.
+    const want = await expectedForkRefs(p, dir);
+    await transaction(async () => {
+      for (const r of await listRefs(p.slug)) if (!want.has(r.name)) await setRef(p.slug, r.name, undefined);
+      for (const [name, sha] of want) if ((await getRef(p.slug, name)) !== sha) await setRef(p.slug, name, sha);
+    });
   }
   return { ontologies: ontologies.length, objects, notes };
 }
 
+/** The commit the repository has checked out, if any. */
+const diskHead = (dir: string) => {
+  try {
+    return execFileSync('git', ['--git-dir', dir, 'rev-parse', '-q', '--verify', 'HEAD^{commit}'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() || undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/** A repository's refs, but not the git store's short-lived pins (writers' commits waiting to be drafted). */
+const sourceRefs = (dir: string) => new Map([...gitRefs(dir, '')].filter(([name]) => !name.startsWith('refs/concord/commits/') && !name.startsWith('refs/concord/fork-pins/')));
+
+/** The fork branches the database store must have: each record's head, and branches on disk with no record. */
+async function expectedForkRefs(p: OntologyProject, dir: string | undefined): Promise<Map<string, string>> {
+  const want = new Map<string, string>();
+  if (dir) for (const [name, sha] of gitRefs(dir, 'refs/heads/forks/')) want.set(name, sha);
+  for (const f of await list<OntologyFork>('forks', p.id)) {
+    const name = `refs/heads/forks/${f.slug}`;
+    if (f.head) want.set(name, f.head);
+    else if (!want.has(name) && (await getRef(p.slug, name))) want.set(name, (await getRef(p.slug, name))!);
+  }
+  return want;
+}
+
 function gitRefs(dir: string, prefix: string): Map<string, string> {
-  const out = execFileSync('git', ['--git-dir', dir, 'for-each-ref', '--format=%(refname) %(objectname)', prefix]).toString();
+  const out = execFileSync('git', ['--git-dir', dir, 'for-each-ref', '--format=%(refname) %(objectname)', ...(prefix ? [prefix] : [])]).toString();
   return new Map(
     out
       .split('\n')
@@ -136,7 +178,9 @@ async function namedCommits(p: OntologyProject): Promise<Map<string, string>> {
   const add = (sha: string | undefined, why: string) => {
     if (sha) named.set(sha, named.has(sha) ? `${named.get(sha)}, ${why}` : why);
   };
-  add((await get<{ sha?: string }>('kv', `draft-head:${p.slug}`))?.sha, 'the working draft');
+  const draft = (await get<{ sha?: string }>('kv', `draft-head:${p.slug}`))?.sha;
+  if (!draft) throw new Error(`${p.slug}: has no working draft`);
+  add(draft, 'the working draft');
   for (const f of await list<OntologyFork>('forks', p.id)) {
     add(f.head, `fork ${f.slug}`);
     add(f.baseCommit, `fork ${f.slug}'s base`);
@@ -145,6 +189,7 @@ async function namedCommits(p: OntologyProject): Promise<Map<string, string>> {
   for (const cr of await list<ChangeRequest>('changeRequests', p.id)) {
     add(cr.baseCommit, `change request ${cr.id}`);
     add(cr.mergedCommit, `change request ${cr.id}`);
+    add(cr.triagedHead, `change request ${cr.id} (triaged)`);
   }
   for (const ref of await listRefs(p.slug)) add(ref.sha, ref.name);
   return named;
@@ -184,55 +229,84 @@ function writeRepository(dir: string, objects: Map<string, { type: ObjectType; b
 
 export async function verifyImport(source: DocStore | undefined, dataDir: string | undefined): Promise<ImportMarker> {
   const notes: string[] = [];
-  // The documents, row for row, against their source.
+  // Whatever was verified before no longer counts: only a verification that finishes leaves a marker.
+  await unverify();
+  // The documents, row for row and in the same order (list() breaks ties between equal creation times by
+  // insertion order), against their source.
   if (source) {
-    const want = (await source.rows()).filter((r) => !TARGET_ONLY.includes(r.collection));
-    const have = new Map((await (await rawStore()).rows()).map((r) => [`${r.collection} ${r.id}`, r] as [string, StoredRow]));
+    const compared = (r: StoredRow) => !TARGET_ONLY.includes(r.collection) && !isMarker(r) && !madeByImport(r);
+    const key = (r: StoredRow) => `${r.collection} ${r.id}`;
+    const want = (await source.rows()).filter(compared);
+    const haveRows = (await (await rawStore()).rows()).filter(compared);
+    const have = new Map(haveRows.map((r) => [key(r), r] as [string, StoredRow]));
     for (const r of want) {
-      const t = have.get(`${r.collection} ${r.id}`);
+      const t = have.get(key(r));
       if (!t || t.data !== r.data || t.parent !== r.parent || t.createdAt !== r.createdAt) throw new Error(`${r.collection} ${r.id} doesn't match its source`);
-      have.delete(`${r.collection} ${r.id}`);
+      have.delete(key(r));
     }
-    const extra = [...have.values()].filter((r) => !TARGET_ONLY.includes(r.collection) && r.id !== IMPORT_MARKER);
+    // The one row an import may add: a working draft the source never recorded, taken from its repository.
+    const extra = [];
+    for (const r of have.values()) {
+      const slug = r.collection === 'kv' && r.id.startsWith('draft-head:') ? r.id.slice('draft-head:'.length) : undefined;
+      const sha = slug && dataDir && fs.existsSync(repoDirOf(dataDir, slug)) ? diskHead(repoDirOf(dataDir, slug)) : undefined;
+      if (!sha || (JSON.parse(r.data) as { sha?: string }).sha !== sha) extra.push(r);
+    }
     if (extra.length) throw new Error(`${extra.length} document(s) aren't in the source, such as ${extra[0].collection} ${extra[0].id}`);
+    const order = new Set(want.map(key));
+    const got = haveRows.map(key).filter((k) => order.has(k));
+    const i = want.findIndex((r, n) => key(r) !== got[n]);
+    if (i >= 0) throw new Error(`the documents aren't in their source's order, from ${key(want[i])}`);
   }
   const ontologies = await list<OntologyProject>('ontologies');
   let objects = 0;
   const scratch = fs.mkdtempSync(path.join(tmpdir(), 'concord-verify-'));
   try {
     for (const p of ontologies) {
+      const src = dataDir ? repoDirOf(dataDir, p.slug) : undefined;
+      if (src && !fs.existsSync(src)) throw new Error(`${p.slug}: no repository at ${src}`);
       const named = await namedCommits(p);
-      const all = await closure(named.keys()).catch((err: Error) => {
-        throw new Error(`${p.slug}: ${err.message} (needed by ${[...named].map(([, why]) => why).join('; ')})`);
+      const imported = (await get<ImportRefs>('kv', `${IMPORT_REFS}${p.slug}`))?.refs ?? {};
+      const all = await closure([...named.keys(), ...Object.values(imported)]).catch((err: Error) => {
+        throw new Error(`${p.slug}: ${err.message} (needed by ${[...named].map(([, why]) => why).join('; ')}, or a ref from its repository)`);
       });
       for (const [sha, why] of named) if (all.get(sha)?.type !== 'commit') throw new Error(`${p.slug}: ${sha} (${why}) isn't a commit`);
+      if (src) {
+        // Its refs, as recorded for export, are the ones it has now.
+        const now = Object.fromEntries(sourceRefs(src));
+        if (JSON.stringify(Object.entries(now).sort()) !== JSON.stringify(Object.entries(imported).sort())) throw new Error(`${p.slug}: its repository's refs changed since the import (copy again)`);
+        // Every object the repository has, byte for byte (a corrupted copy left by an earlier run doesn't count as
+        // there), including those no ref reaches, so git checks them too.
+        for (const o of repositoryObjects(src)) {
+          const t = await readObject(o.sha);
+          if (!t) throw new Error(`${p.slug}: ${o.type} ${o.sha} from its repository wasn't imported`);
+          if (t.type !== o.type || !t.body.equals(o.body) || hashObject(t.type, t.body) !== o.sha) throw new Error(`${p.slug}: ${o.type} ${o.sha} doesn't match its repository's copy`);
+          all.set(o.sha, t);
+        }
+        const releases = await list<Release>('releases', p.id);
+        for (const [name] of gitRefs(src, 'refs/tags/')) {
+          const at = execFileSync('git', ['--git-dir', src, 'rev-parse', `${name}^{commit}`]).toString().trim();
+          const r = releases.find((x) => `refs/tags/v${x.version}` === name);
+          if (r && r.commit !== at) throw new Error(`${p.slug}: ${name} is on ${at}, but release ${r.version} is ${r.commit}`);
+        }
+        for (const [name, sha] of gitRefs(src, 'refs/heads/forks/')) {
+          const head = (await list<OntologyFork>('forks', p.id)).find((f) => `refs/heads/forks/${f.slug}` === name)?.head;
+          if (head && head !== sha) notes.push(`${p.slug}: ${name} was at ${sha} on disk; it is at its record's head ${head}`);
+        }
+      }
+      // The fork branches, exactly: none missing, none moved, none left over from an earlier copy.
+      const want = await expectedForkRefs(p, src);
+      const have = new Map((await listRefs(p.slug)).map((r) => [r.name, r.sha] as [string, string]));
+      for (const [name, sha] of want) if (have.get(name) !== sha) throw new Error(`${p.slug}: ${name} is ${have.get(name) ? `at ${have.get(name)}` : 'missing'}, not at ${sha}`);
+      for (const name of have.keys()) if (!want.has(name)) throw new Error(`${p.slug}: ${name} has no fork record or branch to come from`);
       objects += all.size;
       // git itself must accept every object and link.
-      const refs = new Map([...named.keys()].map((sha, i) => [`refs/concord/verify/${i}`, sha] as [string, string]));
+      const refs = new Map([...named.keys(), ...Object.values(imported)].map((sha, i) => [`refs/concord/verify/${i}`, sha] as [string, string]));
       const dir = path.join(scratch, p.slug);
       writeRepository(dir, all, refs);
       try {
         execFileSync('git', ['--git-dir', dir, 'fsck', '--strict', '--no-dangling', '--no-progress'], { stdio: 'pipe' });
       } catch (err) {
         throw new Error(`${p.slug}: git fsck refused the imported history: ${String((err as { stderr?: Buffer }).stderr ?? err).trim()}`);
-      }
-      // Against the source repository: every object it has, and its release tags on the releases' commits.
-      if (dataDir) {
-        const src = repoDirOf(dataDir, p.slug);
-        if (fs.existsSync(src)) {
-          for (const o of repositoryObjects(src)) if (!(await readObject(o.sha))) throw new Error(`${p.slug}: ${o.type} ${o.sha} from its repository wasn't imported`);
-          const releases = await list<Release>('releases', p.id);
-          for (const [name] of gitRefs(src, 'refs/tags/')) {
-            const at = execFileSync('git', ['--git-dir', src, 'rev-parse', `${name}^{commit}`]).toString().trim();
-            const r = releases.find((x) => `refs/tags/v${x.version}` === name);
-            if (r && r.commit !== at) throw new Error(`${p.slug}: ${name} is on ${at}, but release ${r.version} is ${r.commit}`);
-          }
-          for (const [name, sha] of gitRefs(src, 'refs/heads/forks/')) {
-            const ref = await getRef(p.slug, name);
-            if (!ref) throw new Error(`${p.slug}: ${name} wasn't imported`);
-            if (ref !== sha) notes.push(`${p.slug}: ${name} was at ${sha} on disk; it is at its record's head ${ref}`);
-          }
-        }
       }
       // Anything else in this ontology's records that looks like a commit id and isn't one.
       for (const c of ['useCases', 'meetings', 'changeRequests', 'forks', 'releases'] as Collection[])
@@ -261,10 +335,17 @@ export async function importVerified(): Promise<boolean> {
   });
 }
 
+/** The documents an export writes to SQLite: everything but stored git objects and refs, and the marker. */
+export async function exportRows(): Promise<StoredRow[]> {
+  return (await (await rawStore()).rows()).filter((r) => !TARGET_ONLY.includes(r.collection) && !isMarker(r));
+}
+
 /**
  * Writes each ontology's history from the database into a git repository under `dataDir/ontologies`, for rolling
- * back to the VM's git store: every object its records name, the draft (refs/concord/draft and main) and fork
- * branches. The git store's start-up sync then checks out the draft and makes release tags, as after a crash.
+ * back to the VM's git store: the draft (refs/concord/draft and main), fork branches, and every other ref its
+ * repository had at import (tags, other branches), with everything they reach. The git store's start-up sync then
+ * checks out the draft and makes tags for releases published since, as after a crash. Objects no ref reached at
+ * import (dangling ones, which git would collect anyway) aren't written.
  */
 export async function exportHistories(dataDir: string): Promise<{ ontologies: number; objects: number }> {
   let objects = 0;
@@ -272,13 +353,16 @@ export async function exportHistories(dataDir: string): Promise<{ ontologies: nu
   for (const p of ontologies) {
     const dir = path.join(dataDir, 'ontologies', p.slug);
     if (fs.existsSync(dir)) throw new Error(`${dir} already exists: export into an empty data directory`);
-    const all = await closure((await namedCommits(p)).keys());
     const draft = (await get<{ sha?: string }>('kv', `draft-head:${p.slug}`))?.sha;
-    const refs = new Map((await listRefs(p.slug)).map((r) => [r.name, r.sha] as [string, string]));
+    const refs = new Map<string, string>();
+    for (const [name, sha] of Object.entries((await get<ImportRefs>('kv', `${IMPORT_REFS}${p.slug}`))?.refs ?? {}))
+      if (!name.startsWith('refs/heads/forks/') && name !== 'refs/heads/main' && name !== 'refs/concord/draft') refs.set(name, sha);
+    for (const r of await listRefs(p.slug)) refs.set(r.name, r.sha);
     if (draft) {
       refs.set('refs/concord/draft', draft);
       refs.set('refs/heads/main', draft);
     }
+    const all = await closure([...(await namedCommits(p)).keys(), ...refs.values()]);
     fs.mkdirSync(dir, { recursive: true });
     const gitDir = path.join(dir, '.git');
     writeRepository(gitDir, all, refs);

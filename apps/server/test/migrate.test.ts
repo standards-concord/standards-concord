@@ -9,6 +9,10 @@ import type { OntologyProject } from '@concord/shared';
 import { config } from '../src/config.js';
 import { closeDb, get, openDb, put, rawStore, readOnlyStore, ReadOnlyError, remove } from '../src/db.js';
 import { copyDatabase, exportHistories, IMPORT_MARKER, importHistories, importVerified, verifyImport } from '../src/migrate/index.js';
+import { mirrorToPod } from '../src/services/alpha.js';
+import { setRef } from '../src/services/gitdb.js';
+import { solid } from '../src/services/solid.js';
+import type { StoredRow } from '../src/store/types.js';
 import { readCommit } from '../src/services/gitdb.js';
 import { gitStore } from '../src/services/ontologyStore.js';
 import { dbStore } from '../src/services/ontologyStoreDb.js';
@@ -113,6 +117,134 @@ describe('moving a database to the database-backed ontology store', () => {
     }
   });
 
+  // Review r1 of #118: each of these used to pass verification (or be lost on export).
+  const repo = () => path.join(config.dataDir, 'ontologies', p.slug);
+  const inRepo = (...args: string[]) => execFileSync('git', ['-C', repo(), '-c', 'user.name=Tester', '-c', 'user.email=tester@example.org', ...args]).toString().trim();
+  const recopy = async () => {
+    await copyDatabase(source);
+    await importHistories(config.dataDir);
+    return verifyImport(source, config.dataDir);
+  };
+
+  it('never takes a verified marker from the source, and forgets its own before verifying again', async () => {
+    // An exported database carried its marker, so copying it back counted as verified before anything was checked.
+    await source.put('kv', { id: IMPORT_MARKER, verifiedAt: '2026-01-01T00:00:00Z', ontologies: 1, objects: 1, notes: [] });
+    try {
+      await copyDatabase(source);
+      expect(await importVerified()).toBe(false);
+    } finally {
+      await source.remove('kv', IMPORT_MARKER);
+    }
+    await recopy();
+    // A verification that fails leaves no marker behind, not the last one.
+    const r = (await get<{ id: string; title: string }>('ontologies', p.id))!;
+    await put('ontologies', { ...r, title: 'Changed after the copy' });
+    await expect(verifyImport(source, config.dataDir)).rejects.toThrow(`doesn't match its source`);
+    expect(await get('kv', IMPORT_MARKER)).toBeUndefined();
+    await recopy();
+  });
+
+  it('refuses a damaged copy of an object no record names, and an import mends it', async () => {
+    // Only objects reachable from named commits were rehashed, so a damaged dangling object or tag passed.
+    const blob = execFileSync('git', ['-C', repo(), 'hash-object', '-w', '--stdin'], { input: 'nothing points here\n' }).toString().trim();
+    await importHistories(config.dataDir);
+    await put('gitObjects', { id: blob, type: 'blob', data: Buffer.from('damaged').toString('base64') });
+    await expect(verifyImport(source, config.dataDir)).rejects.toThrow(`blob ${blob} doesn't match its repository's copy`);
+    await recopy();
+  });
+
+  it('refuses an ontology whose repository is missing', async () => {
+    // A missing repository was only a note, so an ontology could be verified with no history at all.
+    const aside = `${repo()}-aside`;
+    fs.renameSync(repo(), aside);
+    try {
+      await expect(importHistories(config.dataDir)).rejects.toThrow(`${p.slug}: no repository`);
+      await expect(verifyImport(source, config.dataDir)).rejects.toThrow(`${p.slug}: no repository`);
+    } finally {
+      fs.renameSync(aside, repo());
+    }
+    await recopy();
+  });
+
+  it('checks fork branches exactly: a moved, missing or left-over one is refused, and an import puts them right', async () => {
+    // Any existing ref passed, a stale one survived re-copies, and export wrote it.
+    await setRef(p.slug, 'refs/heads/forks/f', firstRelease);
+    await expect(verifyImport(source, config.dataDir)).rejects.toThrow(`refs/heads/forks/f is at ${firstRelease}, not at ${synced}`);
+    await setRef(p.slug, 'refs/heads/forks/f', synced);
+    await setRef(p.slug, 'refs/heads/forks/ghost', synced);
+    await expect(verifyImport(source, config.dataDir)).rejects.toThrow('refs/heads/forks/ghost has no fork record');
+    await importHistories(config.dataDir);
+    await expect(verifyImport(source, config.dataDir)).resolves.toMatchObject({ id: IMPORT_MARKER });
+  });
+
+  it('needs the history of every commit a change request names, including the head it was triaged at', async () => {
+    const missing = 'ab'.repeat(20);
+    await source.put('changeRequests', { id: `${p.id}-triaged`, ontologyId: p.id, triagedHead: missing }, p.id);
+    try {
+      await copyDatabase(source);
+      await importHistories(config.dataDir);
+      await expect(verifyImport(source, config.dataDir)).rejects.toThrow(new RegExp(`object ${missing} is missing .*\\(triaged\\)`));
+    } finally {
+      await source.remove('changeRequests', `${p.id}-triaged`);
+    }
+    await recopy();
+  });
+
+  it('refuses an extra document called ontology-import outside kv, and documents out of their source’s order', async () => {
+    await put('users', { id: IMPORT_MARKER, name: 'Not the marker' });
+    await expect(verifyImport(source, config.dataDir)).rejects.toThrow(`users ${IMPORT_MARKER}`);
+    await remove('users', IMPORT_MARKER);
+    // Two documents created in the same millisecond: list() orders them by insertion, so the copy must too.
+    const at = '2026-02-02 02:02:02.002';
+    const row = (id: string): StoredRow => ({ collection: 'kv', id, parent: null, data: JSON.stringify({ id }), createdAt: at });
+    await source.putRows([row('order-a'), row('order-b')]);
+    try {
+      await recopy();
+      const target = await rawStore();
+      await target.remove('kv', 'order-a');
+      await target.putRows([(await source.rows()).find((r) => r.id === 'order-a')!]);
+      await expect(verifyImport(source, config.dataDir)).rejects.toThrow("aren't in their source's order, from kv order-a");
+    } finally {
+      await source.remove('kv', 'order-a');
+      await source.remove('kv', 'order-b');
+    }
+    await recopy();
+  });
+
+  it('accepts the working draft an import takes from the repository when the source never recorded it', async () => {
+    // The import adds this row for a repository older than the record, and verify then refused it as extra.
+    const original = (await source.rows()).find((r) => r.collection === 'kv' && r.id === `draft-head:${p.slug}`)!;
+    await source.remove('kv', original.id);
+    try {
+      const marker = await recopy();
+      expect(marker.id).toBe(IMPORT_MARKER);
+      expect(await get('kv', original.id)).toMatchObject({ sha: inRepo('rev-parse', 'HEAD') });
+    } finally {
+      await source.putRows([original]);
+    }
+    await recopy();
+  });
+
+  it('exports the repository’s other tags and branches too, as they were', async () => {
+    // Only fork branches and named commits were written back, so a rollback lost other refs and their history.
+    inRepo('tag', '-a', 'workshop-notes', '-m', 'Notes from the workshop', firstRelease);
+    inRepo('branch', 'experiment', firstRelease);
+    const out = fs.mkdtempSync(path.join(tmpdir(), 'concord-export-'));
+    try {
+      await expect(verifyImport(source, config.dataDir)).rejects.toThrow('refs changed since the import');
+      await recopy();
+      await exportHistories(out);
+      const git = (...args: string[]) => execFileSync('git', ['--git-dir', path.join(out, 'ontologies', p.slug, '.git'), ...args]).toString().trim();
+      expect(git('rev-parse', 'refs/tags/workshop-notes')).toBe(inRepo('rev-parse', 'refs/tags/workshop-notes'));
+      expect(git('rev-parse', 'refs/heads/experiment')).toBe(firstRelease);
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+      inRepo('tag', '-d', 'workshop-notes');
+      inRepo('branch', '-D', 'experiment');
+    }
+    await recopy();
+  });
+
   it('serves an imported database only once its import is verified; an empty one is marked as having nothing to import', async () => {
     await remove('kv', IMPORT_MARKER);
     expect(await importVerified()).toBe(false);
@@ -134,6 +266,26 @@ describe('read-only while moving (CONCORD_READ_ONLY)', () => {
     await expect(store.putRows([])).rejects.toBeInstanceOf(ReadOnlyError);
     expect(await store.get('kv', IMPORT_MARKER)).toBeDefined();
     expect(await store.transaction(async () => await store.get('kv', IMPORT_MARKER))).toBeDefined();
+  });
+
+  // Review r1 of #118: GETs could still write elsewhere than the database (a tester's record mirrored to their
+  // pod, pins pruned and refs moved in the repositories) before anything refused.
+  it('writes nothing outside the database either: no pod or private files, no repository changes', async () => {
+    (config as { readOnly: boolean }).readOnly = true;
+    try {
+      const userId = `read-only-${Date.now()}`;
+      await expect(solid.write(userId, 'concord/test.ttl', '<urn:a> <urn:b> <urn:c> .')).rejects.toBeInstanceOf(ReadOnlyError);
+      await mirrorToPod({ id: userId, name: 'Reader' } as never);
+      expect(fs.existsSync(path.join(config.dataDir, 'private', userId))).toBe(false);
+      const stamp = path.join(config.dataDir, 'ontologies', p.slug, '.git', 'concord-synced');
+      const before = fs.existsSync(stamp) ? fs.readFileSync(stamp, 'utf8') : undefined;
+      if (before !== undefined) fs.rmSync(stamp);
+      await gitStore.ensureSynced(p);
+      expect(fs.existsSync(stamp)).toBe(false); // nothing re-synced, re-pinned or moved
+      if (before !== undefined) fs.writeFileSync(stamp, before);
+    } finally {
+      (config as { readOnly: boolean }).readOnly = false;
+    }
   });
 
   it('turns away requests that change something, with a time to try again, and answers the rest', async () => {

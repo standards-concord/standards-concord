@@ -53,6 +53,13 @@ export class ReadOnlyError extends Error {
     super('Concord is read-only for a few minutes while it moves to a new home. Try again shortly.');
   }
 }
+/**
+ * Refuses a change that isn't to the database (a pod, private files, git refs) while Concord is read-only: the
+ * store's own refusal comes too late for work that writes elsewhere first.
+ */
+export function refuseWhenReadOnly() {
+  if (config.readOnly) throw new ReadOnlyError();
+}
 const WRITES = new Set(['put', 'remove', 'take', 'claim', 'insertOnce', 'removeWhereAtMost', 'clearAll', 'putRows', 'scrubFreeSpace']);
 /** The store, refusing every write (reads and transactions of reads still work). */
 export const readOnlyStore = (s: DocStore): DocStore =>

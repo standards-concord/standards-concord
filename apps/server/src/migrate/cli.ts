@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { closeDb, openDb, rawStore } from '../db.js';
+import { closeDb, openDb } from '../db.js';
 import { openStore } from '../store/index.js';
-import { copyDatabase, exportHistories, importHistories, verifyImport } from './index.js';
+import { copyDatabase, exportHistories, exportRows, importHistories, verifyImport } from './index.js';
 
 /**
  * The cutover tool (docs/cutover.md). The database it writes to or reads from is DATABASE_URL (Neon).
@@ -31,7 +31,7 @@ try {
   if (command === 'export') {
     if (fs.existsSync(sqliteFile) || fs.existsSync(path.join(dir, 'ontologies'))) throw new Error(`${dir} already has a database or repositories: export into an empty directory`);
     const target = await openStore({ kind: 'sqlite', file: sqliteFile });
-    const rows = (await (await rawStore()).rows()).filter((r) => r.collection !== 'gitObjects' && r.collection !== 'gitRefs');
+    const rows = await exportRows();
     await target.putRows(rows);
     await target.close();
     const h = await exportHistories(dir);
