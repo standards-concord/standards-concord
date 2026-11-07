@@ -686,6 +686,40 @@ describe('fourth review: one process, retriage, change request copies, simulatio
     expect(results.filter((r) => r === 'refused')).toHaveLength(5);
   }, 30_000);
 
+  // Review r1 of step 5: the final consent check covered withheld requests and the requirements document, not the
+  // use cases in the requirements.json snapshot. With no document (its preparation failed) the snapshot still lists
+  // the public use cases, and an instance whose consent lease lapsed could publish one withdrawn meanwhile.
+  it('publishing a release stops if a use case in its snapshot stopped being public, even with no document', async () => {
+    const { draftRelease, publishRelease } = await import('../src/services/releases.js');
+    const author = await login('contributor', 'Snapshot Race Author');
+    const id = await useCaseVia(author, 'Snapshot race case', 'public');
+    await login('steward', 'Snapshot Race Steward');
+    const steward = await userNamed('Snapshot Race Steward');
+    const r = await draftRelease((await findProject(demoId))!, steward, 'snapshot-race');
+    let committed: Record<string, string> = {};
+    const realWorking = ontologyStore.working.bind(ontologyStore);
+    const working = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      if (new Error().stack?.includes('prepareForRelease')) throw new Error('no document this time');
+      return realWorking(p);
+    });
+    const real = ontologyStore.writeRelease.bind(ontologyStore);
+    const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementation(async (...args: Parameters<typeof ontologyStore.writeRelease>) => {
+      committed = args[3];
+      // Another instance, finding the consent lease lapsed, makes the use case private before the commit.
+      await put('useCases', { ...(await getUseCase(id)), visibility: 'private' }, demoId);
+      return real(...args);
+    });
+    try {
+      await expect(publishRelease(r, steward)).rejects.toMatchObject({ status: 409 });
+      expect(committed['USE_CASES.md']).toBeUndefined();
+      expect(committed['requirements.json']).toMatch(/Snapshot race case/);
+      expect((await get<Release>('releases', r.id))?.status).not.toBe('published');
+    } finally {
+      spy.mockRestore();
+      working.mockRestore();
+    }
+  });
+
   it('publishing a release holds back a withdrawal until its files are committed (finding 1)', async () => {
     const { draftRelease, publishRelease } = await import('../src/services/releases.js');
     const author = await login('contributor', 'Release Race Author');
@@ -747,6 +781,28 @@ describe('fourth review: one process, retriage, change request copies, simulatio
       const read = await outsider.get(`/api/change-requests/${cr.id}`);
       expect(read.status).toBe(200);
       expect(read.text).not.toMatch(/Synthesis lock case/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Review r1 of step 5: consent was checked before createChangeRequest, whose saving transaction didn't check
+  // again, so an instance whose consent lease had run out could store a request after another withdrew its source.
+  it('drafting stores nothing if a source stopped being public after the last check, even past the consent lease', async () => {
+    const author = await login('contributor', 'Lapsed Lease Author');
+    const id = await useCaseVia(author, 'Lapsed lease case', 'public');
+    await login('editor', 'Lapsed Lease Editor');
+    let calls = 0;
+    const real = ontologyStore.working.bind(ontologyStore);
+    const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      // The second read is createChangeRequest's, after synthesis checked its sources: another instance, finding
+      // the consent lease lapsed, makes the use case private.
+      if (++calls === 2) await put('useCases', { ...(await getUseCase(id)), visibility: 'private' }, demoId);
+      return real(p);
+    });
+    try {
+      await expect(synthesise((await findProject(demoId))!, await userNamed('Lapsed Lease Editor'), [id])).rejects.toMatchObject({ status: 409 });
+      expect((await list<ChangeRequest>(demoId)).some((c) => c.origin?.type === 'synthesis' && c.origin.useCaseIds.includes(id))).toBe(false);
     } finally {
       spy.mockRestore();
     }

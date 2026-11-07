@@ -1293,8 +1293,9 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
   // From the consent check to the change request being stored, no use case can be withdrawn (it waits).
   return withConsentLock(project.id, async () => {
     // The model can take a while: if a use case was withdrawn or made non-public meanwhile, nothing is drafted from it.
-    if (await someAsync(ucs, async (u) => { const now = await get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !await canSee(now, actor); }))
-      throw new HttpError(409, 'A use case changed while the changes were being drafted (it may have been withdrawn). Try again.');
+    const changed = () => someAsync(ucs, async (u) => { const now = await get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !await canSee(now, actor); });
+    const CHANGED = 'A use case changed while the changes were being drafted (it may have been withdrawn). Try again.';
+    if (await changed()) throw new HttpError(409, CHANGED);
     // The ontology is published, but use cases may be private: its annotations cite use cases only by
     // their (sign-in only) link. Nothing here is rewritten: the request is published only once an editor
     // approves exactly what it publishes (approvePublication in changeRequests.ts).
@@ -1307,6 +1308,11 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
       ops: proposalToOps(graph, value.terms, sources).ops,
       tests: value.competencyQuestionTests,
       analysis: { summary: value.summary, rationale: value.rationale, risks: value.risks, recommendation: 'change-ontology' },
+      // Checked once more in the transaction that stores the request: if the consent lease ran out (a stalled
+      // instance) and a use case was withdrawn meanwhile, nothing is stored.
+      atSave: async () => {
+        if (await changed()) throw new HttpError(409, CHANGED);
+      },
     });
     // Carry the drafted SPARQL back onto the use cases so the tests keep running on every future change.
     // Each use case is read again and only the fields synthesis owns are changed, so an edit or
