@@ -216,10 +216,16 @@ export function mirrorToPod(user: User): Promise<void> {
 
 /** Tries at replacing the copy before leaving it to the next change or visit. */
 const MIRROR_TRIES = 4;
+/**
+ * The revision a Concord testing record names, or 0 for anything else: a document is only taken for Concord's own
+ * record when it says it is one (its type), not just because it has a `revision` (a person's own JSON might).
+ */
 const revisionOf = (bytes: Buffer): number => {
   try {
-    const r = (JSON.parse(bytes.toString('utf8')) as Partial<RecordDoc>).revision;
-    return typeof r === 'number' && Number.isFinite(r) ? r : 0;
+    const d = JSON.parse(bytes.toString('utf8')) as Partial<RecordDoc> | null;
+    if (!d || typeof d !== 'object' || d['@type'] !== 'concord:AlphaTestingRecord') return 0;
+    const r = d.revision;
+    return typeof r === 'number' && Number.isFinite(r) && r > 0 ? r : 0;
   } catch {
     return 0;
   }
@@ -242,7 +248,7 @@ async function mirrorNow(user: User): Promise<void> {
       // The first time, a document already at the record's path (one this server didn't write) is kept, byte for
       // byte, beside it, and the record only replaces exactly that version (or only creates, if nothing was there).
       // If the pod can't say, or the document changes in between, nothing is written and it's tried again later.
-      // A record another instance already copied there (it names its revision) isn't kept aside, and is only
+      // A record another instance already copied there (a Concord testing record naming its revision) isn't kept aside, and is only
       // replaced by a newer revision: this instance may have read its history before that copy was made.
       const when = await solid.keepExisting(user.id, RECORD, { ours: (b) => revisionOf(b) > 0 });
       const there = when.existing ? revisionOf(when.existing) : 0;

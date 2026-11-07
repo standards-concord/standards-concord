@@ -265,7 +265,7 @@ describe('the pod mirror queue', () => {
     return vi.spyOn(solid, 'readTagged').mockImplementationOnce(async (id, rel) => {
       const seen = await real(id, rel);
       // Between this server's read and its write, another server replaces the copy.
-      await solid.writeExisting(id, rel, JSON.stringify({ revision, versions: versions.map((version) => ({ version })) }), 'application/ld+json', { ifMatch: seen.tag! });
+      await solid.writeExisting(id, rel, JSON.stringify({ '@type': 'concord:AlphaTestingRecord', revision, versions: versions.map((version) => ({ version })) }), 'application/ld+json', { ifMatch: seen.tag! });
       return seen;
     });
   };
@@ -289,7 +289,7 @@ describe('the pod mirror queue', () => {
     const keep = solid.keepExisting.bind(solid);
     vi.spyOn(solid, 'keepExisting').mockImplementationOnce(async (id, rel, opts) => {
       // Between this server reading the history and looking at the pod, another server copies revision 7.
-      await solid.write(id, rel, JSON.stringify({ revision: 7, versions: [{ version: '0.9.0' }, { version: '0.8.0' }] }), 'application/ld+json');
+      await solid.write(id, rel, JSON.stringify({ '@type': 'concord:AlphaTestingRecord', revision: 7, versions: [{ version: '0.9.0' }, { version: '0.8.0' }] }), 'application/ld+json');
       return keep(id, rel, opts);
     });
     const me = await recordVersion(u, { version: '0.8.0' });
@@ -298,6 +298,20 @@ describe('the pod mirror queue', () => {
     // Concord's own record isn't kept aside as if it were someone else's document.
     const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
     expect(fs.readdirSync(dir).filter((f) => f.includes('.previous-'))).toEqual([]);
+  });
+
+  // Review r3 of step 5: any JSON naming a positive revision was taken for Concord's own record, so a person's own
+  // document at that path that happened to have a "revision" was replaced without being kept aside first.
+  it('keeps a person’s own JSON that names a revision aside, word for word, before the first copy', async () => {
+    const u = await tester('own-json-revision');
+    const theirs = JSON.stringify({ revision: 1, notes: 'my own testing notes' });
+    await solid.write(u.id, 'alpha/testing.jsonld', theirs, 'application/json');
+    await recordVersion(u, { version: '0.8.0' });
+    const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
+    const aside = fs.readdirSync(dir).filter((f) => /^testing\.previous-\d+-\d+\.jsonld$/.test(f));
+    expect(aside).toHaveLength(1);
+    expect(fs.readFileSync(path.join(dir, aside[0]), 'utf8')).toBe(theirs);
+    expect((await copy(u.id)).versions.map((v) => v.version)).toEqual(['0.8.0']);
   });
 
   it('writes its revision again over an older one that a stalled server put back meanwhile', async () => {
