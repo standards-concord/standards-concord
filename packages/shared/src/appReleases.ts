@@ -53,6 +53,22 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.44.1',
+    date: '2026-11-07',
+    title: 'Validate data takes every value the ontology allows',
+    pr: 117,
+    changes: [
+      {
+        id: 'derived-datatypes-validate',
+        type: 'fix',
+        title: 'Numbers and dates written as a narrower type now pass Validate data',
+        detail: 'A minimum age written as "16"^^xsd:unsignedByte, or a time written as an xsd:dateTimeStamp, was reported as the wrong type although the ontology allows it. Datatypes an ontology defines itself are now checked as the type they are based on, with their limits.',
+        roles: ['agent', 'contributor'],
+        to: '{o}/validate',
+      },
+    ],
+  },
+  {
     version: '0.44.0',
     date: '2026-11-07',
     title: 'Read Concord with no connection',

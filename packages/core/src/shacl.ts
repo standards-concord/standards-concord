@@ -15,7 +15,8 @@ import { isDatatype } from './changes.js';
 import type { OntologyGraph } from './graph.js';
 import { writeTurtle } from './turtle.js';
 import { codeModel, derivesFrom, type PropertyInfo } from './codemodel.js';
-import { boundDatatype, datatypeDefinitions, family, intersect, WHOLE_NUMBER_PATTERN } from './valuespace.js';
+import { boundDatatype, datatypeDefinitions, family, intersect, uncheckable, WHOLE_NUMBER_PATTERN } from './valuespace.js';
+import { derivedTypes } from './xsdTypes.js';
 export { identifierFrom } from './codemodel.js';
 
 const SH = NS.sh;
@@ -561,6 +562,21 @@ function nameQualifiedShapes(store: Store, shapesNs: string): void {
 
 type ValueType = { cls?: string; datatype?: string };
 
+/** xsd:string or a built-in datatype derived from it. */
+const isStringType = (dt: string) => dt === NS.xsd + 'string' || derivedTypes(NS.xsd + 'string').includes(dt);
+
+/** The datatype from outside the ontology (rdf:XMLLiteral, say) that one the ontology defines comes down to, if any. */
+function outsideBase(dt: string, defs: ReturnType<typeof datatypeDefinitions>, seen = new Set<string>()): string | undefined {
+  if (!defs.has(dt)) return dt;
+  if (seen.has(dt)) return undefined;
+  seen.add(dt);
+  for (const d of defs.get(dt)!) {
+    const base = outsideBase(d.base, defs, seen);
+    if (base) return base;
+  }
+  return undefined;
+}
+
 /**
  * Several datatypes apply to one property (from several `only` restrictions,
  * or one and the range), none of them narrower than another. No literal has
@@ -569,12 +585,40 @@ type ValueType = { cls?: string; datatype?: string };
  * xsd:nonNegativeInteger and xsd:nonPositiveInteger). The overlap is checked
  * by value instead; if there is none, the property can have no values. What
  * can't be expressed is left unchecked, never rejected, and a note says so.
+ *
+ * One datatype isn't always one sh:datatype either (#27): a built-in one
+ * also takes the built-ins derived from it (`only xsd:integer` takes
+ * "1"^^xsd:byte), and one the ontology defines (an alias of xsd:string, or one
+ * with facets), which is never a literal's own datatype, is checked by value.
+ *
+ * Accepted limits, which the finding text in Validate data words as such:
+ * - A built-in datatype is checked by how values are written, not by value
+ *   across types that don't derive from it: "3"^^xsd:integer for an
+ *   xsd:nonNegativeInteger, or "1.0"^^xsd:decimal for an xsd:integer, is
+ *   rejected though OWL counts it. Checking that by value would put every
+ *   decimal type, a pattern and bounds on every number property.
+ * - Text takes only xsd:string, not xsd:token or the other types derived from
+ *   it, nor does a string datatype the ontology defines.
  */
 function combineDatatypes(cls: string, ps: PropShape, defs: ReturnType<typeof datatypeDefinitions>, notes: string[]): void {
   const types = [...(ps.datatype ? [{ datatype: ps.datatype }] : ps.cls ? [{ cls: ps.cls }] : []), ...(ps.alsoTypes ?? [])];
   const datatypes = types.flatMap((t) => (t.datatype ? [t.datatype] : []));
   const classes = types.filter((t) => t.cls);
-  if (!datatypes.length || (datatypes.length === 1 && !classes.length)) return;
+  if (!datatypes.length) return;
+  const single = datatypes.length === 1 && !classes.length;
+  if (single && !defs.has(datatypes[0])) {
+    // One built-in (or unknown) datatype: its own values and those of the built-ins derived from it, so `only
+    // xsd:integer` takes "1"^^xsd:byte. Nothing more is needed when nothing derives from it. Strings are the
+    // exception: literals written as xsd:token, xsd:NCName and the like are rare, and listing ten datatypes on
+    // every text property would make the shapes hard to read, so xsd:string stays one exact check.
+    const derived = isStringType(datatypes[0]) ? [] : derivedTypes(datatypes[0]);
+    if (derived.length) {
+      delete ps.datatype;
+      ps.codeType = { datatype: datatypes[0] };
+      ps.values = { datatypes: [datatypes[0], ...derived], patterns: [] };
+    }
+    return;
+  }
   const where = `<${cls}> <${ps.path}>`;
   const all = types.map((t) => `<${t.datatype ?? t.cls}>`).join(', ');
   delete ps.datatype;
@@ -585,21 +629,28 @@ function combineDatatypes(cls: string, ps: PropShape, defs: ReturnType<typeof da
   const v = classes.length ? undefined : intersect(datatypes, defs);
   if (!v || v.empty) {
     ps.maxCount = 0;
-    notes.push(`${where}: values must be all of ${all}, which have no values in common, so it can have none.`);
+    notes.push(single ? `${where}: values must be in ${all}, which has no values, so it can have none.` : `${where}: values must be all of ${all}, which have no values in common, so it can have none.`);
     return;
   }
   const decimal = v.root === NS.xsd + 'decimal';
+  // One datatype the ontology defines on a datatype Concord can't check by value (rdf:XMLLiteral, say) still needs
+  // its values to be of that datatype: checking nothing would let any value through.
+  const base = single && !v.root ? outsideBase(datatypes[0], defs) : undefined;
   ps.values = {
-    datatypes: v.root ? family(v.root) : [],
+    // One datatype the ontology defines on a string is checked as an xsd:string, as a built-in one is (see above).
+    datatypes: v.root ? (single && v.root === NS.xsd + 'string' ? [v.root] : family(v.root)) : base ? [base] : [],
     min: v.min,
     max: v.max,
     minLength: v.minLength,
     maxLength: v.maxLength,
     patterns: [...(v.whole ? [WHOLE_NUMBER_PATTERN] : []), ...v.patterns],
   };
-  if (v.root) ps.codeType = { datatype: decimal ? NS.xsd + (v.whole ? 'integer' : 'decimal') : v.root };
-  const unchecked = [...v.partial, ...(v.root ? [] : ['their datatype'])];
-  if (unchecked.length) notes.push(`${where}: values must be all of ${all}. The shapes check what they can by value, but not ${unchecked.join(' or ')}, so they accept some values the ontology doesn't.`);
+  // Generated code keeps one datatype as declared: checking its values more widely doesn't change how they are read
+  // (an integer the ontology defines stays a string in code, so a value past 2^53 isn't rounded).
+  if (v.root && !single) ps.codeType = { datatype: decimal ? NS.xsd + (v.whole ? 'integer' : 'decimal') : v.root };
+  const unchecked = [...v.partial.filter((p) => !base || p !== uncheckable(base)), ...(v.root || base ? [] : ['their datatype'])];
+  if (unchecked.length)
+    notes.push(`${where}: values must be ${single ? `in ${all}` : `all of ${all}`}. The shapes check what they can by value, but not ${unchecked.join(' or ')}, so they accept some values the ontology doesn't.`);
 }
 
 /**

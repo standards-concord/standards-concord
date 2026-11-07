@@ -17,6 +17,9 @@
  */
 import { NS, localName } from './ns.js';
 import type { DerivedShapes, PropShape } from './shacl.js';
+import { XSD_BASE } from './xsdTypes.js';
+
+export { XSD_BASE };
 
 export interface CodeProperty {
   path: string;
@@ -109,14 +112,6 @@ function allocate(wanted: string, taken: Set<string>, reserved: Set<string>): st
 /** Same accessor type: same arity (set, required or optional) and same value type. */
 const typeKey = (p: Omit<CodeProperty, 'name' | 'path'>) =>
   `${p.maxCount === 1 ? ((p.minCount ?? 0) >= 1 ? 'one' : 'opt') : 'set'}|${p.node ?? ''}|${p.datatype ?? ''}`;
-
-/** XML Schema's built-in datatype derivations: each datatype and the one it is derived from. */
-export const XSD_BASE: Record<string, string> = {
-  integer: 'decimal', nonPositiveInteger: 'integer', negativeInteger: 'nonPositiveInteger', long: 'integer', int: 'long', short: 'int', byte: 'short',
-  nonNegativeInteger: 'integer', unsignedLong: 'nonNegativeInteger', unsignedInt: 'unsignedLong', unsignedShort: 'unsignedInt', unsignedByte: 'unsignedShort',
-  positiveInteger: 'nonNegativeInteger', normalizedString: 'string', token: 'normalizedString', language: 'token', Name: 'token', NCName: 'Name',
-  NMTOKEN: 'token', ID: 'NCName', IDREF: 'NCName', ENTITY: 'NCName', dateTimeStamp: 'dateTime', yearMonthDuration: 'duration', dayTimeDuration: 'duration',
-};
 
 /** Whether datatype `a` is `b` or derived from it, through the ontology's own datatypes (`bases`) and XML Schema's. */
 export function derivesFrom(a: string, b: string, bases: Map<string, string[]> = new Map()): boolean {

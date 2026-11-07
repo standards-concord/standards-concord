@@ -16,7 +16,7 @@
 import type { Store, Term } from 'n3';
 import { NS } from './ns.js';
 import { nn, objects, readList } from './rdf.js';
-import { XSD_BASE } from './codemodel.js';
+import { derives, XSD_BASE } from './xsdTypes.js';
 
 const XSD = NS.xsd;
 
@@ -111,11 +111,6 @@ function builtinRoot(dt: string): string | undefined {
 export function family(root: string): string[] {
   return [root, ...Object.keys(XSD_BASE).map((l) => XSD + l).filter((d) => d !== root && builtinRoot(d) === root && derives(d, root))];
 }
-const derives = (a: string, b: string): boolean => {
-  for (let x: string | undefined = a; x; x = x.startsWith(XSD) && XSD_BASE[x.slice(XSD.length)] ? XSD + XSD_BASE[x.slice(XSD.length)] : undefined) if (x === b) return true;
-  return false;
-};
-
 interface Bound {
   value: string;
   inclusive: boolean;
@@ -205,6 +200,8 @@ const tighterMax = (a: Bound | undefined, b: Bound | undefined): Bound | undefin
 };
 
 const name = (iri: string) => (iri.startsWith(XSD) ? `xsd:${iri.slice(XSD.length)}` : `<${iri}>`);
+/** What a value space says it can't check about a datatype it knows nothing of. */
+export const uncheckable = (dt: string) => `${name(dt)} isn't a datatype whose values can be checked`;
 
 /** Both value spaces: what values of `a` and of `b` must satisfy. */
 function meet(a: ValueSpace, b: ValueSpace): ValueSpace {
@@ -250,7 +247,7 @@ export function valueSpace(dt: string, defs: Map<string, Definition[]>, seen: Se
     return out;
   }
   const own = defs.get(dt);
-  if (!own || seen.has(dt)) return { patterns: [], partial: [`${name(dt)} isn't a datatype whose values can be checked`] };
+  if (!own || seen.has(dt)) return { patterns: [], partial: [uncheckable(dt)] };
   seen.add(dt);
   // Every definition is equivalent, so values satisfy all of them.
   let out: ValueSpace | undefined;
