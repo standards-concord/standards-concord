@@ -13,3 +13,4 @@ e2e/.auth
 walkthrough/out
 walkthrough/.cache
 ci-local-logs/
+.vercel

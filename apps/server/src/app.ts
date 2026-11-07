@@ -63,7 +63,7 @@ export function createApp(): express.Express {
   });
   // OAuth 2.1 for MCP clients: discovery, client registration, /authorize, /token, /revoke.
   app.use(oauthRoutes);
-  app.all('/mcp', express.json({ limit: '5mb' }), mcpHandler);
+  app.all('/mcp', express.json({ limit: config.bodyLimits.json }), mcpHandler);
   mountGithubAppWebhook(app);
   // The daily Vercel Cron call: everything scheduled, due or not.
   app.get('/api/cron/daily', dailyCron);
@@ -94,6 +94,10 @@ export function createApp(): express.Express {
       return void res.status(503).json({ error: 'The server is busy with another change. Try again in a moment.' });
     }
     const status = err instanceof HttpError ? err.status : ((err as { status?: number }).status ?? 500);
+    if (status === 413 && (err as { type?: string }).type === 'entity.too.large') {
+      const limit = (err as { limit?: number }).limit;
+      return void res.status(413).json({ error: `That's too large to send${limit ? ` (the limit is ${Math.floor(limit / 1024 / 1024)} MB)` : ''}.` });
+    }
     if (status >= 500) console.error(`[${req.method} ${req.path}]`, err);
     const message = status >= 500 && !(err instanceof HttpError) ? 'Something went wrong on the server' : (err as Error).message;
     if (req.path.startsWith('/auth/') && !req.accepts('json')) return void res.status(status).send(message);

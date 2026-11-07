@@ -31,7 +31,7 @@ Each write to the VM needs Jesse's go, written in the Mac thread.
 
 1. **Read-only.** Set `CONCORD_READ_ONLY=true` in the VM's `app.env` and restart the container. Check that a POST returns 503 and that the site still reads.
 2. **Copy.** Run `copy --from /data` against production Neon, as in the rehearsal. It must end with `Verified:` and no unexpected notes.
-3. **Deploy.** Deploy to Vercel production with the middleware sending the API to the functions instead of the VM.
+3. **Deploy.** Remove `BACKEND_URL` from Vercel's production variables (or set `CONCORD_API=function`) and redeploy, so the build makes the API function instead of forwarding to the VM ([deploy.md](deploy.md#the-api-as-a-vercel-function)).
 4. **Verify on Vercel.** Sign in, open each ontology, compare the history and releases with the VM, make an edit on a scratch ontology, and check that the daily cron ran and that a release publishes to GitHub.
 5. **Keep the VM** read-only and untouched until Jesse agrees Vercel is working. Then stop it (and later delete it).
 

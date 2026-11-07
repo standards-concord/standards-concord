@@ -99,6 +99,19 @@ Vercel runs several function instances at once, each with its own memory, so not
 - **Requests to Recall.ai for one meeting** (its "lane") and **changes to the set of calendar calls** (a sync or an import) hold a short lease in the database ([lease.ts](../apps/server/src/lease.ts)), so another instance leaves them alone and the next sweep picks up anything it missed. The leases don't fence: every bot step is a compare-and-set and every Recall.ai request is idempotent, so a run that outlasts its lease only repeats a request.
 - **Scheduled work** runs under one lease too (see Scheduled work above).
 
+## The API as a Vercel function
+
+Since step 5 the API can run on Vercel itself, as one function, instead of on the VM. [scripts/vercel-build.mjs](../scripts/vercel-build.mjs) is Vercel's build command. It builds the web app and the function in Vercel's Build Output API format (`.vercel/output`):
+
+- **The function** holds the server's source, `@concord/core` and `@concord/shared` (with their fixtures), and the server's production dependencies, about 115 MB of Vercel's 250 MB. It loads the TypeScript at run time with tsx, as `node --import tsx` does on the VM, because the validation pool and the reasoner start workers from files next to their sources. Its entry is [apps/server/vercel-entry.mjs](../apps/server/vercel-entry.mjs), and [src/vercel.ts](../apps/server/src/vercel.ts) opens the database on an instance's first request. Start-up work ([src/startup.ts](../apps/server/src/startup.ts)) runs once per deployment, after that request's response, on Vercel's `waitUntil`.
+- **It needs** `DATABASE_URL` (Neon) and the database-backed ontology store. Without them it answers 503 rather than keep data on the temporary disk. Private data for accounts with no pod is kept in the database, videos redirect to GitHub, and only small media files are cached in `/tmp`.
+- **Routing** (`.vercel/output/config.json`) sends the paths the middleware used to forward to the VM (`/api`, `/auth`, `/mcp`, `/people`, `/def`, `/healthz`, `/.well-known/*` and the OAuth endpoints) to the function. Everything else is the web app. The daily cron calls `/api/cron/daily`.
+- **Requests** are capped at 4 MB (JSON, MCP and voice clips; Vercel refuses anything over 4.5 MB), with a message that says so. That is about 15 minutes of speech.
+- **Domains and visitors.** The function uses the domain each request was made to for OAuth and MCP URLs, so previews and new custom domains work without settings. It rate-limits by the visitor's address, which Vercel's edge sets. `CONCORD_PROXY_SECRET` is only needed while the middleware forwards to a server.
+- **Back to the VM:** set `BACKEND_URL` (or `CONCORD_API=backend`) and redeploy. The build then makes the web app only, and the middleware forwards the API to that server as before. `CONCORD_API=function` builds the function even with `BACKEND_URL` set, for a preview while production still uses the VM. Once Vercel has taken writes, moving back also needs the data exported ([cutover.md](cutover.md)).
+
+To check a build on your own machine: `node scripts/vercel-build.mjs --function`, then `VERCEL=1 DATABASE_URL=postgres://… node scripts/vercel-serve.mjs 8799` serves the function's routes.
+
 ## Alternative: AWS
 
 [deploy/aws/concord.yaml](../deploy/aws/concord.yaml) is a CloudFormation template for the same server on a t3.small EC2 instance (about $20 a month), with keys in Secrets Manager. Upload it in CloudFormation, set `PublicUrl` and any keys, and use its `BackendUrl` output as above.

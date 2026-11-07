@@ -6,13 +6,17 @@ name: Deploy to Vercel
 # that Vercel account (Account Settings → Tokens, scoped to jeswr1); until it exists this
 # workflow says so and stops. The IDs below aren't secret.
 #
-# Paths mirror scripts/vercel-ignore-build.sh: only the web app, the routing middleware and
-# what they build from need a new deployment.
+# Paths mirror scripts/vercel-ignore-build.sh: the web app, the API (a Vercel function since
+# step 5), the routing middleware and what they build from need a new deployment.
 on:
   push:
     branches: [main]
     paths:
       - 'apps/web/**'
+      - 'apps/server/src/**'
+      - 'apps/server/package.json'
+      - 'apps/server/tsconfig.json'
+      - 'apps/server/vercel-entry.mjs'
       - 'packages/**'
       - 'middleware.ts'
       - 'vercel.json'
@@ -20,6 +24,7 @@ on:
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'tsconfig.base.json'
+      - 'scripts/vercel-build.mjs'
       - '.github/workflows/vercel-deploy.yml'
   workflow_dispatch:
 

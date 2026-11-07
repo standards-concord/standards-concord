@@ -112,6 +112,12 @@ const norm = (o: string) => o.trim().replace(/\/$/, '').toLowerCase();
 export const trustedOrigins = () => [...new Set([config.publicUrl, config.webUrl, ...(process.env.PUBLIC_ORIGINS ?? '').split(',')].map(norm).filter((o) => ORIGIN_RE.test(o)))];
 
 /**
+ * Whether this server is itself a Vercel function (step 5), reached through Vercel's edge, which decides the Host
+ * and the visitor's address. Not when it is the VM behind the Vercel middleware: that has no VERCEL variable.
+ */
+export const servedByVercel = () => !!process.env.VERCEL;
+
+/**
  * Whether this request came through Concord's own Vercel middleware: it sends
  * CONCORD_PROXY_SECRET, which only it and this server know. Only then are the
  * X-Concord-Origin and X-Concord-Client-IP headers believed.
@@ -144,6 +150,8 @@ export function publicOrigin(req: Request): string | undefined {
   const hinted = req.header('x-concord-origin');
   if (hinted && ORIGIN_RE.test(hinted.trim()) && fromTrustedProxy(req)) return norm(hinted);
   const host = req.headers.host?.trim().toLowerCase();
+  // As a Vercel function, Vercel only routes this deployment's own domains here, and the Host is the one asked for.
+  if (servedByVercel() && host && ORIGIN_RE.test(`https://${host}`)) return `https://${host}`;
   const direct = host ? trustedOrigins().find((o) => new URL(o).host === host) : undefined;
   if (direct) return direct;
   if (process.env.CONCORD_PROXY_SECRET) return undefined;
@@ -678,6 +686,9 @@ export async function authenticateMcp(req: Request): Promise<{ user: User; agent
 export function clientIp(req: Request): string {
   const passed = req.header('x-concord-client-ip')?.trim();
   if (passed && isIP(passed) && fromTrustedProxy(req)) return passed;
+  // As a Vercel function, Vercel's edge sets X-Real-IP to the visitor's address (a visitor's own is replaced).
+  const real = req.header('x-real-ip')?.trim();
+  if (servedByVercel() && real && isIP(real)) return real;
   return req.ip ?? 'unknown';
 }
 const limiter = (windowMs: number, limit: number, name: string) =>

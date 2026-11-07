@@ -144,7 +144,7 @@ const hasAppToken = (req: Request) => /^Bearer\s+cn[ar]_\S+$/i.test(req.get('aut
 
 export function apiRouter(): Router {
   const r = Router();
-  r.use(express.json({ limit: '5mb' }));
+  r.use(express.json({ limit: config.bodyLimits.json }));
   // Responses depend on who is signed in (and on consent that can be withdrawn at any time), so no cache may keep or share them.
   r.use((_req, res, next) => {
     res.set('Cache-Control', 'private, no-store');
@@ -1108,7 +1108,7 @@ export function apiRouter(): Router {
     if (!login || !read) throw new HttpError(403, 'Your Solid sign-in has ended. Sign out and sign in with your WebID again to read the pods.');
     res.json(await readPodFeedback({ webId: login.webId, get: read }));
   });
-  r.post('/transcribe', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '25mb' }), async (req, res) => {
+  r.post('/transcribe', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: config.bodyLimits.audio }), async (req, res) => {
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'Send audio as the request body');
     res.json({ text: await transcribe(req.body, req.header('content-type') ?? 'audio/webm') });
   });
