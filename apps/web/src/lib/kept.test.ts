@@ -288,6 +288,20 @@ describe('kept answers', () => {
       expect(k.keptValue('alice|releases|vol')).toEqual({ value: ['new'] });
     });
 
+    // Used to go wrong: a read-back that started before a sign-out (and a sign-in again as the same
+    // account) finished afterwards and put the wiped copy back in memory.
+    it('a read-back that a sign-out overtook brings nothing back, even as the same account', async () => {
+      const k = await load();
+      saved.set('alice|releases|vol', { value: ['1.0.0'], at: 1 });
+      account = undefined;
+      const [first] = switchTo('alice');
+      switchTo(undefined);
+      const [second] = switchTo('alice');
+      await Promise.all([first, second]);
+      expect(k.keptValue('alice|releases|vol')).toBeUndefined();
+      expect(saved.size).toBe(0);
+    });
+
     it('signing out wipes the device’s copy', async () => {
       const k = await load();
       k.finishLoad(k.startLoad(k.keptKey('releases|vol')), { value: ['1.0.0'] });

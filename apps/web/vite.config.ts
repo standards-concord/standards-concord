@@ -12,8 +12,8 @@ const commit = (process.env.VERCEL_GIT_COMMIT_SHA ?? process.env.GITHUB_SHA ?? '
 
 /**
  * Writes sw.js (from sw/sw.js) into the build with the list of every built file, so the service
- * worker keeps the whole app on the device and Concord opens with no connection. Its version changes
- * whenever any file does, which makes browsers install the new one.
+ * worker keeps the whole app on the device and Concord opens with no connection. Its version is a hash
+ * of every kept file's contents, so any change makes browsers install the new one.
  */
 function serviceWorker(): Plugin {
   let outDir = 'dist';
@@ -34,7 +34,10 @@ function serviceWorker(): Plugin {
       };
       walk(outDir);
       files.sort();
-      const version = createHash('sha256').update(files.join('\n')).update(readFileSync(path.join(outDir, 'index.html'))).digest('hex').slice(0, 12);
+      // Every kept file's contents, not just its name: a public file replaced under the same name changes it too.
+      const hash = createHash('sha256').update(readFileSync(path.join(outDir, 'index.html')));
+      for (const f of files) hash.update(f).update(readFileSync(path.join(outDir, f.slice(1))));
+      const version = hash.digest('hex').slice(0, 12);
       const template = readFileSync(path.resolve(import.meta.dirname, 'sw/sw.js'), 'utf8');
       const sw = template.replace('self.__CONCORD_VERSION__', JSON.stringify(version)).replace('self.__CONCORD_FILES__', JSON.stringify(files));
       writeFileSync(path.join(outDir, 'sw.js'), sw);

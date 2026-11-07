@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
 import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Shield, UserRound, Compass, Palette } from 'lucide-react';
-import { api } from '../api';
-import { beginSignOut, finishSignOut, useSession } from '../lib/session';
+import { api, ApiError } from '../api';
+import { beginSignOut, finishSignOut, markSignOutPending, useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
 import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
 import { useAction, useTick } from '../lib/hooks';
@@ -88,8 +88,9 @@ function UserMenu() {
     beginSignOut(user.id);
     try {
       await api.logout();
-    } catch {
-      /* ignore */
+    } catch (e) {
+      // No connection: the server's session is ended when it can next be reached.
+      if (e instanceof ApiError && e.offline) markSignOutPending(user.id);
     }
     finishSignOut(user.id);
     const s = await refresh();

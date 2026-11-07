@@ -18,19 +18,24 @@ export const KEEP_MAX = 100;
 /** Reading back what this device saved for the account, once it is known. */
 let reading: Promise<void> = Promise.resolve();
 
+/** Counts account changes, so a read-back that an account change overtook is dropped. */
+let generation = 0;
+
 onAccountChange(() => {
   kept.clear();
   loads.clear();
   const account = accountToken().account;
+  const current = ++generation;
   // Signing out (here or in another tab) wipes the device's copy; opening as an account reads its own.
-  reading = account ? readBack(account) : clearOffline();
+  reading = account ? readBack(account, current) : clearOffline();
   // The session waits for this before showing pages, so they open with what was saved.
   return reading;
 });
 
-async function readBack(account: string) {
+async function readBack(account: string, current: number) {
   const saved = await loadOffline(account);
-  if (accountToken().account !== account) return;
+  // Signing out and back in as the same account while reading would otherwise bring back what was wiped.
+  if (current !== generation || accountToken().account !== account) return;
   // What the device saved is older than anything loaded since: it goes first, so it is evicted first.
   const since = [...kept];
   kept.clear();

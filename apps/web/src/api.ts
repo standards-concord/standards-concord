@@ -100,13 +100,17 @@ async function request<T>(method: string, path: string, body?: Json | BodyInit, 
     setOffline(true);
     throw new ApiError(0, OFFLINE_MESSAGE);
   }
-  setOffline(false);
+  // The same outages ApiError.offline counts: no answer, or a gateway that couldn't reach the server.
+  setOffline([502, 503, 504].includes(res.status));
   if (!res.ok) {
     let message = `${res.status} ${res.statusText || 'Request failed'}`;
     let parsed: unknown;
     const text = await res.text().catch(() => '');
     // The Vite dev proxy answers 500 with an empty body when the API is down.
-    if ([500, 502, 503, 504].includes(res.status) && !text.trim()) throw new ApiError(503, OFFLINE_MESSAGE);
+    if ([500, 502, 503, 504].includes(res.status) && !text.trim()) {
+      setOffline(true);
+      throw new ApiError(503, OFFLINE_MESSAGE);
+    }
     try {
       parsed = text ? JSON.parse(text) : undefined;
       if (parsed && typeof parsed === 'object' && 'error' in parsed) {
@@ -116,6 +120,7 @@ async function request<T>(method: string, path: string, body?: Json | BodyInit, 
     } catch {
       // Dev proxy returns plain text/HTML when the server is down.
       if ([500, 502, 503, 504].includes(res.status) && (!text || /ECONNREFUSED|proxy|<html/i.test(text))) {
+        setOffline(true);
         throw new ApiError(503, OFFLINE_MESSAGE);
       }
       if (text && text.length < 300) message = text;

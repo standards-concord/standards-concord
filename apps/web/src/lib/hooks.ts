@@ -19,8 +19,9 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
   const [data, setDataState] = useState<T | undefined>(() => keptValue<T>(keptKey(opts?.keep))?.value);
   const [error, setError] = useState<unknown>();
   const [loading, setLoading] = useState(true);
-  const shownRef = useRef(data);
-  shownRef.current = data;
+  // The key (account included) of the data on show, so with no connection only data loaded for the
+  // current request is shown, never the previous request's under the new one's name.
+  const dataKey = useRef(data === undefined ? undefined : keptKey(opts?.keep));
   const seq = useRef(0);
   const fnRef = useRef(fn);
   fnRef.current = fn;
@@ -37,7 +38,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
     const started = startLoad(key);
     const shown = keptValue<T>(key);
     if (shown) {
-      shownRef.current = shown.value;
+      dataKey.current = key;
       setDataState(shown.value);
       setError(undefined);
     }
@@ -46,13 +47,14 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
       const d = await fnRef.current();
       answer = { value: d };
       if (id === seq.current) {
+        dataKey.current = key;
         setDataState(d);
         setError(undefined);
       }
     } catch (e) {
-      // With no connection, a page showing what was kept (or loaded earlier) carries on showing it;
-      // the offline banner says why it may be out of date.
-      if (id === seq.current && !(e instanceof ApiError && e.offline && shownRef.current !== undefined)) setError(e);
+      // With no connection, a page showing what was kept (or loaded earlier) for this same request
+      // carries on showing it; the offline notice says why it may be out of date.
+      if (id === seq.current && !(e instanceof ApiError && e.offline && key && dataKey.current === key)) setError(e);
     } finally {
       finishLoad(started, answer);
       if (id === seq.current) setLoading(false);
@@ -79,6 +81,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep
   // supersedes it.
   const setData = useCallback((d: T | ((prev: T | undefined) => T)) => {
     owner.changed(keepRef.current);
+    dataKey.current = keptKey(keepRef.current);
     setDataState((prev) => (typeof d === 'function' ? (d as (p: T | undefined) => T)(prev) : d));
   }, [owner]);
 

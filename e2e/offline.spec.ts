@@ -98,6 +98,54 @@ test.describe('Offline reading', () => {
     await expect.poll(async () => (await savedKeys(page)).some((k) => k.startsWith(`${second.user.id}|`))).toBe(true);
   });
 
+  // Used to go wrong: with no connection, any data already on show was kept on show, so picking a format
+  // never opened before went on showing the last format's text under the new format's name.
+  test('with no connection, a format not opened before shows an error, never the last one’s text', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(OFFLINE);
+    await signIn(page, { name: 'E2E offline formats', role: 'reviewer' });
+    await page.goto('/o/volunteering/source?format=turtle');
+    await expect(page.getByTestId('source-code')).toContainText('@prefix');
+    await page.route('**/api/**', (route) => route.abort('internetdisconnected'));
+    await page.getByLabel('Format', { exact: true }).selectOption({ label: 'JSON-LD' });
+    await expect(page.getByText('Couldn’t load JSON-LD')).toBeVisible();
+    await expect(page.getByTestId('source-code')).toHaveCount(0);
+    // Turtle was opened before, so it is still there.
+    await page.getByLabel('Format', { exact: true }).selectOption({ label: 'Turtle' });
+    await expect(page.getByTestId('source-code')).toContainText('@prefix');
+  });
+
+  // Used to go wrong: signing out with no connection left the person on screen (and /login sent them
+  // back), and the server's session, which couldn't be ended, signed them back in once online.
+  test('signing out with no connection signs out at once, and stays signed out once back online', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(OFFLINE);
+    await signIn(page, { name: 'E2E offline leaver', role: 'reviewer' });
+    await openTwoSections(page);
+    await page.route('**/api/**', (route) => route.abort('internetdisconnected'));
+    await page.reload();
+    await expect(offlineNotice(page)).toBeVisible();
+    await page.getByRole('button', { name: /E2E offline leaver/ }).click();
+    await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
+    await expect(page).toHaveURL(/\/login/);
+    await expect(page.getByRole('button', { name: /E2E offline leaver/ })).toHaveCount(0);
+    await expect.poll(() => savedKeys(page)).toEqual([]);
+    // Back online: the server's session is ended, so opening Concord again asks to sign in.
+    await page.unroute('**/api/**');
+    await page.goto('/o/volunteering/changes');
+    await expect(page).toHaveURL(/\/login/);
+    const session = await (await page.request.get('/api/session')).json();
+    expect(session.user).toBeUndefined();
+  });
+
+  test('a server outage behind the gateway counts as offline too', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(OFFLINE, /status of 502/);
+    await signIn(page, { name: 'E2E offline outage', role: 'reviewer' });
+    const rowText = await openTwoSections(page);
+    await page.route('**/api/**', (route) => route.fulfill({ status: 502, body: '' }));
+    await changesNav(page).getByRole('link', { name: 'Change requests', exact: true }).click();
+    await expect(offlineNotice(page)).toBeVisible();
+    await expect(main(page).getByRole('listitem').first()).toHaveText(rowText);
+  });
+
   test('the app itself opens with no connection (production build)', async ({ browser, baseURL }) => {
     test.skip(process.env.E2E_MODE !== 'preview', 'only the production build has the service worker that keeps the app');
     // Its own browser window, with service workers on (the rest of the suite turns them off).

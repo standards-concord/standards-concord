@@ -66,6 +66,33 @@ function forgetOfflineSession() {
     /* storage unavailable */
   }
 }
+/**
+ * Signing out with no connection can't end the server's session. The account is remembered here and
+ * its session ended as soon as the server answers (fetchSession), so it doesn't come back signed in.
+ */
+const SIGN_OUT_PENDING = 'concord.signOutPending';
+export function markSignOutPending(userId: string) {
+  try {
+    localStorage.setItem(SIGN_OUT_PENDING, userId);
+  } catch {
+    /* storage unavailable */
+  }
+}
+function signOutPending(): string | null {
+  try {
+    return localStorage.getItem(SIGN_OUT_PENDING);
+  } catch {
+    return null;
+  }
+}
+function clearSignOutPending() {
+  try {
+    localStorage.removeItem(SIGN_OUT_PENDING);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 /** The saved session, its clock moved on by the time since it was saved; undefined if there is none. */
 function offlineSession(): SessionInfo | undefined {
   try {
@@ -131,39 +158,65 @@ export function SessionProvider({ children }: { children: ReactNode }) {
    */
   const fetchSession = useCallback(async () => {
     const before = signOuts();
-    const s = await api.session();
+    let s = await api.session();
+    // Signed out here with no connection: the server's session is ended now that it can be reached.
+    if (s.user && signOutPending() === s.user.id) {
+      await api.logout();
+      clearSignOutPending();
+      s = await api.session();
+    }
     return s.user && signOuts() !== before ? undefined : s;
   }, []);
 
+  // Each refresh is numbered: one that a newer refresh, a sign-out or another account overtook while
+  // it waited for the device's copy to be read back is dropped instead of applied.
+  const refreshes = useRef(0);
   const refresh = useCallback(async () => {
+    const n = ++refreshes.current;
+    const before = signOuts();
+    const stillWanted = (account: string) => n === refreshes.current && signOuts() === before && activeAccount === account;
     setLoading(true);
     try {
       const s = await fetchSession();
       if (!s) return undefined;
       // Pages show what this device saved for the account at once, so it is read back first.
-      setActiveAccount(s.user?.id ?? 'guest');
+      const account = s.user?.id ?? 'guest';
+      if (n !== refreshes.current || signOuts() !== before) return undefined;
+      setActiveAccount(account);
       await accountSettled();
+      if (!stillWanted(account)) return undefined;
       setSession(s);
       return s;
     } catch (e) {
       // No connection: carry on as the last person signed in here, with what the device saved for them.
       // Nothing is sent as them until the server is back, and it still decides what they may do.
       const saved = e instanceof ApiError && e.offline ? offlineSession() : undefined;
-      // (A second check while the first is still reading back, as React's strict mode makes, joins it.)
-      if (saved && (!activeAccount || activeAccount === saved.user!.id)) {
+      if (saved && n === refreshes.current && signOuts() === before && (!activeAccount || activeAccount === saved.user!.id)) {
         setActiveAccount(saved.user!.id);
         await accountSettled();
+        // Signed out (here or in another tab) while reading back: the saved session is gone too.
+        if (!stillWanted(saved.user!.id) || !offlineSession()) return undefined;
         fetchedAt.current = Date.now();
         setSessionState(saved);
         setError(undefined);
         return saved;
       }
-      setError(e);
+      if (n === refreshes.current) setError(e);
       return undefined;
     } finally {
-      setLoading(false);
+      if (n === refreshes.current) setLoading(false);
     }
   }, [setSession, fetchSession]);
+
+  // Signing out (here, or in another tab) closes the account on screen at once, even when the server
+  // can't be reached to confirm it: pages showing its data unmount and sign-in is shown.
+  useEffect(
+    () =>
+      onAccountChange(() => {
+        if (activeAccount === undefined) setSessionState((s) => (s?.user ? { ...s, user: undefined } : s));
+      }),
+    [],
+  );
 
   useEffect(() => {
     void refresh();
