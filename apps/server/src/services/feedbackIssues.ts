@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { PUBLIC_NOTICE_VERSION, publicSummary, type FeedbackPublicationState, type FeedbackPublicationStatus } from '@concord/shared';
+import { keepAlive } from '../keepAlive.js';
 import { config } from '../config.js';
 import { get, HttpError, list, put, transaction } from '../db.js';
 import { newId } from '../ids.js';
@@ -511,7 +512,9 @@ async function onError(id: string, claim: string, repo: string, err: unknown) {
 /** Wait briefly for a record so the tester can be told; it carries on in the background if GitHub is slow. */
 export async function processWithin(id: string, ms = 4000): Promise<Publication | undefined> {
   let timer: NodeJS.Timeout | undefined;
-  await Promise.race([processPublication(id), new Promise<void>((r) => (timer = setTimeout(r, ms)))]);
+  // What isn't done by then carries on after the response (kept alive on Vercel): a send cut off part way would
+  // leave a summary whose posting is uncertain.
+  await Promise.race([keepAlive(processPublication(id)), new Promise<void>((r) => (timer = setTimeout(r, ms)))]);
   clearTimeout(timer);
   return await publicationFor(id);
 }
@@ -623,7 +626,7 @@ export async function resolvePublication(id: string, a: AdminAction, ref: string
     return next;
   });
   if (!p) throw new HttpError(409, 'That public summary changed since you looked at it, or that choice doesn’t apply to it');
-  if (ACTIVE.includes(p.state)) void processPublication(id);
+  if (ACTIVE.includes(p.state)) void keepAlive(processPublication(id)).catch((err) => console.warn(`[feedback] ${id}: ${(err as Error).message}`));
   return status(p);
 }
 

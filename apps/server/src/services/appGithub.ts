@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { workflowYaml } from '@concord/shared';
+import { keepAlive } from '../keepAlive.js';
 import type { ConnectedApp, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
@@ -297,7 +298,7 @@ export async function nudgeRuns(ontologyId: string): Promise<void> {
 }
 
 /** Fire and forget, for code paths that mustn't wait on GitHub (or fail because of it). */
-export const nudgeRunsSoon = (ontologyId: string) => void nudgeRuns(ontologyId).catch((err) => console.warn('[github-app]', (err as Error).message));
+export const nudgeRunsSoon = (ontologyId: string) => void keepAlive(nudgeRuns(ontologyId)).catch((err) => console.warn('[github-app]', (err as Error).message));
 
 /** The periodic sweep: catches what a request didn't (a gap still running, a retry due, another process). */
 export async function sweepRuns(): Promise<void> {

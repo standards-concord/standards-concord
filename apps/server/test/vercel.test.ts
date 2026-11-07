@@ -142,6 +142,24 @@ describe('work that outlives its request', () => {
       setKeepAlive(() => undefined);
     }
   });
+
+  // Review r1 of step 5: GitHub nudges and the rest of a feedback summary's posting (after the few seconds a
+  // tester waits) were started and dropped, so a frozen instance could cut a post to GitHub off part way.
+  it('hands GitHub nudges and an unfinished feedback summary post to waitUntil too', async () => {
+    const { nudgeRunsSoon } = await import('../src/services/appGithub.js');
+    const { processWithin } = await import('../src/services/feedbackIssues.js');
+    const kept: Promise<unknown>[] = [];
+    setKeepAlive((p) => void kept.push(p));
+    try {
+      nudgeRunsSoon('no-such-ontology');
+      expect(kept).toHaveLength(1);
+      await processWithin('no-such-feedback', 1);
+      expect(kept).toHaveLength(2);
+      await Promise.all(kept);
+    } finally {
+      setKeepAlive(() => undefined);
+    }
+  });
 });
 
 describe('request size on Vercel', () => {

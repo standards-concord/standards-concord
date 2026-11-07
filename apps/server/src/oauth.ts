@@ -359,6 +359,13 @@ let scrubTimer: NodeJS.Timeout | undefined;
 let scrubBackoff = 0;
 export function scheduleScrub(delayMs = 0) {
   if (scrubTimer) return;
+  // Straight away, with nothing to wait for: started now (detached keeps it alive after the response on Vercel,
+  // where a timer can be frozen with the instance before it fires). Later retries on Vercel come from the
+  // start-up task, which warm instances try again until the scrub is done (vercel.ts).
+  if (delayMs <= 0) {
+    void detached(scrubAttempt).catch((e) => console.warn(`[oauth] secret scrub failed: ${(e as Error).message}`));
+    return;
+  }
   // Detached: the timer inherits the caller's context, which may be a transaction long over by the time it fires.
   scrubTimer = setTimeout(() => void detached(scrubAttempt).catch((e) => console.warn(`[oauth] secret scrub failed: ${(e as Error).message}`)), delayMs);
   scrubTimer.unref();
