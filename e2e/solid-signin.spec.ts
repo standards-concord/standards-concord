@@ -135,3 +135,34 @@ test('someone else signs in with Solid (from their provider’s address) and can
   await expect(page.getByText('Solid (your WebID)')).toBeVisible();
   await expect(page.getByText('You signed in with your own WebID')).toBeVisible();
 });
+
+// Step 5e: someone who signs in with Solid keeps their private data in their own pod, written as them, in a folder
+// private to them, with their feedback shared read-only with the team. Before, it went to a pod Concord made for them
+// on its own Solid server (and on Vercel, which has none, to Concord's database).
+test('someone who signs in with Solid keeps their feedback in their own pod, private to them and shared with the team', async ({ page, browser, playwright }) => {
+  await solidSignIn(page, SOLID.visitor);
+  const pod = `${SOLID.css}/visitor/`;
+  const r = await page.request.post('/api/feedback', { data: { pathway: 'general', answers: { general: 'Saved in my own pod' }, transcript: [] } });
+  expect(r.status(), await r.text()).toBe(201);
+  const sub = (await r.json()) as { savedTo?: { kind: string; url: string } };
+  expect(sub.savedTo?.kind).toBe('solid');
+  expect(sub.savedTo?.url.startsWith(`${pod}concord/feedback/`)).toBeTruthy();
+
+  // Nobody else can read it, nor anything else Concord keeps in their pod.
+  const anon = await playwright.request.newContext();
+  expect((await anon.get(sub.savedTo!.url)).status()).toBe(401);
+  expect((await anon.get(`${pod}concord/`)).status()).toBe(401);
+  expect((await anon.get(`${pod}concord/alpha/testing.jsonld`)).status()).toBe(401);
+  await anon.dispose();
+
+  // The team reads it from the pod, as the admin's WebID.
+  const admin = await browser.newContext({ baseURL: new URL(page.url()).origin });
+  const adminPage = await admin.newPage();
+  await solidSignIn(adminPage, SOLID.admin, { next: '/admin/feedback' });
+  const card = adminPage.getByTestId('pod-feedback');
+  await card.getByRole('button', { name: 'Read as my WebID' }).click();
+  const folder = card.getByTestId('pod-folder').filter({ has: adminPage.getByRole('link', { name: new RegExp(`${pod}concord/feedback/`) }) });
+  await expect(folder).toContainText('Readable');
+  await expect(folder).toContainText('1 submission');
+  await admin.close();
+});

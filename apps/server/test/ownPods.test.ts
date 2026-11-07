@@ -6,7 +6,7 @@ import { config } from '../src/config.js';
 import { get, HttpError, openDb, put } from '../src/db.js';
 import { keepOwnPodLogin, loadOwnPodLogin } from '../src/services/ownPods.js';
 import { solid } from '../src/services/solid.js';
-import { inPods, podOf, type SolidLogin } from '../src/solidOidc.js';
+import { inPods, podOf, storageAbove, type SolidLogin } from '../src/solidOidc.js';
 
 /**
  * Step 5e: people who sign in with Solid keep their private data in their own pod, written as them, with Concord's
@@ -42,7 +42,9 @@ beforeAll(async () => {
       log.push(`${method} ${path}`);
       const status = refuse?.(method, path);
       if (status) return res.writeHead(status).end();
-      const aclLink = acp ? `<${base}${path}.acr>; rel="acl", <http://www.w3.org/ns/solid/acp#AccessControlResource>; rel="type"` : `<${base}${path}.acl>; rel="acl"`;
+      // A pod's root says it is one (as a Solid server does).
+      const storageLink = /^\/[^/]+\/$/.test(path) && path !== '/nostorage/' ? ', <http://www.w3.org/ns/pim/space#Storage>; rel="type"' : '';
+      const aclLink = (acp ? `<${base}${path}.acr>; rel="acl", <http://www.w3.org/ns/solid/acp#AccessControlResource>; rel="type"` : `<${base}${path}.acl>; rel="acl"`) + storageLink;
       const have = docs.get(path);
       if (method === 'GET' || method === 'HEAD') {
         if (!have) return res.writeHead(404, { link: aclLink }).end();
@@ -194,6 +196,13 @@ describe('a Solid account’s private data in its own pod', () => {
     expect(await solid.write(g.id, 'use-cases/u.ttl', 'x')).toMatchObject({ kind: 'local' });
     expect(await get('privateFiles', `${g.id}/use-cases/u.ttl`)).toBeDefined();
     expect(log).toEqual([]);
+  });
+});
+
+describe('finding someone’s pod', () => {
+  it('finds the folder above a WebID that says it is a pod, when the profile names none', async () => {
+    expect(await storageAbove(`${base}/alice/profile/card#me`)).toBe(`${base}/alice/`);
+    expect(await storageAbove(`${base}/nostorage/profile/card#me`)).toBeUndefined();
   });
 });
 

@@ -66,6 +66,10 @@ export default defineConfig({
         // A local, plain-http Solid server: only providers listed here may be private or http.
         SOLID_TRUSTED_ISSUERS: `${css}/`,
         ADMIN_WEBIDS: SOLID.admin.webId,
+        // People who sign in with Solid keep their private data in their own pod (step 5e), as on Vercel. Their login
+        // is sealed with this key (a test value, made for this suite only).
+        CONCORD_SOLID_OWN_PODS: 'true',
+        CONCORD_ENCRYPTION_KEY: 'e2e0'.repeat(16),
         GOOGLE_CLIENT_ID: '',
         GITHUB_CLIENT_ID: '',
       },

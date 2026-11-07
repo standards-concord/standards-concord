@@ -29,6 +29,7 @@ import { refuseWhenReadOnly } from './db.js';
 const SOLID_OIDC_ISSUER = 'http://www.w3.org/ns/solid/terms#oidcIssuer';
 const FOAF_NAME = 'http://xmlns.com/foaf/0.1/name';
 const PIM_STORAGE = 'http://www.w3.org/ns/pim/space#storage';
+const PIM_STORAGE_TYPE = 'http://www.w3.org/ns/pim/space#Storage';
 const VCARD_FN = 'http://www.w3.org/2006/vcard/ns#fn';
 const MAX_BYTES = 256 * 1024;
 const TIMEOUT_MS = 8000;
@@ -424,6 +425,32 @@ export function podOf(profile: WebIdProfile): string | undefined {
   return usable.find((s) => profile.webId.startsWith(s)) ?? usable[0];
 }
 
+/**
+ * The pod a WebID lives in when its profile names none (a Community Solid Server profile doesn't, by default): the
+ * nearest folder above the profile document that says it is a storage (Link: <pim:Storage>; rel="type"), as the
+ * Solid Protocol describes. Read without signing in, through the guarded transport. Undefined if none says so.
+ */
+export async function storageAbove(webId: string): Promise<string | undefined> {
+  let folder: URL;
+  try {
+    folder = new URL('.', new URL(webId));
+  } catch {
+    return undefined;
+  }
+  for (let i = 0; i < 6; i++) {
+    try {
+      const r = await guardedFetch(folder, { method: 'HEAD' });
+      const types = (r.headers.get('link') ?? '').split(',').filter((part) => /;\s*rel="?type"?/i.test(part));
+      if (types.some((part) => part.includes(`<${PIM_STORAGE_TYPE}>`))) return podOf({ webId, issuers: [], storages: [folder.href] });
+    } catch {
+      return undefined;
+    }
+    if (folder.pathname === '/') return undefined;
+    folder = new URL('..', folder);
+  }
+  return undefined;
+}
+
 /** Retry once when the provider asks for a DPoP nonce (the DPoP handle remembers it). */
 async function withNonceRetry<T>(fn: () => Promise<T>): Promise<T> {
   try {
@@ -492,7 +519,7 @@ export async function finishLogin(loginId: string | undefined, callbackUrl: stri
     issuer: claims.iss,
     name: profile.name ?? nameFromWebId(webId),
     returnTo: p.returnTo,
-    storage: podOf(profile),
+    storage: podOf(profile) ?? (await storageAbove(webId)),
     login: { webId, as, client, keys, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresAt: Date.now() + (tokens.expires_in ?? 300) * 1000 },
   };
 }
