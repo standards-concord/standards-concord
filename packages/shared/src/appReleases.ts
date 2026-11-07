@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.42.0',
     date: '2026-11-07',
     title: 'Read Concord with no connection',
+    pr: 116,
     changes: [
       {
         id: 'offline-reading',
