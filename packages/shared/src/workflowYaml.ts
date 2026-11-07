@@ -1,6 +1,8 @@
 /**
  * The workflow file to add to an app's repository. Nothing user-provided goes in it except the
  * Concord URL and the app's id, each written as a quoted YAML string so it can't add keys or steps.
+ * The action is used from its public copy (standards-concord/app-check, see scripts/publish-action.sh),
+ * so any repository can use it whether or not this one is public.
  *
  * With `app` (an app connected through the Concord GitHub App) the workflow has no secret: the
  * run proves itself with GitHub's own token, and Concord starts it whenever there is something
@@ -33,7 +35,7 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - uses: standards-concord/standards-concord/actions/app-check@main
+      - uses: standards-concord/app-check@v1
         with:
           concord-url: ${JSON.stringify(concordUrl)}
 ${auth}
