@@ -43,6 +43,29 @@ describe('database-backed ontology store', () => {
     await expect(dbStore.at(p, '9.9.9')).rejects.toMatchObject({ status: 404 });
   });
 
+  // Review r1 of step 5: the cache key named one head's blob, but the content was read by name through another head
+  // lookup, so a release reset in between could cache other bytes under that key. The keyed blob itself is read.
+  it('caches a release under the blob it read, even if the version is released again in between', async () => {
+    const p = project();
+    await dbStore.init(p, ttl('v0'), '# Readme\n');
+    await dbStore.writeRelease(p, '1.0.0', await graph('first'), {}, 'First', { name: 'Steward' });
+    const real = dbStore.head.bind(dbStore);
+    // Another instance releases 1.0.0 again just after this one looked up the release's blob.
+    dbStore.head = async (...args) => {
+      const head = await real(...args);
+      dbStore.head = real;
+      await dbStore.writeRelease(p, '1.0.0', await graph('again'), {}, 'Again', { name: 'Steward' });
+      return head;
+    };
+    try {
+      // The content is the blob its cache key names (the first release), never the newer bytes under the old key.
+      expect(await (await dbStore.at(p, '1.0.0')).toTurtle()).toContain('"first"');
+      expect(await (await dbStore.at(p, '1.0.0')).toTurtle()).toContain('"again"');
+    } finally {
+      dbStore.head = real;
+    }
+  });
+
   it('lets one of two writers that read the same draft commit, and rolls back the other’s bookkeeping', async () => {
     const p = project();
     const base = await dbStore.init(p, ttl('v0'), '# Readme\n');

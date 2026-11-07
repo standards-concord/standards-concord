@@ -11,6 +11,7 @@ import {
   isoDate,
   listDir,
   readCommit,
+  readObject,
   readFile,
   setRef,
   subject,
@@ -129,9 +130,10 @@ export const dbStore = {
     const key = `${project.slug}@v${ref}@${entry.sha}`;
     let g = graphCache.get(key);
     if (!g) {
-      const text = await this.readReleaseFile(project, ref, FILE);
-      if (text === undefined) throw new HttpError(404, `Version ${ref} not found`);
-      g = await OntologyGraph.fromTurtle(text);
+      // The blob the key names, not the file looked up again by name (which a reset meanwhile could change).
+      const blob = await readObject(entry.sha);
+      if (blob?.type !== 'blob') throw new HttpError(404, `Version ${ref} not found`);
+      g = await OntologyGraph.fromTurtle(blob.body.toString('utf8'));
       graphCache.set(key, g);
     }
     return g;
