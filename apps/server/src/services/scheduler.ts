@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type express from 'express';
+import { syncClock } from '../clock.js';
 import { config } from '../config.js';
 import { get, put, transaction } from '../db.js';
 import { keepAlive } from '../keepAlive.js';
@@ -31,12 +32,13 @@ const DAY = 24 * 60 * MINUTE;
 
 /** The jobs, imported when first run so loading this module loads none of them. */
 const defaultJobs = async (): Promise<ScheduledJob[]> => {
-  const [{ runTick }, { meetBotTick }, { sweepRuns }, { processOutstanding }, { syncFeedbackSharing }] = await Promise.all([
+  const [{ runTick }, { meetBotTick }, { sweepRuns }, { processOutstanding }, { syncFeedbackSharing }, { carryOnSimulations }] = await Promise.all([
     import('./simulation.js'),
     import('./meetBot.js'),
     import('./appGithub.js'),
     import('./feedbackIssues.js'),
     import('./feedback.js'),
+    import('./meetings.js'),
   ]);
   return [
     // The governance clock: close review periods and votes, auto-merge, auto-draft releases, publish to GitHub.
@@ -47,6 +49,8 @@ const defaultJobs = async (): Promise<ScheduledJob[]> => {
     { name: 'github-app', every: MINUTE, run: sweepRuns },
     // Public feedback summaries that couldn't be posted straight away are retried.
     { name: 'feedback', every: MINUTE, run: processOutstanding },
+    // Simulated calls nobody is watching still finish (and get analysed).
+    { name: 'simulations', every: MINUTE, run: carryOnSimulations },
     // Testers' pod feedback folders are shared with exactly ADMIN_WEBIDS.
     { name: 'feedback-sharing', every: DAY, run: syncFeedbackSharing },
   ];
@@ -87,16 +91,17 @@ export interface RunResult {
  *
  * The lease is renewed while the jobs run. It is not a fence: a runner that stalls past LEASE_MS (renewals
  * failing, or the instance frozen) and then resumes carries on beside the run that took over, until its jobs
- * end. On one server (the VM, where this runs from a timer) that overlap is harmless: the jobs' locks are held in
- * the process. Across instances it is not yet: the Meet bot's calendar lock is held in the process too, so two
- * runs at once could each create a meeting for the same new invite. Running on several instances (Vercel) is
- * therefore gated on the store-backed locks and atomic occurrence creation of the next step (docs/deploy.md).
+ * end. That overlap is an accepted limit because each job guards its own writes: meeting changes run in
+ * transactions, bot lanes are idempotent compare-and-sets, a calendar invite's meeting is looked for and created in
+ * one transaction, and a calendar read older than one already applied is dropped (docs/deploy.md).
  */
 export async function runDue(opts: { force?: boolean; now?: () => number; renewEvery?: number } = {}): Promise<RunResult> {
   // Read-only (the cutover): no scheduled work at all, since jobs call out (Recall.ai, GitHub, pods) before they
   // write to the database, which would refuse.
   if (config.readOnly) return { ran: [], failed: [] };
   const now = opts.now ?? Date.now;
+  // The demo's governance clock, as another instance may have moved it.
+  if (config.demoMode) await syncClock();
   const list = await jobs();
   const isDue = (s: SchedulerState | undefined, j: ScheduledJob) => opts.force || now() - (s?.lastRun[j.name] ?? 0) >= j.every - 1000;
   // Cheaply first: most requests find nothing due.

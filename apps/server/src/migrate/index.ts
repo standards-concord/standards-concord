@@ -22,6 +22,8 @@ import type { DocStore, StoredRow } from '../store/types.js';
  *   its source; only then does it record the import as verified, which the database store needs before it serves an
  *   imported database.
  * - `exportHistories` writes the database's histories back into git repositories, for rolling back to the VM.
+ * - `importPrivateFiles` / `exportPrivateFiles` move the server's own private files (data dir `private/`, for
+ *   accounts with no pod) into `privateFiles` rows and back; `verifyImport` checks them byte for byte.
  */
 
 /** Recorded once an import is verified (or a database store started with nothing to import). */
@@ -37,6 +39,58 @@ export interface ImportMarker {
 
 /** Collections only the database store has: kept by a copy, never compared with the source. */
 const TARGET_ONLY: Collection[] = ['gitObjects', 'gitRefs'];
+/** Rows that come from files in the data directory, not from the source database: checked against the files. */
+const FROM_FILES: Collection[] = ['privateFiles'];
+
+/** Every private file under `dataDir/private/<user id>/`, as its owner and path within that folder. */
+function* privateFilesIn(dataDir: string): Generator<{ userId: string; relPath: string; file: string }> {
+  const root = path.join(dataDir, 'private');
+  if (!fs.existsSync(root)) return;
+  for (const userId of fs.readdirSync(root)) {
+    const base = path.join(root, userId);
+    if (!fs.statSync(base).isDirectory()) continue;
+    for (const rel of fs.readdirSync(base, { recursive: true, encoding: 'utf8' })) {
+      const file = path.join(base, rel);
+      // A leftover temporary file from a crash (services/privateStore.ts) isn't data.
+      if (!fs.statSync(file).isFile() || path.basename(file).endsWith('.concord-tmp')) continue;
+      yield { userId, relPath: rel.split(path.sep).join('/'), file };
+    }
+  }
+}
+
+const privateRowId = (userId: string, relPath: string) => `${userId}/${relPath}`;
+
+/** Stores every private file in the data directory as a `privateFiles` row (replacing the rows there). */
+export async function importPrivateFiles(dataDir: string): Promise<{ files: number }> {
+  await unverify();
+  const target = await rawStore();
+  const now = new Date().toISOString();
+  const rows: StoredRow[] = [...privateFilesIn(dataDir)].map((f) => ({
+    collection: 'privateFiles',
+    id: privateRowId(f.userId, f.relPath),
+    parent: f.userId,
+    data: JSON.stringify({ id: privateRowId(f.userId, f.relPath), data: fs.readFileSync(f.file).toString('base64') }),
+    createdAt: now,
+  }));
+  await transaction(async () => {
+    for (const r of (await target.rows()).filter((x) => x.collection === 'privateFiles')) await target.remove('privateFiles', r.id);
+    await target.putRows(rows);
+  });
+  return { files: rows.length };
+}
+
+/** Writes the `privateFiles` rows back as files under `dataDir/private/`, readable by the server only. */
+export async function exportPrivateFiles(dataDir: string): Promise<{ files: number }> {
+  const rows = (await (await rawStore()).rows()).filter((r) => r.collection === 'privateFiles');
+  for (const r of rows) {
+    const rel = r.id.slice((r.parent ?? '').length + 1);
+    const file = path.join(dataDir, 'private', r.parent ?? '', rel);
+    if (!r.parent || !file.startsWith(path.join(dataDir, 'private', r.parent) + path.sep)) throw new Error(`privateFiles ${r.id} has no owner or leaves its folder`);
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(file, Buffer.from((JSON.parse(r.data) as { data: string }).data, 'base64'), { flag: 'wx', mode: 0o600 });
+  }
+  return { files: rows.length };
+}
 
 /** The verified marker belongs to the database it was recorded in: never copied, exported or compared. */
 const isMarker = (r: { collection: Collection; id: string }) => r.collection === 'kv' && r.id === IMPORT_MARKER;
@@ -237,7 +291,7 @@ export async function verifyImport(source: DocStore | undefined, dataDir: string
   // The documents, row for row and in the same order (list() breaks ties between equal creation times by
   // insertion order), against their source.
   if (source) {
-    const compared = (r: StoredRow) => !TARGET_ONLY.includes(r.collection) && !isMarker(r) && !madeByImport(r);
+    const compared = (r: StoredRow) => !TARGET_ONLY.includes(r.collection) && !FROM_FILES.includes(r.collection) && !isMarker(r) && !madeByImport(r);
     const key = (r: StoredRow) => `${r.collection} ${r.id}`;
     const want = (await source.rows()).filter(compared);
     const haveRows = (await (await rawStore()).rows()).filter(compared);
@@ -259,6 +313,16 @@ export async function verifyImport(source: DocStore | undefined, dataDir: string
     const got = haveRows.map(key).filter((k) => order.has(k));
     const i = want.findIndex((r, n) => key(r) !== got[n]);
     if (i >= 0) throw new Error(`the documents aren't in their source's order, from ${key(want[i])}`);
+  }
+  // Private files, byte for byte against the data directory.
+  if (dataDir) {
+    const stored = new Map((await (await rawStore()).rows()).filter((r) => r.collection === 'privateFiles').map((r) => [r.id, (JSON.parse(r.data) as { data: string }).data]));
+    for (const f of privateFilesIn(dataDir)) {
+      const id = privateRowId(f.userId, f.relPath);
+      if (stored.get(id) !== fs.readFileSync(f.file).toString('base64')) throw new Error(`private file ${id} wasn't imported as it is on disk`);
+      stored.delete(id);
+    }
+    if (stored.size) throw new Error(`${stored.size} private file(s) aren't in the data directory, such as ${[...stored.keys()][0]}`);
   }
   const ontologies = await list<OntologyProject>('ontologies');
   let objects = 0;
@@ -338,9 +402,9 @@ export async function importVerified(): Promise<boolean> {
   });
 }
 
-/** The documents an export writes to SQLite: everything but stored git objects and refs, and the marker. */
+/** The documents an export writes to SQLite: everything but stored git objects and refs, private files (exported as files) and the marker. */
 export async function exportRows(): Promise<StoredRow[]> {
-  return (await (await rawStore()).rows()).filter((r) => !TARGET_ONLY.includes(r.collection) && !isMarker(r));
+  return (await (await rawStore()).rows()).filter((r) => !TARGET_ONLY.includes(r.collection) && !FROM_FILES.includes(r.collection) && !isMarker(r));
 }
 
 /**

@@ -3,9 +3,9 @@ import path from 'node:path';
 import { FORMAT_INFO, serialize, stampRelease, XSD } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
-import { clock, DAY_MS } from '../clock.js';
+import { clock, DAY_MS, saveClock, syncClock } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, HttpError, list, put } from '../db.js';
+import { clearAll, get, HttpError, list, put, remove, transaction, type Collection } from '../db.js';
 import { restoreSpending, snapshotSpending } from '../llm/budget.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
@@ -28,6 +28,7 @@ import { generateRequirements, markPublished } from './requirements.js';
 import { addLink, createUseCase, getUseCase, proposeAnonymised, publishAnonymised } from './useCases.js';
 import { aggregationCompetencyQuestions, aggregationExampleData, AGGREGATION_USE_CASE, WEEKLY_SHIFTS_QUESTIONS, WEEKLY_SHIFTS_TERMS, WEEKLY_SHIFTS_USE_CASE } from './demoUseCases.js';
 import { createUser, getUser, listActivity, personas } from './users.js';
+import { withLease } from '../lease.js';
 
 const FIXTURE = path.join(config.repoRoot, 'packages/core/fixtures/volunteering.ttl');
 const VOL = 'https://w3id.org/odi/volunteering#';
@@ -51,22 +52,76 @@ async function freezeDemoSeed(u: UseCase) {
 
 export const personaFor = (u: User | undefined) => PERSONAS.find((p) => p.name === u?.name);
 
+/**
+ * Whether the demo seed finished: 'seeding' is recorded before it starts and 'done' once it has, so a seed cut short
+ * (a function stopped part way) is told apart from a finished one. No record: a demo seeded before this existed.
+ */
+const SEED_STATE = 'demo-seed-state';
+type SeedState = { id: string; state: 'seeding' | 'done' };
+
 /** The demo ontology every alpha tester lands in: the volunteering standard, mid-flight. */
 export async function seedDemo(): Promise<OntologyProject | undefined> {
-  const existing = (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
-  if (existing) return existing;
+  const find = async () => (await list<OntologyProject>('ontologies')).find((o) => o.slug === DEMO_SLUG);
+  const finished = async () => (await get<SeedState>('kv', SEED_STATE))?.state !== 'seeding';
+  const existing = await find();
+  if (existing && (await finished())) return existing;
   if (!fs.existsSync(FIXTURE)) {
     console.warn('[seed] volunteering fixture not found; skipping demo seed');
     return undefined;
   }
-  // Seed history in the recent past so review periods are partly elapsed.
-  const realOffset = clock.offsetMs;
-  clock.offsetMs = realOffset - 21 * DAY_MS;
-  try {
-    return await seedHistory();
-  } finally {
-    clock.offsetMs = realOffset;
-  }
+  // One instance seeds (Vercel starts several at once); the others wait for it and find its demo.
+  // Seed history in the recent past so review periods are partly elapsed, on a clock of its own: requests
+  // meanwhile (and other instances) keep the shared one.
+  return await withLease(
+    'demo-seed',
+    60_000,
+    async () => {
+      const now = await find();
+      if (now && (await finished())) return now;
+      // A seed cut short left part of a demo behind: it is cleared and the demo seeded again.
+      if (now) await clearUnfinishedSeed(now);
+      await put<SeedState>('kv', { id: SEED_STATE, state: 'seeding' });
+      const seeded = await clock.withShift(-21 * DAY_MS, seedHistory);
+      await put<SeedState>('kv', { id: SEED_STATE, state: 'done' });
+      return seeded;
+    },
+    { renew: true, waitMs: 5 * 60_000 },
+  );
+}
+
+/** Where a demo seed writes rows that belong to its ontology (named by parent, or by an `ontologyId` field). */
+const SEEDED: Collection[] = ['memberships', 'useCases', 'interviews', 'meetings', 'changeRequests', 'reviews', 'votes', 'releases', 'requirementsDocs', 'activity', 'apps', 'appChecks', 'appFollowUps', 'forks', 'agentReports', 'federations', 'federationReleases'];
+
+/** Collections whose rows are kept under a seeded row's id (not the ontology's), by the parent's collection. */
+const CHILDREN: Partial<Record<Collection, Collection[]>> = { changeRequests: ['reviews', 'votes', 'appChecks'], releases: ['votes'], federations: ['federationReleases'] };
+
+/**
+ * Clears what a seed cut short left behind, and only that: the unfinished demo ontology, the rows that belong to it
+ * and its history. Accounts (the personas too, which the next seed reuses), feedback, private data and the server's
+ * own records (the import marker, leases, start-up records, the clock) are kept. The rows go in one transaction, so a
+ * writer meanwhile either comes before (and its row, if it is the demo's, goes too) or after (and finds no demo).
+ * Only in demo mode, and only if the unfinished demo is the only ontology: otherwise nothing is cleared and the
+ * start-up task fails, so it is tried again and an administrator can reset the demo.
+ */
+async function clearUnfinishedSeed(partial: OntologyProject) {
+  const others = (await list<OntologyProject>('ontologies')).filter((o) => o.id !== partial.id);
+  if (!config.demoMode || others.length) throw new Error('The demo seed was cut short part way, and other data has been added since, so it was not cleared. Reset the demo to seed it again.');
+  console.warn('[seed] the demo seed was cut short part way; clearing it and seeding again');
+  // History first: if this stops in between, the unfinished demo is still there to be found, and cleared again.
+  await ontologyStore.forget(partial);
+  await transaction(async () => {
+    const parents: string[] = [];
+    for (const c of SEEDED) {
+      const owned = new Set([...(await list<{ id: string }>(c, partial.id)).map((d) => d.id), ...(await list<{ id: string; ontologyId?: string }>(c)).filter((d) => d.ontologyId === partial.id).map((d) => d.id)]);
+      for (const id of owned) await remove(c, id);
+      if (c in CHILDREN) parents.push(...owned);
+    }
+    // Rows kept under a change request, release or federation rather than the ontology (reviews, votes, app
+    // checks, federation releases) go with it, in the same transaction.
+    const childCollections = [...new Set(Object.values(CHILDREN).flat())];
+    for (const parent of parents) for (const c of childCollections) for (const d of await list<{ id: string }>(c, parent)) await remove(c, d.id);
+    await remove('ontologies', partial.id);
+  });
 }
 
 async function seedHistory() {
@@ -480,7 +535,9 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
 
 /** Fast-forward the governance clock (review periods, voting windows) and run the lifecycle sweep. */
 export async function advanceClock(days: number) {
+  await syncClock();
   clock.advance(days * DAY_MS);
+  await saveClock();
   return runTick();
 }
 
@@ -501,5 +558,6 @@ export async function resetAll() {
     await restoreSpending(spend);
   });
   clock.reset();
+  await saveClock();
   return seedDemo();
 }

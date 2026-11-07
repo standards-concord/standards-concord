@@ -8,9 +8,9 @@ The runbook for moving Concord's data from the Azure VM (SQLite and a git reposi
 
 | Command | What it does |
 | --- | --- |
-| `copy --from <data dir>` | Copies every document from `<data dir>/concord.sqlite` byte for byte (with its creation time and order), imports every object of every repository under `<data dir>/ontologies` and records each repository's refs, then runs `verify`. Every ontology must have its repository. It can run again: documents are replaced, objects are added once (a damaged copy is replaced), and fork branches are set exactly. |
-| `verify --from <data dir>` | Checks the copy without changing it, after forgetting any earlier verification. It checks that every document matches its source, in the same order. It checks that every ontology has a repository and a working draft, and that every commit a record names (the draft, forks, releases, change requests including the head they were triaged at) and every ref of its repository has its whole history in the database, with each object rehashed. Every object in each repository, reachable or not, must be stored byte for byte, and `git fsck --strict` must accept them all. Release tags must sit on their releases' commits, and the fork branches must be exactly those the records and repository call for. Only then does it record the `ontology-import` marker. |
-| `export --to <empty dir>` | Writes the database back out as `concord.sqlite` and a git repository per ontology, for rolling back to the VM: the draft, fork branches, and the tags, branches and pins the repository had at import, with everything they reach. Objects nothing reached at import (git would collect them anyway) aren't written. |
+| `copy --from <data dir>` | Copies every document from `<data dir>/concord.sqlite` byte for byte (with its creation time and order), imports every object of every repository under `<data dir>/ontologies` (recording each repository's refs) and every private file under `<data dir>/private` (kept for accounts with no pod), then runs `verify`. Every ontology must have its repository. It can run again: documents are replaced, objects are added once (a damaged copy is replaced), and fork branches are set exactly. |
+| `verify --from <data dir>` | Checks the copy without changing it, after forgetting any earlier verification. It checks that every document matches its source, in the same order. It checks that every ontology has a repository and a working draft, and that every commit a record names (the draft, forks, releases, change requests including the head they were triaged at) and every ref of its repository has its whole history in the database, with each object rehashed. Every object in each repository, reachable or not, must be stored byte for byte, and `git fsck --strict` must accept them all. Release tags must sit on their releases' commits, the fork branches must be exactly those the records and repository call for, and every private file must be stored byte for byte. Only then does it record the `ontology-import` marker. |
+| `export --to <empty dir>` | Writes the database back out as `concord.sqlite`, a git repository per ontology and the private files (readable by the server only), for rolling back to the VM: the draft, fork branches, and the tags, branches and pins the repository had at import, with everything they reach. Objects nothing reached at import (git would collect them anyway) aren't written. |
 
 Run it as `node --import tsx src/migrate/cli.ts …` from `apps/server`. Anything it couldn't settle but didn't treat as an error, such as a record naming a commit that isn't in the history, it prints as a note.
 
@@ -22,8 +22,9 @@ Run it as `node --import tsx src/migrate/cli.ts …` from `apps/server`. Anythin
 ## Before the day
 
 1. Steps 4 and 5 are merged and deployed to a Vercel preview that uses a Neon branch. Scheduled work runs without per-minute timers, and the API runs as functions.
-2. The VM's keys are in Vercel's production environment variables, pasted by Jesse from the Mac and never shown.
-3. Rehearse against a scratch Neon branch while the VM is still live. Run `copy --from /data` on the VM in a one-off container from the running image, with the tool's source mounted over the image's, `DATABASE_URL` pointing at the branch and the data volume mounted read-only. Then open the preview against that branch and check the ontologies, histories, releases, forks and sign-in. Note how long the copy took, because the read-only window will last about that long.
+2. **Step 5e is merged:** people who sign in with Solid keep their private data in their own pod, written as them. Until then the function would keep their private data in the database, against the agreed policy (Google and GitHub accounts' private data goes to the database; Solid accounts' goes to their pod). No cutover before it.
+3. The VM's keys are in Vercel's production environment variables, pasted by Jesse from the Mac and never shown.
+4. Rehearse against a scratch Neon branch while the VM is still live. Run `copy --from /data` on the VM in a one-off container from the running image, with the tool's source mounted over the image's, `DATABASE_URL` pointing at the branch and the data volume mounted read-only. Then open the preview against that branch and check the ontologies, histories, releases, forks and sign-in. Note how long the copy took, because the read-only window will last about that long.
 
 ## On the day
 
@@ -31,7 +32,7 @@ Each write to the VM needs Jesse's go, written in the Mac thread.
 
 1. **Read-only.** Set `CONCORD_READ_ONLY=true` in the VM's `app.env` and restart the container. Check that a POST returns 503 and that the site still reads.
 2. **Copy.** Run `copy --from /data` against production Neon, as in the rehearsal. It must end with `Verified:` and no unexpected notes.
-3. **Deploy.** Deploy to Vercel production with the middleware sending the API to the functions instead of the VM.
+3. **Deploy.** Remove `BACKEND_URL` from Vercel's production variables (or set `CONCORD_API=function`) and redeploy, so the build makes the API function instead of forwarding to the VM ([deploy.md](deploy.md#the-api-as-a-vercel-function)).
 4. **Verify on Vercel.** Sign in, open each ontology, compare the history and releases with the VM, make an edit on a scratch ontology, and check that the daily cron ran and that a release publishes to GitHub.
 5. **Keep the VM** read-only and untouched until Jesse agrees Vercel is working. Then stop it (and later delete it).
 

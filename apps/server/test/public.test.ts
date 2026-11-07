@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { PAGE_GENERATOR, renderOntologyPage } from '../src/public/render.js';
@@ -18,10 +18,16 @@ import { createUseCase, getUseCase, listUseCases, synthesise, updateUseCase } fr
 import { redactText, revealing, secretsFor } from '../src/services/redact.js';
 import { approvePublication, getCR, merge, publicationPreview, revise, updateOps } from '../src/services/changeRequests.js';
 import { draftRelease, getRelease, publishRelease } from '../src/services/releases.js';
-import { put } from '../src/db.js';
+import { get as getDoc, put } from '../src/db.js';
 import { createUser, getUser } from '../src/services/users.js';
 import type { OntologyView } from '@concord/core/types';
 import type { ChangeRequest, OntologySummary, PublicHoldReview, Release } from '@concord/shared';
+
+/** Forgets which renderer wrote the release pages (kept in the database), so they are all written again. */
+const forgetPageState = async () => {
+  const { remove } = await import('../src/db.js');
+  await remove('kv', 'public-pages');
+};
 
 /** Files stored beside the volunteering ontology's 1.0.0 release, as committed (null deletes). */
 const getReleaseFile = async (name: string) => await ontologyStore.readReleaseFile((await findProject('volunteering'))!, '1.0.0', name);
@@ -469,17 +475,44 @@ describe('re-review fixes', () => {
     }
   });
 
+  // The renderer record was a file in the data directory, which Vercel doesn't keep: it is in the database now,
+  // and a server upgraded in place reads the old file once instead of rewriting every page.
+  it('keeps which renderer wrote the pages in the database, starting from the old file', async () => {
+    await forgetPageState();
+    fs.writeFileSync(path.join(config.dataDir, 'public-pages.json'), JSON.stringify({ volunteering: PAGE_GENERATOR, 'other-onto': 'old renderer' }));
+    try {
+      await refreshReleasePages();
+      expect((await getDoc<{ state: Record<string, string> }>('kv', 'public-pages'))?.state).toMatchObject({ volunteering: PAGE_GENERATOR, 'other-onto': 'old renderer' });
+    } finally {
+      fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+    }
+  });
+
+  // Review r1 of step 5: a refresh that couldn't save its pages logged it and returned as if done, so the start-up
+  // task was recorded as finished and the pages were never refreshed. It now says it isn't finished.
+  it('says the refresh isn’t finished when the pages couldn’t be saved, so it is tried again', async () => {
+    await forgetPageState();
+    const spy = vi.spyOn(ontologyStore, 'updateReleaseFiles').mockRejectedValueOnce(new Error('database asleep'));
+    try {
+      expect(await refreshReleasePages()).toBe(false);
+      expect((await getDoc<{ state: Record<string, string> }>('kv', 'public-pages'))?.state.volunteering).not.toBe(PAGE_GENERATOR);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await refreshReleasePages()).toBe(true);
+    expect((await getDoc<{ state: Record<string, string> }>('kv', 'public-pages'))?.state.volunteering).toBe(PAGE_GENERATOR);
+  });
+
   it('regenerates release pages from trusted state, keeps unreadable snapshots, and backfills missing ones', async () => {
     const project = (await findProject('volunteering'))!;
     // Pages and snapshots as committed (git is where they are read from).
     const page = 'index.html';
     const snap = 'requirements.json';
-    const stateFile = path.join(config.dataDir, 'public-pages.json');
     const original = { page: (await getReleaseFile(page))!, snap: (await getReleaseFile(snap))! };
-    const forget = () => fs.rmSync(stateFile, { force: true });
+    const forget = () => forgetPageState();
     try {
       // A page from before the fixes that even carries the marker text: state, not content, decides.
-      forget();
+      await forget();
       await setReleaseFile(page, `<html><p>${PAGE_GENERATOR}</p><img src=x onerror=alert(1)></html>`);
       await setReleaseFile(snap, null);
       await refreshReleasePages();
@@ -487,7 +520,7 @@ describe('re-review fixes', () => {
       expect((await getReleaseFile(page))!).toContain(`content="${PAGE_GENERATOR}"`);
       // The demo's use cases are fixed content, so its missing snapshot is backfilled.
       expect(JSON.parse((await getReleaseFile(snap))!).useCases.map((u: { title: string }) => u.title)).toContain('Aggregate volunteering opportunities across platforms');
-      expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).volunteering).toBe(PAGE_GENERATOR);
+      expect((await getDoc<{ state: Record<string, string> }>('kv', 'public-pages'))?.state.volunteering).toBe(PAGE_GENERATOR);
       const canonical = (await getReleaseFile(snap))!;
 
       // Up to date: nothing is rewritten or committed, whatever the page says.
@@ -499,7 +532,7 @@ describe('re-review fixes', () => {
 
       // An unreadable snapshot is kept as it is, and the page says the use cases weren't recorded.
       for (const broken of ['{not json', '{"useCases":[null]}', '{"useCases":[{"id":"x"}]}']) {
-        forget();
+        await forget();
         await setReleaseFile(snap, broken);
         await refreshReleasePages();
         expect(await getReleaseFile(snap), broken).toBe(broken);
@@ -508,7 +541,7 @@ describe('re-review fixes', () => {
       }
 
       // A snapshot holding exactly what may be published is history: kept, and the page re-rendered from it.
-      forget();
+      await forget();
       await setReleaseFile(snap, canonical);
       await refreshReleasePages();
       expect(await getReleaseFile(snap)).toBe(canonical);
@@ -516,7 +549,7 @@ describe('re-review fixes', () => {
     } finally {
       await setReleaseFile(page, original.page);
       await setReleaseFile(snap, original.snap);
-      forget();
+      await forget();
       await refreshReleasePages();
     }
   });
@@ -558,9 +591,8 @@ describe('fourth review fixes', () => {
 describe('fifth review fixes', () => {
   const NS = 'https://w3id.org/odi/volunteering#';
   const base = async () => (await listUseCases((await findProject('volunteering'))!.id))[0];
-  const cleanupDone = () => fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8').includes('"cleanup:volunteering": "privacy clean-up 5"');
   const rerun = async () => {
-    fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+    await forgetPageState();
     await refreshReleasePages();
   };
 
@@ -590,10 +622,9 @@ describe('sixth review fixes', () => {
   const SRC = 'http://purl.org/dc/terms/source';
   const base = async () => (await listUseCases((await findProject('volunteering'))!.id))[0];
   const rerun = async () => {
-    fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+    await forgetPageState();
     await refreshReleasePages();
   };
-  const cleanupDone = () => fs.readFileSync(path.join(config.dataDir, 'public-pages.json'), 'utf8').includes('"cleanup:volunteering": "privacy clean-up 5"');
   const everyFormat = async (version: string) =>
     Promise.all(['', '.ttl', '.nt', '.owl', '.jsonld', '.omn', '.yaml'].map(async (ext) => (await request(app).get(`/def/volunteering/${version}${ext}`)).text)).then((xs) => xs.join('\n'));
 
@@ -843,7 +874,7 @@ describe('versions published before approval existed', () => {
     await updateProject({ ...project, publishedWithApproval: undefined });
     const { remove } = await import('../src/db.js');
     await remove('kv', `public-hold:${project.id}`);
-    fs.rmSync(path.join(config.dataDir, 'public-pages.json'), { force: true });
+    await forgetPageState();
     await refreshReleasePages();
     return project;
   };

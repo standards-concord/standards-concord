@@ -1,10 +1,11 @@
+import { createHash } from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
-import { openDb } from '../src/db.js';
+import { get, openDb, put } from '../src/db.js';
 import { solid } from '../src/services/solid.js';
-import { clientCredentialsLogin, finishLogin, guardedFetch, guardedRequests, podReader, podRequester, resolveIssuer, startLogin } from '../src/solidOidc.js';
+import { clientCredentialsLogin, exportLogin, finishLogin, importLogin, shareLogins, type StoredLogin, guardedFetch, guardedRequests, podReader, podRequester, resolveIssuer, startLogin } from '../src/solidOidc.js';
 
 /**
  * The Solid-OIDC flow against a scripted OpenID provider on 127.0.0.1, which
@@ -223,6 +224,30 @@ describe('Solid-OIDC against a scripted provider', () => {
     expect(seen.map((r) => new URL(r.split(' ')[1]!).pathname)).toEqual(expect.arrayContaining(['/.well-known/openid-configuration', '/register', '/token', '/jwks', '/alice/profile/card']));
   });
 
+  it('keeps a sign-in in progress in the database, so any server can finish it, and only once', async () => {
+    // Step 5 (Vercel): the sign-in in progress was in this process's memory, so a callback reaching another
+    // function instance failed with "it expired or was started in another browser".
+    const { as } = await resolveIssuer(webId());
+    const { loginId, url } = await startLogin(as, '/somewhere');
+    const row = `solid-login:${createHash('sha256').update(loginId).digest('hex')}`;
+    expect(await get('kv', row)).toMatchObject({ returnTo: '/somewhere', solidLoginExpires: expect.any(Number) });
+    const auth = new URL(url);
+    expectedNonce = auth.searchParams.get('nonce')!;
+    const callback = `${config.publicUrl}/auth/solid/callback?code=abc&state=${auth.searchParams.get('state')}`;
+    expect((await finishLogin(loginId, callback)).webId).toBe(webId());
+    expect(await get('kv', row)).toBeUndefined();
+    await expect(finishLogin(loginId, callback)).rejects.toThrow(/expired or was started in another browser/);
+  });
+
+  it('refuses a sign-in that has expired', async () => {
+    const { as } = await resolveIssuer(webId());
+    const { loginId, url } = await startLogin(as, '/somewhere');
+    const row = `solid-login:${createHash('sha256').update(loginId).digest('hex')}`;
+    await put('kv', { ...(await get<object>('kv', row))!, id: row, solidLoginExpires: Date.now() - 1 });
+    const callback = `${config.publicUrl}/auth/solid/callback?code=abc&state=${new URL(url).searchParams.get('state')}`;
+    await expect(finishLogin(loginId, callback)).rejects.toThrow(/expired/);
+  });
+
   it('finishes with the provider metadata it started with, never fetching it again', async () => {
     // While the browser is away, the provider's metadata changes to point the token endpoint elsewhere.
     const done = await signIn(webId(), () => (behaviour.tokenEndpoint = `${base}/elsewhere/token`));
@@ -314,6 +339,31 @@ describe('reading a pod as the signed-in WebID', () => {
     await expect(get(`${base}/pod/big.json`, 'application/json')).rejects.toThrow(/Timed out/);
     expect(Date.now() - t).toBeLessThan(8900);
   }, 20_000);
+
+  it('refreshes a login kept in the database once across instances, and each instance takes up the new token', async () => {
+    // Step 5 (Vercel): an administrator's login was in one process's memory, so another instance answered "your
+    // Solid sign-in has ended", and two instances refreshing it at once would spend a rotating refresh token twice.
+    process.env.CONCORD_ENCRYPTION_KEY = 'ab'.repeat(32);
+    try {
+      const { login } = await signIn();
+      const rows = new Map<string, StoredLogin>([['s1', await exportLogin(login)]]);
+      shareLogins({
+        load: async (id) => (rows.has(id) ? { ...(await importLogin(rows.get(id)!)), sharedId: id } : undefined),
+        save: async (id, l) => void rows.set(id, { ...rows.get(id)!, accessToken: l.accessToken, refreshToken: l.refreshToken, expiresAt: l.expiresAt }),
+      });
+      // The same login on two instances, both finding it expired.
+      const [a, b] = await Promise.all([1, 2].map(async () => ({ ...(await importLogin(rows.get('s1')!)), sharedId: 's1', expiresAt: 0 })));
+      const readers = await Promise.all([podReader(a), podReader(b)]);
+      expect(readers.every(Boolean)).toBe(true);
+      expect(refreshes).toBe(1);
+      expect(a.accessToken).toBe('at-r1');
+      expect(b.accessToken).toBe('at-r1');
+      expect(rows.get('s1')).toMatchObject({ accessToken: 'at-r1', refreshToken: 'rt-2' });
+      expect((await readers[1]!(`${base}/pod/big.json`, 'application/json')).status).toBe(200);
+    } finally {
+      delete process.env.CONCORD_ENCRYPTION_KEY;
+    }
+  });
 
   it('refreshes an expiring login once, however many requests need it at the same moment', async () => {
     const { login } = await signIn();

@@ -4,10 +4,10 @@ import { allTerms, compactIRI, expandIRI, FORMAT_INFO, serialize, usedBy, valida
 import type { OutputFormat } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
-import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, sessionHandle, setSessionCookie } from '../auth.js';
+import { adminLoginFor, adminLoginsKept, endAdminLogin, providers, requireUser, SESSION_COOKIE, sessionHandle, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { detached, transaction, get, HttpError, list, put } from '../db.js';
+import { transaction, get, HttpError, list, put } from '../db.js';
 import { filterAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
@@ -38,7 +38,7 @@ import {
   type AdminAction,
 } from '../services/feedbackIssues.js';
 import { listTemplates } from '../services/governance.js';
-import { mediaFile, mediaIndex, MEDIA_TYPES } from '../services/media.js';
+import { mediaFile, mediaIndex, mediaRedirect, MEDIA_TYPES } from '../services/media.js';
 import * as meetBot from '../services/meetBot.js';
 import * as meetings from '../services/meetings.js';
 import {
@@ -74,6 +74,7 @@ import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser
 import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
 import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
 import { reasonInWorker } from '../reasoner/pool.js';
+import { keepAlive } from '../keepAlive.js';
 
 const ROLES = Object.keys(ROLE_INFO) as Role[];
 const FORMATS = Object.keys(FORMAT_INFO) as OutputFormat[];
@@ -143,7 +144,7 @@ const hasAppToken = (req: Request) => /^Bearer\s+cn[ar]_\S+$/i.test(req.get('aut
 
 export function apiRouter(): Router {
   const r = Router();
-  r.use(express.json({ limit: '5mb' }));
+  r.use(express.json({ limit: config.bodyLimits.json }));
   // Responses depend on who is signed in (and on consent that can be withdrawn at any time), so no cache may keep or share them.
   r.use((_req, res, next) => {
     res.set('Cache-Control', 'private, no-store');
@@ -161,6 +162,8 @@ export function apiRouter(): Router {
     res.set('cache-control', 'public, max-age=300').json(index);
   });
   r.get('/media/:file', async (req, res) => {
+    const away = await mediaRedirect(String(req.params.file));
+    if (away) return void res.set('cache-control', 'public, max-age=300').redirect(302, away);
     const file = await mediaFile(String(req.params.file));
     if (!file) throw new HttpError(404, 'No such video for the current release');
     res.sendFile(file, { headers: { 'content-type': MEDIA_TYPES[path.extname(file)] ?? 'application/octet-stream', 'cache-control': 'public, max-age=3600' } });
@@ -195,7 +198,7 @@ export function apiRouter(): Router {
         chosen === 'steward' ? ['owner', 'steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) await setRoles(demo.id, user.id, [...new Set(roles)]);
     }
-    endAdminLogin(req.cookies?.[SESSION_COOKIE]);
+    await endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     const token = await setSessionCookie(res, user.id, 'demo');
     await rememberTester(req, res, testerBefore, user);
     res.json(await sessionInfo(user, token));
@@ -209,7 +212,7 @@ export function apiRouter(): Router {
     // if this browser's session is now another one (a newer sign-in, another account, or none), nothing ends.
     const meant = optStr(req.body?.session);
     if (meant !== undefined && meant !== sessionHandle(req.cookies?.[SESSION_COOKIE])) return void res.json({ ended: false });
-    endAdminLogin(req.cookies?.[SESSION_COOKIE]);
+    await endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     await clearTesterCookie(req, res);
     await destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({ ended: true });
@@ -530,7 +533,14 @@ export function apiRouter(): Router {
     requireUser(req);
     return await meetingFor(req);
   };
-  r.get('/meetings/:id', async (req, res) => res.json(await visible(req)));
+  r.get('/meetings/:id', async (req, res) => {
+    const m = await visible(req);
+    // A simulated call is carried on by whoever reads it (see meetings.simulateCall).
+    if (m && meetings.simulationRunning(m)) void keepAlive(meetings.advanceSimulation(m.id)).catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
+    // An analysis whose run died is started again (see meetings.recoverAnalysis).
+    if (m) meetings.recoverAnalysis(m);
+    res.json(m);
+  });
   r.patch('/meetings/:id', async (req, res) => {
     const b = req.body ?? {};
     const bool = (v: unknown) => (typeof v === 'boolean' ? v : undefined);
@@ -554,7 +564,7 @@ export function apiRouter(): Router {
   r.post('/meetings/:id/end', async (req, res) => {
     const m = await meetings.getMeeting(String(req.params.id));
     await meetings.requireFacilitator(m, requireUser(req), 'end this call');
-    meetings.stopSimulation(m.id);
+    await meetings.stopSimulation(m.id);
     res.json(await meetings.endLiveMeeting(m.id));
   });
   r.post('/meetings/:id/propose', async (req, res) => {
@@ -567,42 +577,18 @@ export function apiRouter(): Router {
     const shown = await filterAsync(out.useCases, (u) => useCases.canSee(u, user));
     res.json({ useCases: await Promise.all(shown.map((u) => useCases.present(u, user))) });
   });
-  r.get('/meetings/:id/stream', async (req, res) => {
-    const user = requireUser(req);
+  // Live updates while a call is on, polled by the meeting page (every couple of seconds). The meeting record
+  // is the log: its transcript only grows, so `from` (the lines the page has) is the cursor, and whichever
+  // server instance answers reads the same record. A long-lived stream would hold one Vercel function per
+  // viewer for the whole call, and only hear what happened on its own instance.
+  r.get('/meetings/:id/updates', async (req, res) => {
     const m = await visible(req);
-    const show = (x: Meeting) => meetings.meetingView(x, user);
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
-    send('meeting', { type: 'meeting', meeting: m });
-    // An EventEmitter listener: nothing awaits it, so its database reads can't be allowed to reject. It runs in
-    // the context of whoever emitted, possibly inside their transaction, so it reads detached from it: what it
-    // sends is committed, and it isn't refused once that transaction has ended. Events go out one at a time, in
-    // the order they were emitted, even when one needs a read and the next doesn't.
-    let queue: Promise<void> = Promise.resolve();
-    const inOrder = (step: () => Promise<void> | void) => {
-      queue = queue.then(step).catch(() => {});
-    };
-    const onEvent = (e: { type: string } & Record<string, unknown>) => {
-      if (e.type === 'status')
-        inOrder(() =>
-          detached(async () => await show(await meetings.getMeeting(m.id))).then(
-            (meeting) => void send('status', { type: 'status', status: e.status, meeting }),
-            () => void send('status', { type: 'status', status: e.status }),
-          ),
-        );
-      else if (e.type === 'meeting')
-        inOrder(async () => {
-          const x = await detached(() => show(e.meeting as Meeting));
-          if (x) send('meeting', { type: 'meeting', meeting: x });
-        });
-      else inOrder(() => void send(e.type, e));
-    };
-    meetings.meetingEvents.on(m.id, onEvent);
-    const ping = setInterval(() => res.write(': ping\n\n'), 20000);
-    req.on('close', () => {
-      clearInterval(ping);
-      meetings.meetingEvents.off(m.id, onEvent);
-    });
+    if (meetings.simulationRunning(m)) void keepAlive(meetings.advanceSimulation(m.id)).catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
+    meetings.recoverAnalysis(m);
+    const asked = Math.floor(Number(req.query.from));
+    // A cursor past the end (or none) gets the whole transcript.
+    const from = Number.isFinite(asked) && asked >= 0 && asked <= m.transcript.length ? asked : 0;
+    res.json({ meeting: { ...m, transcript: [] }, from, lines: m.transcript.slice(from) });
   });
   r.post('/webhooks/recall', async (req, res) => {
     await meetings.recallWebhook(String(req.query.meeting), String(req.query.secret), req.body);
@@ -763,8 +749,8 @@ export function apiRouter(): Router {
     const diff = await turtleDiff(c);
     // Building the diff takes a while: a source use case may have been withdrawn or made private meanwhile.
     // So check again, and send, under the consent lock, which every withdrawal and visibility change waits
-    // for. Accepted limit: the lock is per server process (as for merges and releases), and a meeting's own
-    // visibility doesn't take it, so a meeting hidden in the instant between this check and the send isn't caught.
+    // for (on every instance). Accepted limit: a meeting's own visibility doesn't take it, so a meeting hidden in
+    // the instant between this check and the send isn't caught.
     await useCases.withConsentLock(c.ontologyId, async () => {
       if (await useCases.crWithheld(await cr(req), req.user)) throw new HttpError(404, 'No such change request');
       res.json(diff);
@@ -1119,13 +1105,14 @@ export function apiRouter(): Router {
   // Testers' feedback read straight from their pods, as the admin's own WebID (only if they signed in with Solid).
   r.get('/feedback/pods', async (req, res) => {
     feedbackAdmin(req);
-    const login = adminLoginFor(req);
+    if (!adminLoginsKept()) throw new HttpError(503, 'Reading testers’ pods is off on this server: it needs CONCORD_ENCRYPTION_KEY to keep your Solid sign-in.');
+    const login = await adminLoginFor(req);
     const read = login ? await podReader(login) : undefined;
-    // Their Solid login is kept in memory, for the browser session that signed in: a restart, another browser or an expired token ends it.
+    // Their Solid login is kept for the browser session that signed in (sealed in the database with CONCORD_ENCRYPTION_KEY, else in memory): sign-out, another browser or an expired token ends it.
     if (!login || !read) throw new HttpError(403, 'Your Solid sign-in has ended. Sign out and sign in with your WebID again to read the pods.');
     res.json(await readPodFeedback({ webId: login.webId, get: read }));
   });
-  r.post('/transcribe', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: '25mb' }), async (req, res) => {
+  r.post('/transcribe', express.raw({ type: ['audio/*', 'application/octet-stream'], limit: config.bodyLimits.audio }), async (req, res) => {
     if (!Buffer.isBuffer(req.body) || !req.body.length) throw new HttpError(400, 'Send audio as the request body');
     res.json({ text: await transcribe(req.body, req.header('content-type') ?? 'audio/webm') });
   });

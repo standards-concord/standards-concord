@@ -29,7 +29,7 @@ const calls: Call[] = [];
 let stub: http.Server;
 let nextBot = 0;
 /** How the stand-in misbehaves, per test. */
-const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[], refuseDelayMs: 0, holdCreate: null as Promise<void> | null };
+const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, refuseChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[], refuseDelayMs: 0, holdCreate: null as Promise<void> | null };
 /** Called when a booking request whose reply is held (holdBookingReply) reaches the stub. */
 let createArrived: (() => void) | undefined;
 /**
@@ -114,7 +114,7 @@ beforeAll(async () => {
       // failCancel: every bot refuses to be removed; refuseIds: just these ones (after refuseDelayMs).
       const refuses = stubMode.failCancel || stubMode.refuseIds.some((id) => req.url?.startsWith(`/bot/${id}/`));
       if (refuses && (req.method === 'DELETE' || req.url?.includes('leave_call'))) return reply(405, '{"detail":"Method not allowed"}', stubMode.refuseDelayMs);
-      if (req.url?.includes('send_chat_message')) return stubMode.failChat ? reply(500, '{"detail":"chat unavailable"}') : reply(200, '{}', stubMode.chatDelayMs);
+      if (req.url?.includes('send_chat_message')) return stubMode.failChat ? reply(500, '{"detail":"chat unavailable"}') : stubMode.refuseChat ? reply(400, '{"detail":"bot not in call"}') : reply(200, '{}', stubMode.chatDelayMs);
       const done = req.url?.match(/^\/bot\/(bot-\d+)\/(?:leave_call\/)?$/);
       if (done && (req.method === 'DELETE' || req.method === 'POST')) bots.get(done[1])?.status_changes.push({ code: 'done' });
       if (req.method === 'DELETE' && stubMode.cancelDelayMs) return reply(200, '{}', stubMode.cancelDelayMs);
@@ -136,7 +136,7 @@ afterAll(() => {
 
 beforeEach(async () => {
   calls.length = 0;
-  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [], refuseDelayMs: 0, holdCreate: null });
+  Object.assign(stubMode, { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, refuseChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [], refuseDelayMs: 0, holdCreate: null });
   createArrived = undefined;
   for (const m of await list<Meeting>('meetings')) if (m.source === 'calendar-invite') await remove('meetings', m.id);
   for (const k of await list<{ id: string }>('kv')) if (/^meet-bot:(approval|retire|retired):/.test(k.id)) await remove('kv', k.id);
@@ -294,6 +294,69 @@ describe('invite-by-email', () => {
     expect(await calendarMeetings()).toEqual([]);
   });
 
+  // On Vercel each function instance had its own lanes and its own calendar lock, so two instances could add the
+  // same call from the calendar, or send its bookings, at once. Each now holds a lease in the database too.
+  it('leaves the calendar, or a call’s bookings, to another server already dealing with them, and picks them up afterwards', async () => {
+    writeFeed(oneOff({ start: '2026-11-14T15:00:00Z', end: '2026-11-14T16:00:00Z', bot: 'concord.bot+volunteering@example.org' }));
+    await put('kv', { id: 'lease:meet-bot:calendar', token: 'another-server', until: Date.now() + 60_000 });
+    await syncNow(at('2026-11-14T09:00:00Z'));
+    expect(await calendarMeetings()).toEqual([]);
+    await remove('kv', 'lease:meet-bot:calendar');
+    await sync(at('2026-11-14T09:01:00Z'));
+    const [m] = await calendarMeetings();
+    expect(m.calendar?.start).toBe('2026-11-14T15:00:00.000Z');
+
+    await put('kv', { id: `lease:bot-lane:${m.id}`, token: 'another-server', until: Date.now() + 60_000 });
+    calls.length = 0;
+    await dispatchDue(at('2026-11-14T14:46:00Z'));
+    expect(calls).toEqual([]);
+    await remove('kv', `lease:bot-lane:${m.id}`);
+    await dispatchDue(at('2026-11-14T14:47:00Z'));
+    expect(calls).toEqual([expect.objectContaining({ method: 'POST', url: '/bot/', body: expect.objectContaining({ join_at: '2026-11-14T15:00:00.000Z' }) })]);
+    expect((await getMeeting(m.id)).bot?.botId).toBe(`bot-${nextBot}`);
+    writeFeed();
+    await sync(at('2026-11-14T14:50:00Z'));
+    expect(await calendarMeetings()).toEqual([]);
+  });
+
+  // Review r1 of step 5: the feed is read before the calendar lease is taken, so a slow reply could be applied after
+  // a newer one and bring back a call the newer one had cancelled. Each read is numbered as it starts, and a read
+  // older than one already applied is dropped (each write checks it is still the newest, under the writer lock).
+  it('drops a slow calendar read that a newer one overtook, so it can’t bring back a cancelled call', async () => {
+    writeFeed(oneOff({ uid: 'slow', start: '2026-11-14T15:00:00Z', end: '2026-11-14T16:00:00Z' }));
+    await sync(at('2026-11-14T09:00:00Z'));
+    expect(await calendarMeetings()).toHaveLength(1);
+    // The next read gets the feed as it is now (still listing the call), but its reply is held up.
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let asked!: () => void;
+    const requested = new Promise<void>((r) => (asked = r));
+    const slow = http.createServer((_req, res) => {
+      const body = fs.readFileSync(feed);
+      asked();
+      void gate.then(() => res.writeHead(200, { 'content-type': 'text/calendar' }).end(body));
+    });
+    await new Promise<void>((r) => slow.listen(0, '127.0.0.1', r));
+    try {
+      config.meetBot.calendarIcsUrl = `http://127.0.0.1:${(slow.address() as AddressInfo).port}/calendar/ical/bot/private-x/basic.ics`;
+      const behind = syncNow(at('2026-11-14T09:05:00Z'));
+      await requested;
+      // Meanwhile the call is cancelled, and a newer read applies that.
+      config.meetBot.calendarIcsUrl = pathToFileURL(feed).href;
+      writeFeed();
+      await syncNow(at('2026-11-14T09:06:00Z'));
+      await meetBotIdle();
+      expect(await calendarMeetings()).toEqual([]);
+      open();
+      await behind;
+      await meetBotIdle();
+      expect(await calendarMeetings()).toEqual([]);
+    } finally {
+      open();
+      slow.close();
+    }
+  });
+
   it('goes live when the call starts, keeps prompts out of the chat unless asked, and ends after the call', async () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-10T14:00:00Z'));
@@ -369,6 +432,110 @@ describe('invite-by-email', () => {
 
   // Review r1 of step 4: when the last transcript line arrived was kept in the memory of the instance that took
   // the webhook, so another instance's tick saw none and ended a call still in full flow once its slot was over.
+  /** A calendar call with its bot in the call, and a suggestion waiting to be posted. */
+  const liveWithPrompt = async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:50:00Z'));
+    await dispatchDue(at('2026-11-10T15:00:30Z'));
+    const [m] = await calendarMeetings();
+    const secret = (await list<{ id: string; secret: string }>('kv')).find((k) => k.id === `meeting-secret:${m.id}`)!.secret;
+    for (let i = 0; i < 4; i++) await recallWebhook(m.id, secret, { event: 'transcript.data', data: { data: { participant: { name: 'Aisha Rahman' }, words: [{ text: `A shift is a slot on a rota, part ${i}.`, start_timestamp: { relative: 5 } }] } } });
+    return getMeeting(m.id);
+  };
+
+  // Review r1 of step 5: a run that posted a suggestion and died before recording it left a claim that lapsed, and
+  // the next request posted it again (Recall.ai's chat has no idempotency key). Now that outcome is unknown, and
+  // says so: the first request after it is refused, and a facilitator who posts again does so knowingly.
+  it('marks a suggestion whose post was interrupted as maybe posted, and posts it again only when asked twice', async () => {
+    const m = await liveWithPrompt();
+    expect(m.facilitatorPrompts).toHaveLength(1);
+    await saveMeeting({ ...m, facilitatorPrompts: [{ ...m.facilitatorPrompts[0], postClaim: { token: 'died', until: Date.now() - 1 } }] });
+    const s = await steward('Steward Pip');
+    calls.length = 0;
+    const first = await s.post(`/api/meetings/${m.id}/prompts/0/post`);
+    expect(first.status).toBe(409);
+    expect(first.body.error).toMatch(/may already be in the call’s chat/);
+    expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: false, postUncertain: true });
+    expect(calls.filter((c) => c.url.includes('send_chat_message'))).toEqual([]);
+    const again = await s.post(`/api/meetings/${m.id}/prompts/0/post`);
+    expect(again.status).toBe(200);
+    expect(calls.filter((c) => c.url.includes('send_chat_message'))).toHaveLength(1);
+    expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: true });
+    expect((await getMeeting(m.id)).facilitatorPrompts[0].postUncertain).toBeUndefined();
+  });
+
+  // Review r2 of step 5: a post with no answer (a timeout, a dropped connection, a server error) was recorded as an
+  // ordinary failure and its claim cleared, so the next request posted it again without warning, though Recall.ai
+  // may have posted it already. Now that is "maybe posted"; a definite refusal (4xx) stays an ordinary failure.
+  it('marks a suggestion as maybe posted when Recall.ai gives no clear answer, and as failed when it refuses', async () => {
+    const m = await liveWithPrompt();
+    const s = await steward('Steward Ari');
+    stubMode.failChat = true;
+    const unsure = await s.post(`/api/meetings/${m.id}/prompts/0/post`);
+    expect(unsure.status).toBe(409);
+    expect(unsure.body.error).toMatch(/may already be in the call’s chat/);
+    expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: false, postUncertain: true });
+    // Automatic posts never repeat it; a facilitator who asks again does post it.
+    stubMode.failChat = false;
+    calls.length = 0;
+    const { postPrompt } = await import('../src/services/meetings.js');
+    await postPrompt(m.id, 0, { quiet: true });
+    expect(calls.filter((c) => c.url.includes('send_chat_message'))).toEqual([]);
+    expect((await s.post(`/api/meetings/${m.id}/prompts/0/post`)).status).toBe(200);
+    expect((await getMeeting(m.id)).facilitatorPrompts[0]).toMatchObject({ posted: true });
+  });
+
+  it('records a definite refusal from Recall.ai as a failed post, not a maybe-posted one', async () => {
+    const other = await liveWithPrompt();
+    const s = await steward('Steward Bea');
+    stubMode.refuseChat = true;
+    const refused = await s.post(`/api/meetings/${other.id}/prompts/0/post`);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).not.toMatch(/may already be/);
+    const p = (await getMeeting(other.id)).facilitatorPrompts[0];
+    expect(p).toMatchObject({ posted: false, postError: expect.stringMatching(/400/) });
+    expect(p.postUncertain).toBeUndefined();
+  });
+
+  // Review r1 of step 5: a notice sender that stalled past its claim still recorded its outcome, so it could set
+  // what the call was told back to a setting a newer notice had replaced.
+  it('ignores the outcome of a chat notice whose claim another run has taken over', async () => {
+    const { announceChatMode, mutateMeeting } = await import('../src/services/meetings.js');
+    const m = await liveWithPrompt();
+    expect(m.chatModeAnnounced).toBe(false);
+    await mutateMeeting(m.id, (x) => (x.postPromptsToChat = true));
+    stubMode.chatDelayMs = 200;
+    const slow = announceChatMode(m.id);
+    await expect.poll(async () => (await getMeeting(m.id)).chatNoticeClaim).toBeTruthy();
+    // Its claim lapses; another run takes over and the setting changes back meanwhile.
+    await mutateMeeting(m.id, (x) => {
+      x.chatNoticeClaim = { token: 'newer-run', until: Date.now() + 60_000 };
+      x.postPromptsToChat = false;
+    });
+    await slow;
+    const after = await getMeeting(m.id);
+    expect(after.chatModeAnnounced).toBe(false);
+    expect(after.chatNoticeClaim?.token).toBe('newer-run');
+  });
+
+  // Review r2 of step 5: a calendar read that found the invite cancelled ended a live call without checking that no
+  // newer read had applied since (only a scheduled call's withdrawal was checked), so a read held up behind a newer
+  // one that kept the call could still take the bot out. The check now goes with the decision, in one transaction.
+  it('doesn’t end a live call for a calendar read a newer one has overtaken', async () => {
+    const { endLiveMeeting } = await import('../src/services/meetings.js');
+    const m = await liveWithPrompt();
+    calls.length = 0;
+    expect(await endLiveMeeting(m.id, async () => false)).toBeUndefined();
+    const after = await getMeeting(m.id);
+    expect(after.status).toBe('live');
+    expect(after.bot).toMatchObject({ status: 'in-call', gen: m.bot!.gen });
+    expect(calls.filter((c) => c.url.includes('leave_call'))).toEqual([]);
+    // A read that is still the newest ends it.
+    await endLiveMeeting(m.id, async () => true).catch(() => undefined);
+    expect((await getMeeting(m.id)).bot?.gen).not.toBe(m.bot!.gen);
+  });
+
   it('keeps a call going past its slot while lines still arrive, whichever instance took them', async () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-10T14:00:00Z'));
@@ -914,13 +1081,17 @@ describe('invite-by-email', () => {
   it('a skip that lands just before a transcript line wins: the line is dropped', async () => {
     const m = await liveCall();
     const { meetingLock } = await import('../src/services/meetings.js');
-    // Hold the meeting's lock, queue the webhook behind it, then mark the call skipped before releasing.
+    // The skip holds the meeting's lock (and so the database's writer lock) when the webhook arrives: the webhook
+    // queues behind it, and the call is marked skipped before the lock is let go.
     let release!: () => void;
-    const held = meetingLock(m.id, () => new Promise<void>((r) => (release = r)));
+    const go = new Promise<void>((r) => (release = r));
+    const held = meetingLock(m.id, async () => {
+      await go;
+      const fresh = await getMeeting(m.id);
+      await saveMeeting({ ...fresh, calendar: { ...fresh.calendar!, skip: true } });
+    });
     const hook = line(m.id, 'Arrives during the skip.', m.bot!.botId);
     await new Promise((r) => setTimeout(r, 20));
-    const fresh = await getMeeting(m.id);
-    await saveMeeting({ ...fresh, calendar: { ...fresh.calendar!, skip: true } });
     release();
     await held;
     await hook;

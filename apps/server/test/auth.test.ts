@@ -103,6 +103,16 @@ describe('reading feedback', () => {
       expect(asAdmin.status).toBe(200);
       const asDemo = await request(app).get('/api/feedback').set('Cookie', `concord_session=${await createSession(demo.id, 'demo')}`);
       expect(asDemo.status).toBe(403);
+      // Several instances and no CONCORD_ENCRYPTION_KEY: reading pods is off and says why, rather than working on one instance only.
+      const keep = config.adminLoginsInMemory;
+      config.adminLoginsInMemory = false;
+      try {
+        const pods = await request(app).get('/api/feedback/pods').set('Cookie', `concord_session=${await createSession(admin.id, 'github')}`);
+        expect(pods.status).toBe(503);
+        expect(pods.body.error).toMatch(/CONCORD_ENCRYPTION_KEY/);
+      } finally {
+        config.adminLoginsInMemory = keep;
+      }
     } finally {
       config.adminEmails.splice(0, config.adminEmails.length, ...saved);
     }

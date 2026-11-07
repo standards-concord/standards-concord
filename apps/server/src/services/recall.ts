@@ -185,7 +185,12 @@ export const recall = {
     return { ok: false, error: `Recall.ai would not remove the bot (${statuses.join(', then ')}).` };
   },
 
-  async sendChat(botId: string, message: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  /**
+   * Post in the call's chat. Recall.ai's chat has no idempotency key, so a failure says whether the message may
+   * have gone through anyway (`uncertain`: no answer, a dropped connection, a timeout, or a server error) or was
+   * definitely refused (a 4xx answer).
+   */
+  async sendChat(botId: string, message: string): Promise<{ ok: true } | { ok: false; error: string; uncertain?: boolean }> {
     try {
       const res = await fetch(`${base()}/bot/${botId}/send_chat_message/`, {
         method: 'POST',
@@ -193,9 +198,10 @@ export const recall = {
         signal: deadline(),
         body: JSON.stringify({ to: 'everyone', message: chatText(message) }),
       });
-      return res.ok ? { ok: true } : { ok: false, error: await failure(res) };
+      if (res.ok) return { ok: true };
+      return { ok: false, error: await failure(res), ...(res.status >= 500 ? { uncertain: true } : {}) };
     } catch (err) {
-      return { ok: false, error: scrub((err as Error).message) };
+      return { ok: false, error: scrub((err as Error).message), uncertain: true };
     }
   },
 };

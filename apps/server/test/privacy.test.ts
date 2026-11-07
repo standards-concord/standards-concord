@@ -55,14 +55,15 @@ beforeAll(async () => {
 });
 
 describe('meetings are for the working group', () => {
-  it('signed-out visitors and contributors get no meetings, transcripts or streams (finding 2)', async () => {
+  it('signed-out visitors and contributors get no meetings, transcripts or live updates (finding 2)', async () => {
     const id = await meetingId();
     // Signed out: meetings are behind sign-in altogether.
     expect((await request(app).get(`/api/ontologies/${demoId}/meetings`)).status).toBe(401);
     expect((await request(app).get(`/api/meetings/${id}`)).status).toBe(401);
-    expect((await request(app).get(`/api/meetings/${id}/stream`)).status).toBe(401);
+    expect((await request(app).get(`/api/meetings/${id}/updates`)).status).toBe(401);
     const contributor = await login('contributor');
     expect((await contributor.get(`/api/meetings/${id}`)).status).toBe(404);
+    expect((await contributor.get(`/api/meetings/${id}/updates?from=0`)).status).toBe(404);
     expect((await contributor.get(`/api/ontologies/${demoId}/meetings`)).body).toEqual([]);
   });
 
@@ -685,6 +686,40 @@ describe('fourth review: one process, retriage, change request copies, simulatio
     expect(results.filter((r) => r === 'refused')).toHaveLength(5);
   }, 30_000);
 
+  // Review r1 of step 5: the final consent check covered withheld requests and the requirements document, not the
+  // use cases in the requirements.json snapshot. With no document (its preparation failed) the snapshot still lists
+  // the public use cases, and an instance whose consent lease lapsed could publish one withdrawn meanwhile.
+  it('publishing a release stops if a use case in its snapshot stopped being public, even with no document', async () => {
+    const { draftRelease, publishRelease } = await import('../src/services/releases.js');
+    const author = await login('contributor', 'Snapshot Race Author');
+    const id = await useCaseVia(author, 'Snapshot race case', 'public');
+    await login('steward', 'Snapshot Race Steward');
+    const steward = await userNamed('Snapshot Race Steward');
+    const r = await draftRelease((await findProject(demoId))!, steward, 'snapshot-race');
+    let committed: Record<string, string> = {};
+    const realWorking = ontologyStore.working.bind(ontologyStore);
+    const working = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      if (new Error().stack?.includes('prepareForRelease')) throw new Error('no document this time');
+      return realWorking(p);
+    });
+    const real = ontologyStore.writeRelease.bind(ontologyStore);
+    const spy = vi.spyOn(ontologyStore, 'writeRelease').mockImplementation(async (...args: Parameters<typeof ontologyStore.writeRelease>) => {
+      committed = args[3];
+      // Another instance, finding the consent lease lapsed, makes the use case private before the commit.
+      await put('useCases', { ...(await getUseCase(id)), visibility: 'private' }, demoId);
+      return real(...args);
+    });
+    try {
+      await expect(publishRelease(r, steward)).rejects.toMatchObject({ status: 409 });
+      expect(committed['USE_CASES.md']).toBeUndefined();
+      expect(committed['requirements.json']).toMatch(/Snapshot race case/);
+      expect((await get<Release>('releases', r.id))?.status).not.toBe('published');
+    } finally {
+      spy.mockRestore();
+      working.mockRestore();
+    }
+  });
+
   it('publishing a release holds back a withdrawal until its files are committed (finding 1)', async () => {
     const { draftRelease, publishRelease } = await import('../src/services/releases.js');
     const author = await login('contributor', 'Release Race Author');
@@ -746,6 +781,28 @@ describe('fourth review: one process, retriage, change request copies, simulatio
       const read = await outsider.get(`/api/change-requests/${cr.id}`);
       expect(read.status).toBe(200);
       expect(read.text).not.toMatch(/Synthesis lock case/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Review r1 of step 5: consent was checked before createChangeRequest, whose saving transaction didn't check
+  // again, so an instance whose consent lease had run out could store a request after another withdrew its source.
+  it('drafting stores nothing if a source stopped being public after the last check, even past the consent lease', async () => {
+    const author = await login('contributor', 'Lapsed Lease Author');
+    const id = await useCaseVia(author, 'Lapsed lease case', 'public');
+    await login('editor', 'Lapsed Lease Editor');
+    let calls = 0;
+    const real = ontologyStore.working.bind(ontologyStore);
+    const spy = vi.spyOn(ontologyStore, 'working').mockImplementation(async (p) => {
+      // The second read is createChangeRequest's, after synthesis checked its sources: another instance, finding
+      // the consent lease lapsed, makes the use case private.
+      if (++calls === 2) await put('useCases', { ...(await getUseCase(id)), visibility: 'private' }, demoId);
+      return real(p);
+    });
+    try {
+      await expect(synthesise((await findProject(demoId))!, await userNamed('Lapsed Lease Editor'), [id])).rejects.toMatchObject({ status: 409 });
+      expect((await list<ChangeRequest>(demoId)).some((c) => c.origin?.type === 'synthesis' && c.origin.useCaseIds.includes(id))).toBe(false);
     } finally {
       spy.mockRestore();
     }
@@ -1025,6 +1082,53 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     expect((await outsider.get(`/api/change-requests/${cr.id}`)).body.withheld).toBe(true);
   });
 
+  // On Vercel the consent lock was one process's: a withdrawal on another instance could land between a merge's
+  // consent check and its commit, and the merge published from a use case its author had just taken back. The
+  // lock is now a lease across instances, and the merge checks consent again inside the transaction that commits.
+  it('a merge never commits from a use case withdrawn on another server after the merge checked it', async () => {
+    const { id } = await publicCase('Lapsed Lease Author', 'Lapsed lease case');
+    await login('editor', 'Lapsed Lease Editor');
+    const editor = await login('editor', 'Lapsed Lease Editor 2');
+    const cr = await derived(id, { title: 'Model Lapsed lease case', status: 'approved', approvedAs: { level: 'major', confirmation: true, voted: true }, ops: [addClass('Lapsed lease thing')] });
+    const { approvePublication, publicationPreview } = await import('../src/services/changeRequests.js');
+    await approvePublication((await get<ChangeRequest>('changeRequests', cr.id))!, await userNamed('Lapsed Lease Editor'), (await publicationPreview((await get<ChangeRequest>('changeRequests', cr.id))!)).fingerprint);
+    // Another server withdraws it without this one's lock, after every check before the commit.
+    const realCommit = ontologyStore.commitWorking.bind(ontologyStore);
+    let withdrawnAtCommit = false;
+    const spy = vi.spyOn(ontologyStore, 'commitWorking').mockImplementation(async (...args: Parameters<typeof ontologyStore.commitWorking>) => {
+      withdrawnAtCommit = true;
+      const u = (await get<UseCase>('useCases', id))!;
+      await put('useCases', { ...u, withdrawnAt: clock.iso(), visibility: 'private', status: 'archived' }, u.ontologyId);
+      return realCommit(...args);
+    });
+    try {
+      expect((await editor.post(`/api/change-requests/${cr.id}/merge`)).status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = (await get<ChangeRequest>('changeRequests', cr.id))!;
+    expect(withdrawnAtCommit).toBe(true);
+    expect(after.status).toBe('needs-work');
+    expect(after.mergedCommit).toBeUndefined();
+    expect((await request(app).get(`/api/ontologies/${demoId}/source`)).text).not.toMatch(/Lapsed lease thing/);
+  });
+
+  it('the consent lock is held across servers: a withdrawal waits for another server’s merge', async () => {
+    const ontologyId = `consent-${Date.now()}`;
+    await put('kv', { id: `lease:consent:${ontologyId}`, token: 'another-server', until: Date.now() + 60_000 });
+    let ran = false;
+    const waiting = withConsentLock(ontologyId, async () => void (ran = true));
+    await new Promise((ok) => setTimeout(ok, 150));
+    expect(ran).toBe(false);
+    await transaction(async () => {
+      const { remove } = await import('../src/db.js');
+      await remove('kv', `lease:consent:${ontologyId}`);
+    });
+    await waiting;
+    expect(ran).toBe(true);
+    expect(await get('kv', `lease:consent:${ontologyId}`)).toBeUndefined();
+  });
+
   it('a request drafted from or citing a withdrawn use case is withheld on every read: API, list, activity, MCP, releases, use case pages (finding 3)', async () => {
     const { id, agent: author } = await publicCase('Withheld Author', 'Dock "Meridian" plan');
     const steward = await login('steward', 'Withheld Steward');
@@ -1130,6 +1234,33 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     for (const url of [`/api/ontologies/${demoId}/validation`, `/api/ontologies/${demoId}/validation?ref=1.0.0`]) expect((await outsider.get(url)).text).not.toContain(question);
   });
 
+  // The consent lock across servers is a lease: if it lapsed, a withdrawal on another server could land after the
+  // release's notes were made and before its commit. The publishing transaction checks again.
+  it('a release is not published with notes from a use case withdrawn on another server after they were made', async () => {
+    const { publishRelease } = await import('../src/services/releases.js');
+    const { id } = await publicCase('Lapsed Notes Author', 'Harbour pilot ledger');
+    await login('steward', 'Lapsed Notes Steward');
+    const steward = await userNamed('Lapsed Notes Steward');
+    const cr = await derived(id, { title: 'Support Harbour pilot ledger', status: 'merged', ops: [] });
+    const r: Release = { ...structuredClone((await list<Release>(demoId, 'releases' as never))[0]), id: 'rel_lapsed_notes', version: '9.9.8', level: 'minor', status: 'draft', statusSince: clock.iso(), createdAt: clock.iso(), notes: '- #1 Support Harbour pilot ledger', changeRequestIds: [cr.id], commit: undefined, publishedAt: undefined, githubUrl: undefined };
+    await put('releases', r, demoId);
+    const realWrite = ontologyStore.writeRelease.bind(ontologyStore);
+    let reached = false;
+    const write = vi.spyOn(ontologyStore, 'writeRelease').mockImplementation(async (...args: Parameters<typeof ontologyStore.writeRelease>) => {
+      reached = true;
+      const u = (await get<UseCase>('useCases', id))!;
+      await put('useCases', { ...u, withdrawnAt: clock.iso(), visibility: 'private', status: 'archived' }, u.ontologyId);
+      return realWrite(...args);
+    });
+    try {
+      await expect(publishRelease((await get<Release>('releases', r.id))!, steward)).rejects.toMatchObject({ status: 409 });
+    } finally {
+      write.mockRestore();
+    }
+    expect(reached).toBe(true);
+    expect((await get<Release>('releases', r.id))!.status).not.toBe('published');
+  });
+
   it('a release published while a use case behind one of its changes is withdrawn commits public notes only (finding 2)', async () => {
     const { publishRelease } = await import('../src/services/releases.js');
     const { id } = await publicCase('Notes Race Author', 'Pilot boat roster');
@@ -1157,7 +1288,12 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
       await withdrawUseCase(await getUseCase(id), await userNamed('Notes Race Author'));
       read.mockRestore();
       resume();
-      await publishing;
+      // The withdrawal landed after the notes were made (as one on another server, whose lease had lapsed,
+      // could): the transaction that publishes sees it, and nothing is published. Publishing again makes the
+      // notes afresh, from what anyone may see now.
+      await expect(publishing).rejects.toMatchObject({ status: 409 });
+      expect((await get<Release>('releases', r.id))!.status).not.toBe('published');
+      await publishRelease((await get<Release>('releases', r.id))!, steward);
     } finally {
       read.mockRestore();
       write.mockRestore();
@@ -1332,8 +1468,11 @@ describe('eighth review: requests made from calls, interview saves, untagged res
   // lock's holder waited to write: both stalled until the store gave up. Now it is refused at once.
   it('refuses to wait for the consent lock inside a transaction, and takes it outside one', async () => {
     await expect(transaction(async () => withConsentLock('lock-test-3', async () => 1))).rejects.toThrow(/inside a transaction/);
-    // Background work started from a transaction runs outside it, so it may take the lock.
-    await expect(transaction(async () => detached(() => withConsentLock('lock-test-3', async () => 2)))).resolves.toBe(2);
+    // Background work started from a transaction runs outside it, so it may take the lock (once the transaction
+    // is done: across instances the lock is a database lease, which waits for the writer lock like any write).
+    let background!: Promise<number>;
+    await transaction(async () => void (background = detached(() => withConsentLock('lock-test-3', async () => 2))));
+    await expect(background).resolves.toBe(2);
     // The order everything uses: the consent lock, then a transaction, which may write while the lock is held.
     await expect(withConsentLock('lock-test-3', () => transaction(async () => { await put('kv', { id: 'lock-test-3' }); return 3; }))).resolves.toBe(3);
   });

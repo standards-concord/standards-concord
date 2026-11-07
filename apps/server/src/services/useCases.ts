@@ -25,6 +25,7 @@ import { config } from '../config.js';
 import { detached, get, HttpError, inTransaction, list, mustGet, put, transaction } from '../db.js';
 import { everyAsync, filterAsync, someAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
+import { withLease } from '../lease.js';
 import { ontologyDigest, useCaseDigest } from '../llm/context.js';
 import { ANONYMISER, INTERVIEWER, SYNTHESISER } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
@@ -92,6 +93,10 @@ interface Holding {
   inner: Promise<unknown>;
 }
 const holdings = new AsyncLocalStorage<Map<string, Holding>>();
+/** How soon a holder of the consent lock that stopped running (killed, frozen) lets it go; renewed while it runs. */
+export const CONSENT_LEASE_MS = 20_000;
+/** How long another instance waits for the consent lock (a merge or release can hold it a while). */
+export const CONSENT_WAIT_MS = 3 * 60_000;
 /**
  * Runs `fn` exclusively for an ontology. Everything that commits material
  * derived from use cases (a release, a merge, a drafted change request) and
@@ -103,6 +108,10 @@ const holdings = new AsyncLocalStorage<Map<string, Holding>>();
  * doesn't wait for itself: its nested calls run one at a time, in order, and
  * the holding ends only when they have all finished. Once a holding has ended,
  * anything still carrying its context queues like everyone else.
+ *
+ * Across server instances it is a database lease, renewed while the holder runs. The commits that matter most
+ * also check consent again inside their own transaction (a merge into the working draft), so even a holder whose
+ * lease lapsed can't commit from a use case that was withdrawn meanwhile.
  */
 export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T): Promise<T> {
   const context = holdings.getStore();
@@ -133,7 +142,10 @@ export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T)
   // Lock order is consent lock, then transaction: waiting here inside a transaction would hold the store's
   // writer lock while the holder of this lock waits to write.
   if (inTransaction()) return Promise.reject(new Error('withConsentLock called inside a transaction: take the consent lock first'));
-  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(runHeld);
+  // Queued here behind this instance's holders, then held across instances (each Vercel function instance has
+  // a queue of its own) with a lease in the database, kept while the holder runs.
+  const acrossInstances = () => withLease(`consent:${ontologyId}`, CONSENT_LEASE_MS, runHeld, { renew: true, waitMs: CONSENT_WAIT_MS });
+  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(acrossInstances);
   const tail = run.catch(() => undefined);
   consentLocks.set(ontologyId, tail);
   void tail.then(() => {
@@ -1281,8 +1293,9 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
   // From the consent check to the change request being stored, no use case can be withdrawn (it waits).
   return withConsentLock(project.id, async () => {
     // The model can take a while: if a use case was withdrawn or made non-public meanwhile, nothing is drafted from it.
-    if (await someAsync(ucs, async (u) => { const now = await get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !await canSee(now, actor); }))
-      throw new HttpError(409, 'A use case changed while the changes were being drafted (it may have been withdrawn). Try again.');
+    const changed = () => someAsync(ucs, async (u) => { const now = await get<UseCase>('useCases', u.id); return !now || !isPublic(now) || !await canSee(now, actor); });
+    const CHANGED = 'A use case changed while the changes were being drafted (it may have been withdrawn). Try again.';
+    if (await changed()) throw new HttpError(409, CHANGED);
     // The ontology is published, but use cases may be private: its annotations cite use cases only by
     // their (sign-in only) link. Nothing here is rewritten: the request is published only once an editor
     // approves exactly what it publishes (approvePublication in changeRequests.ts).
@@ -1295,6 +1308,11 @@ export async function synthesise(project: OntologyProject, actor: User, useCaseI
       ops: proposalToOps(graph, value.terms, sources).ops,
       tests: value.competencyQuestionTests,
       analysis: { summary: value.summary, rationale: value.rationale, risks: value.risks, recommendation: 'change-ontology' },
+      // Checked once more in the transaction that stores the request: if the consent lease ran out (a stalled
+      // instance) and a use case was withdrawn meanwhile, nothing is stored.
+      atSave: async () => {
+        if (await changed()) throw new HttpError(409, CHANGED);
+      },
     });
     // Carry the drafted SPARQL back onto the use cases so the tests keep running on every future change.
     // Each use case is read again and only the fields synthesis owns are changed, so an edit or

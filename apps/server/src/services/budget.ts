@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { HttpError } from '../db.js';
+import { config } from '../config.js';
+import { HttpError, reserveCounters } from '../db.js';
 
 /**
  * A per-person budget for expensive work: validating a change (reasoner, lint,
@@ -9,7 +10,7 @@ import { HttpError } from '../db.js';
  * gets `max` runs per `windowMs` and one at a time; nested calls within one run
  * don't count twice. Keyed by user id, so people behind the same proxy don't
  * share a quota. Simulated personas (the demo's working group) are exempt.
- * Process-local: it resets when the server restarts.
+ * Process-local, plus (with `config.sharedLimits`, on Vercel) a fixed window in the database shared by every instance.
  */
 export const triageBudget = { windowMs: 10 * 60 * 1000, max: 20 };
 
@@ -24,6 +25,9 @@ export async function withTriageBudget<T>(user: { id: string; simulated?: boolea
   const times = (recent.get(user.id) ?? []).filter((t) => now - t < windowMs);
   if (inFlight.has(user.id)) throw new HttpError(429, 'Your previous change is still being checked. Try again in a moment.');
   if (times.length >= max) throw new HttpError(429, `You can have up to ${max} changes checked every ${Math.round(windowMs / 60000)} minutes. Try again shortly.`);
+  // Several instances (Vercel): each counts its own, and a shared window in the database caps them all together.
+  if (config.sharedLimits && !(await reserveCounters([{ id: `triage-budget:${user.id}:${Math.floor(now / windowMs)}`, max }], 'rate-limits')))
+    throw new HttpError(429, `You can have up to ${max} changes checked every ${Math.round(windowMs / 60000)} minutes. Try again shortly.`);
   times.push(now);
   recent.set(user.id, times);
   inFlight.add(user.id);

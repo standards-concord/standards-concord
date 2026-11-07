@@ -1129,11 +1129,18 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
   // checked again here, where none of them can land in between.
   // Commits are published with the ontology, so they carry no names: the change request records who asked.
   let lost: { reason?: string } | undefined;
+  let sourceGone = false;
   try {
     await ontologyStore.commitWorking(project, p.after, `#${cr.number} ${p.title}\n\n${p.kgcl.join('\n')}`, { name: 'Concord' }, base, async (commit) => {
       const latest = await refresh(cr);
       if (latest.rev !== checkedRev || latest.status !== 'approved')
         throw new HttpError(409, 'This request changed while it was being merged (it was edited, reviewed or withdrawn), so it was not merged.');
+      // Consent, once more where no withdrawal can land in between (it commits in a transaction too): the consent
+      // lock is a lease across instances, and one that lapsed must not let this commit from a withdrawn use case.
+      if (!(await sourcesPublic(latest))) {
+        sourceGone = true;
+        throw new HttpError(409, SOURCE_GONE);
+      }
       const still = await approvalHolds(latest);
       if (!still.ok) {
         lost = still;
@@ -1149,6 +1156,13 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
       await stamp(latest);
     });
   } catch (err) {
+    if (sourceGone) {
+      // Nothing was committed. As when the check before the merge fails.
+      const now = await refresh(cr);
+      now.approvedAs = undefined;
+      await setStatus(now, 'needs-work', SOURCE_GONE);
+      return await save(now);
+    }
     if (!lost) throw err;
     // Nothing was committed: the draft didn't move. Send it back to the stage that approved it.
     return approvalGone(await refresh(cr), lost.reason, actor);

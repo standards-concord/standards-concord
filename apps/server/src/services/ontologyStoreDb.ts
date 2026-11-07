@@ -1,8 +1,9 @@
 import { OntologyGraph } from '@concord/core';
 import type { OntologyProject } from '@concord/shared';
-import { clearAll, get, HttpError, put, transaction } from '../db.js';
+import { clearAll, get, HttpError, put, remove, transaction } from '../db.js';
 import {
   countBetween,
+  dropRepo,
   dateOrderLog,
   firstParentLog,
   getRef,
@@ -11,10 +12,12 @@ import {
   isoDate,
   listDir,
   readCommit,
+  readObject,
   readFile,
   setRef,
   subject,
   writeCommit,
+  entryAt,
   writeTree,
   type Commit,
 } from './gitdb.js';
@@ -121,12 +124,17 @@ export const dbStore = {
 
   async at(project: Pick<OntologyProject, 'slug'>, ref: string | undefined): Promise<OntologyGraph> {
     if (!ref || ref === 'working') return this.working(project);
-    const key = `${project.slug}@v${ref}`;
+    // Keyed by the release file's own id, not its name: another instance can reset the demo and release the same
+    // version again with other content, and only this instance's cache would be cleared.
+    const entry = /^[\w.-]+$/.test(ref) ? await entryAt((await readCommit(await this.head(project))).tree, `releases/${ref}/${FILE}`) : undefined;
+    if (!entry) throw new HttpError(404, `Version ${ref} not found`);
+    const key = `${project.slug}@v${ref}@${entry.sha}`;
     let g = graphCache.get(key);
     if (!g) {
-      const text = await this.readReleaseFile(project, ref, FILE);
-      if (text === undefined) throw new HttpError(404, `Version ${ref} not found`);
-      g = await OntologyGraph.fromTurtle(text);
+      // The blob the key names, not the file looked up again by name (which a reset meanwhile could change).
+      const blob = await readObject(entry.sha);
+      if (blob?.type !== 'blob') throw new HttpError(404, `Version ${ref} not found`);
+      g = await OntologyGraph.fromTurtle(blob.body.toString('utf8'));
       graphCache.set(key, g);
     }
     return g;
@@ -187,6 +195,15 @@ export const dbStore = {
 
   forgetReleases(project: Pick<OntologyProject, 'slug'>) {
     for (const key of [...graphCache.keys()]) if (key.startsWith(`${project.slug}@v`)) graphCache.delete(key);
+  },
+
+  /** Forgets one ontology's history: its draft and every other ref (its objects stay, harmless). An interrupted demo seed's (simulation.ts). */
+  async forget(project: Pick<OntologyProject, 'slug'>): Promise<void> {
+    await transaction(async () => {
+      await remove('kv', headKey(project));
+      await dropRepo(project.slug);
+    });
+    for (const key of [...graphCache.keys()]) if (key.startsWith(project.slug)) graphCache.delete(key);
   },
 
   async versions(project: Pick<OntologyProject, 'slug'>): Promise<string[]> {

@@ -5,6 +5,7 @@ import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { transaction, get, HttpError, list, put } from '../db.js';
 import { newId } from '../ids.js';
+import { withLease } from '../lease.js';
 import { withLock } from '../locks.js';
 import { parseCancellations, parseOccurrences, type CalendarOccurrence } from './calendarFeed.js';
 import { findProject } from './ontologies.js';
@@ -173,18 +174,21 @@ type Finish = () => Promise<'done' | 'retrying'>;
  * heard so far is analysed. The decision is recorded now, under the call's lock;
  * the requests to Recall.ai are what the returned step does.
  */
-async function withdrawCall(meetingId: string): Promise<Finish> {
+async function withdrawCall(meetingId: string, guard?: () => Promise<boolean>): Promise<Finish> {
   const live = await get<Meeting>('meetings', meetingId);
   if (!live) return async () => 'done';
   if (live.status !== 'scheduled') {
     if (!botActive(live) && !botOutstanding(live)) return async () => 'done';
+    // The freshness check goes with the decision to end it, in endLiveMeeting's transaction.
     return () =>
-      endLiveMeeting(meetingId).then(
+      endLiveMeeting(meetingId, guard).then(
         () => 'done' as const,
         () => 'retrying' as const,
       );
   }
   await meetingLock(meetingId, async () => { return transaction(async () => {
+    // A feed older than one applied since doesn't withdraw anything (checked under the writer lock).
+    if (guard && !await guard()) return;
     const m = await get<Meeting>('meetings', meetingId);
     if (!m) return;
     normalise(m);
@@ -203,6 +207,9 @@ async function withdrawCall(meetingId: string): Promise<Finish> {
   };
 }
 
+/** The calendar feed's reads, numbered as they start, and the newest one applied. */
+const FEED_SEQ = 'meet-bot:feed-seq';
+const FEED_APPLIED = 'meet-bot:feed-applied';
 /** Calendar calls still on the books (withdrawn ones only wait for their bot to go). */
 const calendarMeetings = async () => (await list<Meeting>('meetings')).filter((m) => m.source === 'calendar-invite' && m.calendar && !m.withdrawn);
 /** Every calendar call Concord still holds, withdrawn ones included: each occurrence has one record until its bots are gone. */
@@ -217,9 +224,18 @@ const heldMeetings = async () => (await list<Meeting>('meetings')).filter((m) =>
 async function reconcile(
   occs: CalendarOccurrence[],
   feed: 'calendar' | 'upload',
-  opts: { now: Date; project?: OntologyProject; actor?: User; postPromptsToChat?: boolean; cancelled?: { uids: string[]; keys: string[] } },
+  opts: {
+    now: Date;
+    project?: OntologyProject;
+    actor?: User;
+    postPromptsToChat?: boolean;
+    cancelled?: { uids: string[]; keys: string[] };
+    /** Whether this feed is still the newest one applied (a calendar sync); checked in each write's transaction. */
+    guard?: () => Promise<boolean>;
+  },
   later: Finish[],
 ) {
+  const fresh = async () => !opts.guard || (await opts.guard());
   // A withdrawn record still waiting for its bot to go keeps its occurrence: if the call comes back, it is that record again.
   const byKey = new Map((await heldMeetings()).map((m) => [m.calendar!.key, m]));
   const touched: Meeting[] = [];
@@ -249,7 +265,12 @@ async function reconcile(
       if (feed === 'upload' && opts.actor) await recordSeriesApproval(project.id, occ.uid, occ.organizer, occ.meetingUrl, opts.actor.id);
       const by = opts.actor ?? (approval ? (await allUsers()).find((u) => u.id === approval.by) : undefined);
       const postPromptsToChat = opts.postPromptsToChat ?? config.meetBot.postToChatDefault;
-      const m = await saveMeeting({
+      // One record per occurrence across every instance: looked for again and created in one transaction (under
+      // the writer lock), so a run that outlived the calendar lease can't add a second meeting, and a second bot.
+      const m = await transaction(async () => {
+        if (!(await fresh())) return undefined;
+        if ((await heldMeetings()).some((x) => x.calendar!.key === occ.key)) return undefined;
+        return saveMeeting({
         id: newId('mtg'),
         ontologyId: project.id,
         title: occ.title,
@@ -276,7 +297,9 @@ async function reconcile(
         createdAt: clock.iso(),
         // Who sent an invite is unproven, so a calendar call belongs to no one in particular.
         createdBy: feed === 'upload' && opts.actor ? opts.actor.id : 'calendar',
+        });
       });
+      if (!m) continue;
       await logActivity({
         ontologyId: project.id,
         actorId: by?.id,
@@ -295,6 +318,7 @@ async function reconcile(
       throw new HttpError(409, `“${existing.title}” is already scheduled under ${other?.title ?? 'another ontology'}.`);
     }
     const updated = await meetingLock(existing.id, async () => {
+      if (!(await fresh())) return undefined;
       const m = await get<Meeting>('meetings', existing.id);
       if (!m) return undefined;
       normalise(m);
@@ -381,7 +405,7 @@ async function reconcile(
     // Older than the feed window: the clock ends that call by itself.
     if (new Date(cal.end).getTime() < opts.now.getTime() - OVERRUN_MAX_MS) continue;
     const gone = feed === 'calendar' ? cal.feed === 'calendar' : cal.feed === 'upload' && m.ontologyId === opts.project?.id && !!cal.uid && uids.has(cal.uid) && new Date(cal.start).getTime() < opts.now.getTime() + HORIZON_MS;
-    if (gone) later.push(await withdrawCall(m.id));
+    if (gone) later.push(await withdrawCall(m.id, opts.guard));
   }
   return touched;
 }
@@ -402,16 +426,54 @@ async function applyCancellations(project: OntologyProject, cancelled: { uids: s
   return steps;
 }
 
+/**
+ * Changes to the set of calendar calls (a sync, an import) one at a time: a lock in this process, and a lease in the
+ * database for the other instances (Vercel functions), so two of them can't both add the same call. The body is
+ * reads and writes only (requests to Recall.ai run afterwards, see Finish), so it finishes well inside the lease.
+ * With `wait: false`, undefined at once if another instance holds it.
+ */
+export const CALENDAR_LEASE_MS = 60_000;
+function calendarLock<T>(fn: () => Promise<T>): Promise<T>;
+function calendarLock<T>(fn: () => Promise<T>, opts: { wait: false }): Promise<T | undefined>;
+function calendarLock<T>(fn: () => Promise<T>, opts?: { wait: false }): Promise<T | undefined> {
+  return withLock('meet-bot:calendar', () => (opts ? withLease('meet-bot:calendar', CALENDAR_LEASE_MS, fn, opts) : withLease('meet-bot:calendar', CALENDAR_LEASE_MS, fn)));
+}
+
 /** Re-reads the bot's calendar. Without MEET_BOT_ICS_URL this does nothing. */
 export async function syncCalendar(now = new Date()): Promise<MeetBotInfo['lastSync']> {
   const url = config.meetBot.calendarIcsUrl;
   if (!url) return undefined;
   const later: Finish[] = [];
-  const result = await withLock('meet-bot:calendar', async () => {
+  // Numbered before it is read, so a slow reply can't be applied over a newer one (which could bring back a call
+  // the newer one cancelled).
+  const seq = await transaction(async () => {
+    const n = ((await get<{ id: string; n: number }>('kv', FEED_SEQ))?.n ?? 0) + 1;
+    await put('kv', { id: FEED_SEQ, n });
+    return n;
+  });
+  const newest = async () => (await get<{ id: string; n: number }>('kv', FEED_APPLIED))?.n === seq;
+  // Read before taking the calendar lease, so a slow feed never holds it.
+  let occs: CalendarOccurrence[] | undefined;
+  let failure: string | undefined;
+  try {
+    occs = parseOccurrences(await readFeed(url), { from: new Date(now.getTime() - OVERRUN_MAX_MS), to: new Date(now.getTime() + HORIZON_MS) });
+  } catch (err) {
+    failure = (err as Error).message;
+  }
+  // Another instance syncing right now does this round.
+  const result = await calendarLock(async () => {
     let state: SyncState;
+    // A newer read was applied already: this one is dropped. Otherwise it becomes the newest, and each of its writes
+    // checks that it still is (a run that outlives the lease is overtaken by the next one).
+    const current = await transaction(async () => {
+      if (((await get<{ id: string; n: number }>('kv', FEED_APPLIED))?.n ?? 0) > seq) return false;
+      await put('kv', { id: FEED_APPLIED, n: seq });
+      return true;
+    });
+    if (!current) return undefined;
     try {
-      const occs = parseOccurrences(await readFeed(url), { from: new Date(now.getTime() - OVERRUN_MAX_MS), to: new Date(now.getTime() + HORIZON_MS) });
-      await reconcile(occs, 'calendar', { now }, later);
+      if (!occs) throw new Error(failure);
+      await reconcile(occs, 'calendar', { now, guard: newest }, later);
       state = { at: now.toISOString(), ok: true, events: occs.filter((o) => o.meetingUrl && (!config.meetBot.inviteEmail || botAttendee(o))).length };
     } catch (err) {
       state = { at: now.toISOString(), ok: false, events: 0, error: sanitise((err as Error).message) };
@@ -419,7 +481,11 @@ export async function syncCalendar(now = new Date()): Promise<MeetBotInfo['lastS
     }
     await put('kv', { id: SYNC_KEY, ...state });
     return state;
-  });
+  }, { wait: false });
+  if (!result) {
+    const last = await get<SyncState & { id: string }>('kv', SYNC_KEY);
+    return last ? { at: last.at, ok: last.ok, events: last.events, error: last.error } : undefined;
+  }
   // Beside the bookings, never holding them (or the calendar) up.
   for (const step of later) void background(step());
   return result;
@@ -444,7 +510,7 @@ export async function scheduleFromInvite(project: OntologyProject, user: User, i
   if (!occs.length && !cancels) throw new HttpError(400, 'That invite has no calls in the next two weeks.');
   if (occs.length && !occs.some((o) => o.meetingUrl)) throw new HttpError(400, 'That invite has no Google Meet link.');
   const later: Finish[] = [];
-  const { touched, steps } = await withLock('meet-bot:calendar', async () => ({
+  const { touched, steps } = await calendarLock(async () => ({
     steps: cancels ? await applyCancellations(project, cancelled) : [],
     touched: occs.length ? await reconcile(occs, 'upload', { now, project, actor: user, postPromptsToChat: opts.postPromptsToChat }, later) : [],
   }));
@@ -564,18 +630,22 @@ export async function planApproved(ids: string[], now = new Date()) {
 /** Resolves once every call's lane, and work started in the background, has finished. For tests and shutdown. */
 export const meetBotIdle = lanesIdle;
 
-let lastSyncAt = 0;
 let ticking = false;
+
+/** Whether the calendar is due a re-read: by the last sync any instance recorded, not this one's memory. */
+async function syncDue(now: Date) {
+  const last = await get<SyncState & { id: string }>('kv', SYNC_KEY);
+  const age = now.getTime() - (last ? Date.parse(last.at) : NaN);
+  // A sync recorded "in the future" (the clock was moved back, or no sync yet) doesn't hold the next one back.
+  return !(age >= 0 && age < config.meetBot.calendarPollMs - 1000);
+}
 
 /** Runs every minute from the server's clock loop. Overlapping ticks are skipped. */
 export async function meetBotTick(now = new Date()) {
   if (ticking) return;
   ticking = true;
   try {
-    if (config.meetBot.calendarIcsUrl && now.getTime() - lastSyncAt >= config.meetBot.calendarPollMs - 1000) {
-      lastSyncAt = now.getTime();
-      await syncCalendar(now);
-    }
+    if (config.meetBot.calendarIcsUrl && (await syncDue(now))) await syncCalendar(now);
     // Requests to Recall.ai run in each call's own lane, beside the tick rather than inside it.
     await dispatchDue(now, { wait: false });
   } finally {

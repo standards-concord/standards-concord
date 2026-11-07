@@ -10,6 +10,8 @@ import { defineConfig, devices } from '@playwright/test';
  *
  *   pnpm test:e2e              local: boots a fresh API server and the web app, runs everything
  *   E2E_MODE=preview pnpm test:e2e   same, but against the production build (what Vercel serves)
+ *   E2E_API=vercel E2E_DATABASE_URL=postgres://… pnpm test:e2e
+ *                              the API as the Vercel function (scripts/vercel-build.mjs), on that Postgres
  *   pnpm test:e2e:live         read-only smoke tests against the deployed site (LIVE_URL)
  *
  * The local servers use their own ports and a throwaway data directory, so a `pnpm dev`
@@ -20,6 +22,9 @@ const API_PORT = Number(process.env.E2E_API_PORT ?? 8797);
 const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 5183);
 /** Stand-in for GitHub's issues API, so tester feedback can be filed as issues offline. */
 export const GITHUB_STUB_PORT = Number(process.env.E2E_GITHUB_STUB_PORT ?? 8799);
+/** `vercel`: the API is the Vercel function the build packages, served by scripts/vercel-serve.mjs, on Postgres. */
+const vercelApi = process.env.E2E_API === 'vercel';
+if (vercelApi && !process.env.E2E_DATABASE_URL) throw new Error('E2E_API=vercel needs E2E_DATABASE_URL: an empty Postgres database for the run');
 const dataDir = process.env.E2E_DATA_DIR ?? path.join(os.tmpdir(), `concord-e2e-${process.pid}`);
 const root = path.resolve(import.meta.dirname, '..');
 // The co-lead bot's calendar feed: meetings.spec.ts writes invites here and asks the server to re-read it.
@@ -98,12 +103,13 @@ export default defineConfig({
           stderr: 'pipe',
         },
         {
-          command: 'pnpm --filter @concord/server start',
+          command: vercelApi ? `node scripts/vercel-build.mjs --function && node scripts/vercel-serve.mjs ${API_PORT}` : 'pnpm --filter @concord/server start',
           cwd: root,
           url: `http://localhost:${API_PORT}/healthz`,
           reuseExistingServer: !process.env.CI,
           timeout: 120_000,
           env: {
+            ...(vercelApi ? { VERCEL: '1', DATABASE_URL: process.env.E2E_DATABASE_URL! } : {}),
             PORT: String(API_PORT),
             CONCORD_DATA_DIR: dataDir,
             WEB_URL: `http://localhost:${WEB_PORT}`,

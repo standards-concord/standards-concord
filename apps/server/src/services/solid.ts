@@ -1,11 +1,9 @@
-import { createHash } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
 import type { User } from '@concord/shared';
 import { config } from '../config.js';
 import { get, list, put, refuseWhenReadOnly } from '../db.js';
 import { DataFactory, Parser, Writer, type Quad } from 'n3';
 import { slugify } from '../ids.js';
+import { localTag, PreconditionFailed, privateStore, type WriteCondition } from './privateStore.js';
 import { clientCredentialsLogin, podFetch, podRequester, type PodRequest, type SolidLogin } from '../solidOidc.js';
 
 /**
@@ -19,7 +17,8 @@ import { clientCredentialsLogin, podFetch, podRequester, type PodRequest, type S
  * this server's origin only, no redirects, capped size and time. The plain
  * `fetch` is never used here (a test checks).
  *
- * Without a Solid server configured, the same API falls back to local files,
+ * Without a Solid server configured, the same API falls back to this server's private store (files on the VM,
+ * database rows on Vercel: privateStore.ts),
  * and the WebID is a profile document served by this platform.
  */
 
@@ -91,85 +90,7 @@ async function ownerRequest(rec: PodRecord): Promise<PodRequest> {
 }
 
 /** A precondition for `writeExisting`: replace only this version (ETag), or only create (`*`). */
-export interface WriteCondition {
-  ifMatch?: string;
-  ifNoneMatch?: '*';
-}
-export class PreconditionFailed extends Error {}
-
-const localTag = (bytes: Buffer) => `"sha256-${createHash('sha256').update(bytes).digest('hex')}"`;
-
-/** The permission bits of a file, if it exists. */
-const modeOf = (file: string) => {
-  try {
-    return fs.statSync(file).mode & 0o777;
-  } catch {
-    return undefined;
-  }
-};
-
-/** The one temporary name used to replace `file`: a leftover from a crash is simply reused (overwritten), never piled up. */
-const tmpFor = (file: string) => path.join(path.dirname(file), `.${path.basename(file)}.concord-tmp`);
-
-/**
- * Write a private file only if `when` holds, the way a pod's PUT would:
- * `ifNoneMatch: '*'` creates it exclusively; `ifMatch` replaces it only if its
- * bytes still hash to that tag, through a temporary file (with the original's
- * permissions) renamed into place, so a reader never sees half a file.
- *
- * What this guarantees: no other write by this server can land between the
- * check and the rename, because everything from the read to the rename runs
- * synchronously on the one thread that does all of this server's writes to
- * these files (this assumes one server process per data directory, as deployed).
- * What it doesn't: these local files are where private data goes when there is
- * no Solid server, or for an account with no pod record, and only Concord is
- * meant to write them; a program outside Concord editing a file in the instant
- * between the check and the rename can still lose that edit. (Pods get a real
- * compare-and-swap through If-Match.)
- */
-function writeLocalIf(file: string, bytes: Buffer, when: WriteCondition) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  if (when.ifNoneMatch === '*') {
-    try {
-      fs.writeFileSync(file, bytes, { flag: 'wx' });
-      return;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'EEXIST') throw new PreconditionFailed(`${file} already exists`);
-      throw err;
-    }
-  }
-  let current: Buffer;
-  try {
-    current = fs.readFileSync(file);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new PreconditionFailed(`${file} is gone`);
-    throw err;
-  }
-  if (localTag(current) !== when.ifMatch) throw new PreconditionFailed(`${file} changed`);
-  const tmp = tmpFor(file);
-  try {
-    // Private from the start (even a leftover from a crash is made 0600 before anything is written to it),
-    // and given the original's permissions only once the content is complete.
-    const fd = fs.openSync(tmp, 'w', 0o600);
-    try {
-      fs.fchmodSync(fd, 0o600);
-      // writeSync may write fewer bytes than asked: keep going until all of them are down.
-      for (let off = 0; off < bytes.length; ) {
-        const n = fs.writeSync(fd, bytes, off, bytes.length - off);
-        if (n <= 0) throw new Error(`could not write ${tmp}`);
-        off += n;
-      }
-      const mode = modeOf(file);
-      if (mode !== undefined) fs.fchmodSync(fd, mode);
-    } finally {
-      fs.closeSync(fd);
-    }
-    fs.renameSync(tmp, file);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
-  }
-}
+export { PreconditionFailed, type WriteCondition } from './privateStore.js';
 
 export const solid = {
   get enabled() {
@@ -215,12 +136,12 @@ export const solid = {
         if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
         return { kind: 'solid', url };
       } catch (err) {
+        // Without a lasting disk (Vercel) there is nowhere quiet to put it: the person is told it failed.
+        if (config.privateStore === 'db') throw err;
         console.warn(`[solid] write failed for ${userId}, storing locally: ${(err as Error).message}`);
       }
     }
-    const file = path.join(config.dataDir, 'private', userId, relPath);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, body);
+    await privateStore().write(userId, relPath, typeof body === 'string' ? Buffer.from(body) : body);
     return { kind: 'local', url: `${config.publicUrl}/people/${userId}/private/${relPath}` };
   },
 
@@ -235,8 +156,7 @@ export const solid = {
         /* fall through to local */
       }
     }
-    const file = path.join(config.dataDir, 'private', userId, relPath);
-    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : undefined;
+    return (await privateStore().read(userId, relPath))?.toString('utf8');
   },
 
   /** Pods this server provisioned (user id and pod URL; never the credentials). */
@@ -280,7 +200,7 @@ export const solid = {
    * exactly what was kept (or, if nothing was there, only creates). Throws if the
    * pod can't say, so the caller writes nothing.
    */
-  async keepExisting(userId: string, relPath: string): Promise<WriteCondition> {
+  async keepExisting(userId: string, relPath: string, opts: { ours?: (bytes: Buffer) => boolean } = {}): Promise<WriteCondition & { existing?: Buffer }> {
     refuseWhenReadOnly(); // a pod or a private file, written before any database write
     const rec = await get<PodRecord>('kv', `pod:${userId}`);
     const asideName = (n: number) => relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}-${n}${ext}`);
@@ -294,6 +214,8 @@ export const solid = {
       if (!etag) throw new Error(`GET ${url} gave no ETag, so it can't be replaced safely`);
       const type = res.headers.get('content-type') ?? 'application/octet-stream';
       const bytes = await res.arrayBuffer();
+      // Concord's own document (`ours`) isn't kept aside: the caller decides from it, and replaces exactly it.
+      if (opts.ours?.(Buffer.from(bytes))) return { ifMatch: etag, existing: Buffer.from(bytes) };
       for (let n = 0; ; n++) {
         if (n >= 5) throw new Error(`could not find a free name to keep ${url}`);
         try {
@@ -305,29 +227,32 @@ export const solid = {
       }
       return { ifMatch: etag };
     }
-    // Locally the "ETag" is a hash of the file's bytes, and the copy is made from those same bytes.
-    const dir = path.join(config.dataDir, 'private', userId);
-    const file = path.join(dir, relPath);
-    let bytes: Buffer;
-    try {
-      bytes = fs.readFileSync(file);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { ifNoneMatch: '*' };
-      throw err;
-    }
-    const mode = modeOf(file);
+    // Locally the "ETag" is a hash of the stored bytes, and the copy is made from those same bytes.
+    const store = privateStore();
+    const bytes = await store.read(userId, relPath);
+    if (!bytes) return { ifNoneMatch: '*' };
+    if (opts.ours?.(bytes)) return { ifMatch: localTag(bytes), existing: bytes };
     for (let n = 0; ; n++) {
-      if (n >= 5) throw new Error(`could not find a free name to keep ${file}`);
-      try {
-        const aside = path.join(dir, asideName(n));
-        // Created exclusively, then given the original's permissions (a private file's copy stays private).
-        fs.writeFileSync(aside, bytes, { flag: 'wx', mode: 0o600 });
-        if (mode !== undefined) fs.chmodSync(aside, mode);
-        return { ifMatch: localTag(bytes) };
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      }
+      if (n >= 5) throw new Error(`could not find a free name to keep ${relPath}`);
+      if (await store.createCopy(userId, asideName(n), bytes, relPath)) return { ifMatch: localTag(bytes) };
     }
+  },
+
+  /** What is at a private path now, and the tag that replaces exactly that (the pod's ETag; locally a hash). */
+  async readTagged(userId: string, relPath: string): Promise<{ bytes?: Buffer; tag?: string }> {
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
+    if (this.enabled && rec) {
+      const req = await ownerRequest({ ...rec, id: userId });
+      const url = `${rec.podUrl}concord/${relPath}`;
+      const res = await req('GET', url);
+      if (res.status === 404 || res.status === 410) return {};
+      if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+      const etag = res.headers.get('etag');
+      if (!etag) throw new Error(`GET ${url} gave no ETag, so it can't be replaced safely`);
+      return { bytes: Buffer.from(await res.arrayBuffer()), tag: etag };
+    }
+    const bytes = await privateStore().read(userId, relPath);
+    return bytes ? { bytes, tag: localTag(bytes) } : {};
   },
 
   /**
@@ -342,7 +267,7 @@ export const solid = {
     if (!(this.enabled && rec)) {
       const bytes = typeof body === 'string' ? Buffer.from(body) : Buffer.from(body);
       if (!when.ifMatch && !when.ifNoneMatch) return this.write(userId, relPath, bytes, contentType);
-      writeLocalIf(path.join(config.dataDir, 'private', userId, relPath), bytes, when);
+      await privateStore().writeIf(userId, relPath, bytes, when);
       return { kind: 'local', url: `${config.publicUrl}/people/${userId}/private/${relPath}` };
     }
     const req = await ownerRequest({ ...rec, id: userId });

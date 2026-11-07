@@ -10,6 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
 import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
+import { DbRateStore } from './rateLimitStore.js';
 import { claim, detached, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction, withoutWaiting } from './db.js';
 import { newId } from './ids.js';
 import { FetchError, safeFetchText } from './safeFetch.js';
@@ -111,6 +112,12 @@ const norm = (o: string) => o.trim().replace(/\/$/, '').toLowerCase();
 export const trustedOrigins = () => [...new Set([config.publicUrl, config.webUrl, ...(process.env.PUBLIC_ORIGINS ?? '').split(',')].map(norm).filter((o) => ORIGIN_RE.test(o)))];
 
 /**
+ * Whether this server is itself a Vercel function (step 5), reached through Vercel's edge, which decides the Host
+ * and the visitor's address. Not when it is the VM behind the Vercel middleware: that has no VERCEL variable.
+ */
+export const servedByVercel = () => !!process.env.VERCEL;
+
+/**
  * Whether this request came through Concord's own Vercel middleware: it sends
  * CONCORD_PROXY_SECRET, which only it and this server know. Only then are the
  * X-Concord-Origin and X-Concord-Client-IP headers believed.
@@ -145,6 +152,9 @@ export function publicOrigin(req: Request): string | undefined {
   const host = req.headers.host?.trim().toLowerCase();
   const direct = host ? trustedOrigins().find((o) => new URL(o).host === host) : undefined;
   if (direct) return direct;
+  // As a Vercel function, Vercel only routes this deployment's own domains here (a preview, a new custom domain),
+  // and the Host is the one asked for, over HTTPS.
+  if (servedByVercel() && host && ORIGIN_RE.test(`https://${host}`)) return `https://${host}`;
   if (process.env.CONCORD_PROXY_SECRET) return undefined;
   return norm(config.publicUrl);
 }
@@ -349,6 +359,15 @@ let scrubTimer: NodeJS.Timeout | undefined;
 let scrubBackoff = 0;
 export function scheduleScrub(delayMs = 0) {
   if (scrubTimer) return;
+  // Straight away, with nothing to wait for: registered now (detached keeps it alive after the response on Vercel,
+  // where a timer can be frozen with the instance before it fires), and run once the caller's own work has let go
+  // of the database (the next turn of the event loop), as the timer did. Later retries on Vercel come from the
+  // start-up task, which warm instances try again until the scrub is done (vercel.ts).
+  if (delayMs <= 0) {
+    const next = () => new Promise<void>((r) => setImmediate(r));
+    void detached(async () => (await next(), scrubAttempt())).catch((e) => console.warn(`[oauth] secret scrub failed: ${(e as Error).message}`));
+    return;
+  }
   // Detached: the timer inherits the caller's context, which may be a transaction long over by the time it fires.
   scrubTimer = setTimeout(() => void detached(scrubAttempt).catch((e) => console.warn(`[oauth] secret scrub failed: ${(e as Error).message}`)), delayMs);
   scrubTimer.unref();
@@ -677,12 +696,17 @@ export async function authenticateMcp(req: Request): Promise<{ user: User; agent
 export function clientIp(req: Request): string {
   const passed = req.header('x-concord-client-ip')?.trim();
   if (passed && isIP(passed) && fromTrustedProxy(req)) return passed;
+  // As a Vercel function, Vercel's edge sets X-Real-IP to the visitor's address (a visitor's own is replaced).
+  const real = req.header('x-real-ip')?.trim();
+  if (servedByVercel() && real && isIP(real)) return real;
   return req.ip ?? 'unknown';
 }
-const limiter = (windowMs: number, limit: number) =>
+const limiter = (windowMs: number, limit: number, name: string) =>
   rateLimiter({
     windowMs,
     limit,
+    // Counted across every instance when several serve at once (Vercel).
+    ...(config.sharedLimits ? { store: new DbRateStore(`oauth-${name}`) } : {}),
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => ipKeyGenerator(clientIp(req as Request)),
@@ -690,8 +714,8 @@ const limiter = (windowMs: number, limit: number) =>
     message: { error: 'too_many_requests', error_description: 'Too many requests. Try again later.' },
   });
 const limits: [RegExp, RequestHandler][] = [
-  [/^\/register/, limiter(60 * 60 * 1000, 30)],
-  [/^\/(authorize|token|revoke)/, limiter(15 * 60 * 1000, 300)],
+  [/^\/register/, limiter(60 * 60 * 1000, 30, 'register')],
+  [/^\/(authorize|token|revoke)/, limiter(15 * 60 * 1000, 300, 'token')],
 ];
 const rateLimit = false as const;
 

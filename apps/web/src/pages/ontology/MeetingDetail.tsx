@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router';
 import type { Meeting, MeetingAnalysis, UseCase } from '@concord/shared';
 import { useCaseLabel } from '@concord/shared';
 import { ArrowLeft, Bot, CircleHelp, ClipboardList, Gavel, Lightbulb, MessageSquare, MessageSquareWarning, PhoneOff, Repeat, Send, ScanSearch } from 'lucide-react';
-import { api, streamMeeting } from '../../api';
+import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, relativeTime, titleCase } from '../../lib/format';
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, Segmented, Spinner, Toggle } from '../../components/ui';
@@ -31,6 +31,9 @@ function fmtT(t?: number) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** How often a live call's page asks for new lines and prompts. */
+const LIVE_POLL_MS = 2000;
+
 export function MeetingDetailPage() {
   const { meetingId = '' } = useParams();
   const { id } = useOntology();
@@ -43,23 +46,34 @@ export function MeetingDetailPage() {
   const waitingBot = !!m.data?.bot && ['scheduled', 'joining', 'in-call'].includes(m.data.bot.status) && !live && !scheduled;
   const processing = m.data?.status === 'processing';
 
-  // Live updates over SSE while the meeting is live.
+  // Live updates while the call is on: the page asks for what's new every couple of seconds. The transcript
+  // only grows, so the lines the page has are the cursor; asking again (or twice at once) never duplicates a line.
+  const transcriptLength = useRef(0);
+  transcriptLength.current = m.data?.transcript.length ?? 0;
   useEffect(() => {
     if (!live) return;
-    return streamMeeting(
-      meetingId,
-      (ev) => {
-        if (ev.type === 'line') m.setData((p) => (p ? { ...p, transcript: [...p.transcript, ev.line] } : (p as unknown as Meeting)));
-        else if (ev.type === 'prompt') m.setData((p) => (p ? { ...p, facilitatorPrompts: [...p.facilitatorPrompts, ev.prompt] } : (p as unknown as Meeting)));
-        else if (ev.type === 'meeting') m.setData(ev.meeting);
-        else if (ev.type === 'status') {
-          if (ev.meeting) m.setData(ev.meeting);
-          else m.setData((p) => (p ? { ...p, status: ev.status } : (p as unknown as Meeting)));
-          if (ev.status !== 'live') void m.reload();
-        }
-      },
-      () => void m.reload(),
-    );
+    let asking = false;
+    // A reply that arrives after the page moved on (another meeting, or the call ended) is dropped: clearing the
+    // timer doesn't stop a request already sent, and its meeting would replace the one now shown.
+    let gone = false;
+    const t = setInterval(async () => {
+      if (asking) return;
+      asking = true;
+      try {
+        const u = await api.meetingUpdates(meetingId, transcriptLength.current);
+        if (gone || u.meeting.id !== meetingId) return;
+        m.setData((p) => ({ ...u.meeting, transcript: [...(p?.transcript ?? []).slice(0, u.from), ...u.lines] }));
+        if (u.meeting.status !== 'live') void m.reload();
+      } catch {
+        // Tried again on the next tick.
+      } finally {
+        asking = false;
+      }
+    }, LIVE_POLL_MS);
+    return () => {
+      gone = true;
+      clearInterval(t);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, meetingId]);
 
@@ -205,6 +219,7 @@ export function MeetingDetailPage() {
                 {fmtT(p.t)} {p.posted ? `· posted in the Meet chat${mt.source === 'simulation' ? ' (simulated)' : ''}` : '· suggested to the facilitator'}
               </p>
               {p.postError && !p.posted && <p className="mt-0.5 text-xs text-danger">Couldn’t post: {p.postError}</p>}
+              {p.postUncertain && !p.posted && <p className="mt-0.5 text-xs text-warn">This may already be in the call’s chat: posting it was interrupted. Check the chat before posting it again.</p>}
               {!p.posted && canPostNow && mayRun && (
                 <Button size="sm" variant="ghost" icon={Send} className="-ml-2 mt-1" loading={posting === i} disabled={posting !== undefined} onClick={() => void postPrompt.run(i)}>
                   Post in the Meet chat

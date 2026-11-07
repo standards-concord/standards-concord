@@ -119,6 +119,9 @@ export function useDictation(onText: (text: string) => void, opts: { allowRecord
             if (err instanceof ApiError && err.status === 501) {
               setUnavailable(true);
               setError("Voice input isn't available in this browser — please type your answer instead.");
+            } else if (err instanceof ApiError && err.status === 413) {
+              // Over the server's size limit (4 MB on Vercel, about 15 minutes of speech).
+              setError('That recording is too long to send. Try again in shorter parts.');
             } else setError(err instanceof Error ? err.message : 'Transcription failed.');
           } finally {
             setTranscribing(false);

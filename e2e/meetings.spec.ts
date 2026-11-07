@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import type { APIRequestContext, Page } from '@playwright/test';
-import { test, expect, expectNoCrash, settle, signIn, demoOntology } from './fixtures';
+import { test, expect, expectNoCrash, settle, signIn, demoOntology, uniq } from './fixtures';
 
 /**
  * The co-lead bot for Google Meet: inviting it by email (its calendar feed is a
@@ -221,6 +221,72 @@ test.describe('Meet co-lead bot', () => {
     await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible({ timeout: 30_000 });
     await expect(page.getByRole('button', { name: 'End call and analyse' })).toHaveCount(0);
     await expectNoCrash(page);
+  });
+
+  // Live updates came over a stream that only heard what happened on the server it was connected to, so on
+  // Vercel (several instances) lines that reached another instance never showed. The page now asks for what's new
+  // every couple of seconds, with the lines it has as the cursor, so nothing is missed or shown twice.
+  test('a live call’s transcript fills in as people speak, each line once, also after a reload', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    const r = await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E polled call', delayMs: 700 } });
+    expect(r.ok()).toBeTruthy();
+    const m = (await r.json()) as { id: string };
+    await page.goto(`/o/${demo.id}/meetings/${m.id}`);
+    await expect(page.getByText('Live', { exact: true })).toBeVisible();
+    const first = page.getByText('Thanks for joining. Today', { exact: false });
+    await expect(first).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.getByText('Is a shift different from what we call a session', { exact: false })).toBeVisible({ timeout: 15_000 });
+    await page.reload();
+    await expect(page.getByText('In our CRM we store shifts as recurring sessions', { exact: false })).toBeVisible({ timeout: 15_000 });
+    await expect(first).toHaveCount(1);
+    await page.getByRole('button', { name: 'End call and analyse' }).click();
+    await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible({ timeout: 30_000 });
+    await expectNoCrash(page);
+  });
+
+  // Review r1 of step 5: leaving a live call's page stopped its timer but not a request already sent, so when that
+  // reply came back it replaced the meeting now on screen with the one just left.
+  test('a live call’s late update doesn’t replace the next meeting opened', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    const titleA = `E2E left call ${uniq()}`;
+    const titleB = `E2E opened call ${uniq()}`;
+    const a = (await (await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: titleA, delayMs: 60_000 } })).json()) as { id: string };
+    const b = (await (await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: titleB, delayMs: 60_000 } })).json()) as { id: string };
+    // A's next update is held until the page has moved on to B.
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
+    let held!: () => void;
+    const holding = new Promise<void>((r) => (held = r));
+    await page.route(`**/api/meetings/${a.id}/updates**`, async (route) => {
+      held();
+      await released;
+      await route.continue().catch(() => undefined);
+    });
+    await page.goto(`/o/${demo.id}/meetings/${a.id}`);
+    await expect(page.getByRole('heading', { name: titleA })).toBeVisible();
+    await holding;
+    // Back to the list and into B, without reloading the page.
+    await page.getByRole('link', { name: 'Meetings' }).first().click();
+    await page.getByRole('link', { name: titleB }).click();
+    await expect(page.getByRole('heading', { name: titleB })).toBeVisible();
+    const replied = page.waitForResponse((res) => res.url().includes(`/api/meetings/${a.id}/updates`));
+    release();
+    await replied;
+    await page.waitForTimeout(300);
+    await expect(page.getByRole('heading', { name: titleB })).toBeVisible();
+    await expect(page.getByRole('heading', { name: titleA })).toHaveCount(0);
+    await page.unroute(`**/api/meetings/${a.id}/updates**`);
+    for (const id of [a.id, b.id]) await page.request.post(`/api/meetings/${id}/end`);
+  });
+
+  test('a contributor can’t follow a live call’s updates', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    const r = await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E members only', delayMs: 0 } });
+    const m = (await r.json()) as { id: string };
+    await signIn(page, { name: 'E2E onlooker', role: 'contributor' });
+    expect((await page.request.get(`/api/meetings/${m.id}/updates?from=0`)).status()).toBe(404);
+    // Back as a facilitator, for this file's clean-up.
+    await signIn(page, { name: 'E2E facilitator', role: 'steward' });
   });
 
   test('a finished meeting opens on its summary, with the transcript, prompts and extracted items one click away', async ({ page, request }) => {

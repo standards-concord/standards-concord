@@ -169,6 +169,50 @@ export async function mediaIndex(): Promise<MediaIndex> {
 
 const downloads = new Map<string, Promise<string>>();
 
+/**
+ * On Vercel the videos aren't served through the function (a function's response is capped at a few MB, and its
+ * disk is temporary): where they are on GitHub, for a redirect. Captions, transcripts and the clip list are small,
+ * and still come from our origin (caption tracks need CORS, which GitHub doesn't send).
+ */
+export const redirectsVideos = () => !localDir() && (process.env.CONCORD_MEDIA_REDIRECT ? process.env.CONCORD_MEDIA_REDIRECT === 'true' : !!process.env.VERCEL);
+/** The largest file downloaded into a temporary disk (when videos are redirected): text files only. */
+export const MAX_TEMP_DOWNLOAD = 4 * 1024 * 1024;
+/** The most the cache may hold on a temporary disk: older files are removed first to stay under it. */
+export const MAX_TEMP_TOTAL = 32 * 1024 * 1024;
+
+/** Downloads under way into the temporary disk, each holding MAX_TEMP_DOWNLOAD of the total until it ends. */
+let reserved = 0;
+/** For tests: the room downloads under way hold now, in downloads. */
+export const tempReserved = () => reserved;
+
+/** Removes the cache's oldest files until it holds at most `budget` bytes (files being downloaded now are kept). */
+function trimCache(budget: number) {
+  const root = cacheRoot();
+  const files: { file: string; size: number; at: number }[] = [];
+  for (const folder of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!folder.isDirectory()) continue;
+    for (const f of fs.readdirSync(path.join(root, folder.name), { withFileTypes: true })) {
+      const file = path.join(root, folder.name, f.name);
+      if (downloads.has(file.replace(/\.part$/, ''))) continue;
+      const st = fs.lstatSync(file, { throwIfNoEntry: false });
+      if (st) files.push({ file, size: st.isFile() ? st.size : 0, at: st.mtimeMs });
+    }
+  }
+  let total = files.reduce((n, f) => n + f.size, 0);
+  for (const f of files.sort((a, b) => a.at - b.at)) {
+    if (total <= budget) break;
+    fs.rmSync(f.file, { force: true });
+    total -= f.size;
+  }
+}
+
+/** Where a release's video is on GitHub, when videos are redirected (see redirectsVideos). */
+export async function mediaRedirect(name: string): Promise<string | undefined> {
+  if (!redirectsVideos() || !isMediaName(name) || !name.endsWith('.mp4')) return undefined;
+  const index = await mediaIndex();
+  return index.release ? cached?.assets.get(name)?.url : undefined;
+}
+
 /** A local path for one of the media files, downloading it once per release if needed. */
 export async function mediaFile(name: string): Promise<string | undefined> {
   if (!isMediaName(name)) return undefined;
@@ -184,20 +228,55 @@ export async function mediaFile(name: string): Promise<string | undefined> {
   const url = asset.url;
   let job = downloads.get(target);
   if (!job) {
+    // The room is given back in the same step that stops counting the download as under way (trimCache skips the
+    // files of downloads under way): otherwise a download admitted in between wouldn't count this one's file.
+    let held = false;
     job = (async () => {
       // A link (or file) where the asset's folder belongs is removed, never written through.
       const st = fs.lstatSync(folder, { throwIfNoEntry: false });
       if (st && !st.isDirectory()) fs.unlinkSync(folder);
       fs.mkdirSync(folder, { recursive: true });
-      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60 * 1000) });
+      const small = redirectsVideos();
+      // On a temporary disk, only small files, within a request's time.
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(small ? 20_000 : 10 * 60 * 1000) });
       if (!res.ok || !res.body) throw new Error(`Downloading ${name}: HTTP ${res.status}`);
+      const tooLarge = () => new Error(`Downloading ${name}: too large to keep here`);
+      if (small && Number(res.headers.get('content-length') ?? 0) > MAX_TEMP_DOWNLOAD) throw tooLarge();
+      // The declared length can be missing or wrong: count what arrives, and make room first. Each download under
+      // way holds room for its largest size, so downloads at once can't take the cache over its total together.
+      if (small) {
+        const room = MAX_TEMP_TOTAL - MAX_TEMP_DOWNLOAD * (reserved + 1);
+        if (room < 0) throw new Error(`Downloading ${name}: too many downloads at once; try again shortly`);
+        trimCache(room);
+        reserved++;
+        held = true;
+      }
       const tmp = `${target}.part`;
-      await pipeline(Readable.fromWeb(res.body as import('node:stream/web').ReadableStream), fs.createWriteStream(tmp));
+      try {
+        await pipeline(
+          Readable.fromWeb(res.body as import('node:stream/web').ReadableStream),
+          async function* (source: AsyncIterable<Buffer>) {
+            let n = 0;
+            for await (const chunk of source) {
+              n += chunk.length;
+              if (small && n > MAX_TEMP_DOWNLOAD) throw tooLarge();
+              yield chunk;
+            }
+          },
+          fs.createWriteStream(tmp),
+        );
+      } catch (err) {
+        fs.rmSync(tmp, { force: true });
+        throw err;
+      }
       fs.renameSync(tmp, target);
       const ok = regularFileIn(folder, name, cacheRoot());
       if (!ok) throw new Error(`Downloading ${name}: the cached copy isn't a plain file`);
       return ok;
-    })().finally(() => downloads.delete(target));
+    })().finally(() => {
+      downloads.delete(target);
+      if (held) reserved--;
+    });
     downloads.set(target, job);
   }
   return job;

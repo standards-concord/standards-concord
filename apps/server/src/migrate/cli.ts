@@ -2,12 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { closeDb, openDb } from '../db.js';
 import { openStore } from '../store/index.js';
-import { copyDatabase, exportHistories, exportRows, importHistories, verifyImport } from './index.js';
+import { copyDatabase, exportHistories, exportPrivateFiles, exportRows, importHistories, importPrivateFiles, verifyImport } from './index.js';
 
 /**
  * The cutover tool (docs/cutover.md). The database it writes to or reads from is DATABASE_URL (Neon).
  *
- *   node --import tsx src/migrate/cli.ts copy --from /data     SQLite and repositories in /data -> DATABASE_URL, verified
+ *   node --import tsx src/migrate/cli.ts copy --from /data     SQLite, repositories and private files in /data -> DATABASE_URL, verified
  *   node --import tsx src/migrate/cli.ts verify --from /data   verify again, without copying
  *   node --import tsx src/migrate/cli.ts export --to /restore  DATABASE_URL -> SQLite and repositories in /restore
  *
@@ -35,7 +35,8 @@ try {
     await target.putRows(rows);
     await target.close();
     const h = await exportHistories(dir);
-    console.log(`Exported ${rows.length} documents to ${sqliteFile}, and ${h.ontologies} histories (${h.objects} objects) to ${path.join(dir, 'ontologies')}.`);
+    const p = await exportPrivateFiles(dir);
+    console.log(`Exported ${rows.length} documents to ${sqliteFile}, ${h.ontologies} histories (${h.objects} objects) to ${path.join(dir, 'ontologies')}, and ${p.files} private files.`);
   } else {
     if (!fs.existsSync(sqliteFile)) throw new Error(`No database at ${sqliteFile}`);
     const source = await openStore({ kind: 'sqlite', file: sqliteFile });
@@ -46,6 +47,7 @@ try {
         const h = await importHistories(dir);
         console.log(`Imported ${h.ontologies} histories (${h.objects} objects read).`);
         for (const n of h.notes) console.log(`  note: ${n}`);
+        console.log(`Imported ${(await importPrivateFiles(dir)).files} private files.`);
       }
       const m = await verifyImport(source, dir);
       console.log(`Verified: ${m.ontologies} ontologies, ${m.objects} objects.`);

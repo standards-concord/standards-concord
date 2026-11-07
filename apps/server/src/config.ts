@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -16,10 +17,14 @@ function usd(v: string | undefined, dflt: number): number {
   return Number.isFinite(n) && n >= 0 ? n : dflt;
 }
 
-/** Public URL from the environment, or the platform's own domain variable (Railway, Render, Fly). */
+/** Public URL from the environment, or the platform's own domain variable (Railway, Render, Fly, Vercel). */
+const vercelHost = process.env.VERCEL_ENV === 'production' ? process.env.VERCEL_PROJECT_PRODUCTION_URL : (process.env.VERCEL_BRANCH_URL ?? process.env.VERCEL_URL);
 const platformUrl = process.env.RAILWAY_PUBLIC_DOMAIN
   ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-  : (process.env.RENDER_EXTERNAL_URL ?? (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : undefined));
+  : (process.env.RENDER_EXTERNAL_URL ?? (process.env.FLY_APP_NAME ? `https://${process.env.FLY_APP_NAME}.fly.dev` : vercelHost ? `https://${vercelHost}` : undefined));
+
+/** On Vercel, Concord runs as a function: no lasting disk, many instances, a 4.5 MB request limit. */
+const onVercel = !!process.env.VERCEL;
 
 function ontologyStoreKind(value: string | undefined, postgres: boolean): 'git' | 'db' {
   if (value === 'git' || value === 'db') return value;
@@ -33,7 +38,13 @@ export const config = {
   publicUrl: (process.env.PUBLIC_URL ?? platformUrl ?? `http://localhost:${process.env.PORT ?? 8787}`).replace(/\/$/, ''),
   /** Where the web app is served from in development (OAuth redirects back here). */
   webUrl: (process.env.WEB_URL ?? process.env.PUBLIC_URL ?? platformUrl ?? 'http://localhost:5173').replace(/\/$/, ''),
-  dataDir: path.resolve(process.env.CONCORD_DATA_DIR ?? path.join(repoRoot, '.data')),
+  /** On Vercel only /tmp is writable, and nothing there lasts: caches only (the database holds everything else). */
+  dataDir: path.resolve(process.env.CONCORD_DATA_DIR ?? (onVercel ? path.join(os.tmpdir(), 'concord') : path.join(repoRoot, '.data'))),
+  /**
+   * The largest request bodies accepted: JSON (and MCP) and voice clips. Vercel refuses anything over 4.5 MB before
+   * Concord sees it, so there both are 4 MB, which Concord refuses with a clear message.
+   */
+  bodyLimits: onVercel ? { json: '4mb', audio: '4mb' } : { json: '5mb', audio: '25mb' },
   /**
    * Where ontologies' files and history live. `git`: a git repository per ontology under dataDir (the VM). `db`:
    * git's objects stored in the database (services/gitdb.ts), for hosts with no disk (Vercel). Default: `db`
@@ -54,6 +65,22 @@ export const config = {
    * 'requests', after requests plus a daily cron call (Vercel, which has no long-running process).
    */
   schedule: (process.env.CONCORD_SCHEDULE ?? (process.env.VERCEL ? 'requests' : 'timer')) as 'timer' | 'requests',
+  /**
+   * Rate limits counted in the database, shared by every instance (OAuth endpoints, public validation), instead of
+   * each process's memory. On by default on Vercel, where several instances serve at once.
+   */
+  sharedLimits: bool(process.env.CONCORD_SHARED_LIMITS, !!process.env.VERCEL),
+  /**
+   * Where private data goes when it isn't in a pod (no Solid server, or an account with no pod): `files` under the
+   * data directory (the VM), or `db`, rows in the database (Vercel, which has no lasting disk).
+   */
+  privateStore: (process.env.CONCORD_PRIVATE_STORE ?? (process.env.VERCEL ? 'db' : 'files')) === 'db' ? ('db' as const) : ('files' as const),
+  /**
+   * Without CONCORD_ENCRYPTION_KEY, keep an administrator's Solid login (for reading testers' pods) in this process's
+   * memory. Fine for one long-running server (the VM); off by default on Vercel, where the next request can reach
+   * another instance, so there the feature needs the key and is turned off without it.
+   */
+  adminLoginsInMemory: bool(process.env.CONCORD_ADMIN_LOGINS_IN_MEMORY, !process.env.VERCEL),
   /** Vercel Cron's bearer secret, for GET /api/cron/daily. Unset: the endpoint refuses every call. */
   cronSecret: process.env.CRON_SECRET || undefined,
   /**

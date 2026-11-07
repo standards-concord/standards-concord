@@ -338,6 +338,20 @@ describe('public reports: second review', () => {
     expect((await (await steward()).post(`/api/ontologies/${await projectId()}/public-reports/${other.body.reference}/accept`)).status).toBe(409);
   });
 
+  it('keeps each visitor’s limit and recent reports in the database, so every server counts the same posts', async () => {
+    // Step 5 (Vercel): the windows were in one process's memory, so each function instance had a fresh allowance.
+    const v = await visitor('192.0.2.75');
+    const words = 'Stored once and answered the same from any server.';
+    const first = await v.send({ description: words });
+    expect(first.status).toBe(201);
+    const rows = await list<{ id: string; reference?: string }>('kv', 'report-limits');
+    expect(rows.filter((r) => r.id.startsWith('report-hits:v:'))).toHaveLength(1);
+    expect(rows.filter((r) => r.id.startsWith('report-hits:a:'))).toHaveLength(1);
+    expect(rows.find((r) => r.id.startsWith('report-sent:'))?.reference).toBe(first.body.reference);
+    // No row names the visitor's address.
+    expect(JSON.stringify(rows)).not.toContain('192.0.2.75');
+  });
+
   it('uses a token once, even after a restart', async () => {
     const v = await visitor('192.0.2.73');
     const once = v.token();

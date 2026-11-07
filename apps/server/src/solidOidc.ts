@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import * as oauth from 'oauth4webapi';
 import { Parser, type Quad } from 'n3';
 import { config } from './config.js';
+import { insertOnce, removeWhereAtMost, reserveCounters, take } from './db.js';
+import { withLease } from './lease.js';
+import { sealingAvailable } from './sealed.js';
 import { ConnectionPool, FetchError, ipLiteral, isPublicAddress, safeRequest } from './safeFetch.js';
 import { refuseWhenReadOnly } from './db.js';
 
@@ -297,19 +300,26 @@ interface Pending {
   returnTo: string;
   at: number;
 }
-const pending = new Map<string, Pending>();
+/**
+ * Sign-ins in progress, in the database: the callback can reach another server (or function instance) than the
+ * one that started it. Keyed by a hash of the login cookie, taken once, and gone after PENDING_TTL.
+ */
 const PENDING_TTL = 10 * 60 * 1000;
 const MAX_PENDING = 1000;
-
-const sweep = () => {
-  const now = Date.now();
-  for (const [id, p] of pending) if (now - p.at > PENDING_TTL) pending.delete(id);
-};
+const pendingId = (loginId: string) => `solid-login:${createHash('sha256').update(loginId).digest('hex')}`;
+interface StoredPending extends Pending {
+  id: string;
+  /** When it expires (ms): a numeric field of its own, so expired ones are swept in one statement. */
+  solidLoginExpires: number;
+}
+const sweep = async () => void (await removeWhereAtMost('kv', 'solidLoginExpires', Date.now()));
 
 /** Start signing in: returns the login's id (for a cookie) and where to send the browser. */
 export async function startLogin(as: oauth.AuthorizationServer, returnTo: string): Promise<{ loginId: string; url: string }> {
-  sweep();
-  if (pending.size >= MAX_PENDING) throw new SolidLoginError('Too many sign-ins in progress. Please try again in a minute.');
+  await sweep();
+  // At most MAX_PENDING sign-ins started in any ten minutes, across every server.
+  if (!(await reserveCounters([{ id: `solid-logins:${Math.floor(Date.now() / PENDING_TTL)}`, max: MAX_PENDING }], 'solid-logins')))
+    throw new SolidLoginError('Too many sign-ins in progress. Please try again in a minute.');
   const client = await clientFor(as);
   const verifier = oauth.generateRandomCodeVerifier();
   const state = oauth.generateRandomState();
@@ -328,7 +338,8 @@ export async function startLogin(as: oauth.AuthorizationServer, returnTo: string
   }))
     url.searchParams.set(k, v);
   const loginId = oauth.generateRandomState();
-  pending.set(loginId, { as, client, verifier, state, nonce, returnTo, at: Date.now() });
+  const at = Date.now();
+  await insertOnce<StoredPending>('kv', { id: pendingId(loginId), as, client, verifier, state, nonce, returnTo, at, solidLoginExpires: at + PENDING_TTL });
   return { loginId, url: url.href };
 }
 
@@ -343,7 +354,32 @@ export interface SolidLogin {
   expiresAt: number;
   /** For a pod owner Concord acts for (client credentials), instead of a refresh token. */
   clientSecret?: string;
+  /** Kept in the database under this id (see `shareLogins`), so every instance refreshes it in turn. */
+  sharedId?: string;
 }
+
+/** A login as it is stored: its keys as JWKs. */
+export interface StoredLogin extends Omit<SolidLogin, 'keys'> {
+  jwk: { publicKey: JsonWebKey; privateKey: JsonWebKey };
+}
+export async function exportLogin(login: SolidLogin): Promise<StoredLogin> {
+  const { keys, ...rest } = login;
+  return { ...rest, jwk: { publicKey: await crypto.subtle.exportKey('jwk', keys.publicKey), privateKey: await crypto.subtle.exportKey('jwk', keys.privateKey) } };
+}
+export async function importLogin(stored: StoredLogin): Promise<SolidLogin> {
+  const { jwk, ...rest } = stored;
+  const alg = { name: 'ECDSA', namedCurve: 'P-256' };
+  return { ...rest, keys: { publicKey: await crypto.subtle.importKey('jwk', jwk.publicKey, alg, true, ['verify']), privateKey: await crypto.subtle.importKey('jwk', jwk.privateKey, alg, false, ['sign']) } };
+}
+
+/** Where shared logins are kept (auth.ts registers it): each instance loads the latest before refreshing. */
+export interface SharedLogins {
+  load(id: string): Promise<SolidLogin | undefined>;
+  /** Saves the login's new tokens (its keys don't change). */
+  save(id: string, login: SolidLogin): Promise<void>;
+}
+let sharedLogins: SharedLogins | undefined;
+export const shareLogins = (s: SharedLogins) => void (sharedLogins = s);
 
 export interface FinishedLogin {
   webId: string;
@@ -381,16 +417,16 @@ export function nameFromWebId(webId: string): string {
  * WebID's profile must list the token's issuer.
  */
 export async function finishLogin(loginId: string | undefined, callbackUrl: string): Promise<FinishedLogin> {
-  sweep();
-  const p = loginId ? pending.get(loginId) : undefined;
-  if (!loginId || !p) throw new SolidLoginError('Sign-in failed: it expired or was started in another browser. Please try again.');
-  pending.delete(loginId);
+  // Taken once: a second callback with the same cookie finds nothing.
+  const p = loginId ? await take<StoredPending>('kv', pendingId(loginId)) : undefined;
+  if (!loginId || !p || p.solidLoginExpires <= Date.now()) throw new SolidLoginError('Sign-in failed: it expired or was started in another browser. Please try again.');
   const { as, client } = p;
   const tokenUrl = new URL(as.token_endpoint!);
   const opts = oauthOptions(tokenUrl);
   let claims: oauth.IDToken;
   let tokens: oauth.TokenEndpointResponse;
-  const keys = await oauth.generateKeyPair('ES256');
+  // Extractable only where a login can be kept, sealed, in the database for other instances (an administrator's).
+  const keys = await oauth.generateKeyPair('ES256', { extractable: sealingAvailable() });
   const DPoP = oauth.DPoP(client, keys);
   try {
     const params = oauth.validateAuthResponse(as, client, new URL(callbackUrl), p.state);
@@ -472,7 +508,29 @@ function fresh(login: SolidLogin, force = false): Promise<boolean> {
   return p;
 }
 
+/**
+ * A shared login is refreshed by one instance at a time (refresh tokens may rotate, so only one use counts): under
+ * a lease, it first takes up a token another instance already got, and otherwise refreshes and saves it.
+ */
 async function renew(login: SolidLogin): Promise<boolean> {
+  const id = login.sharedId;
+  if (!id || !sharedLogins) return await renewHere(login);
+  const store = sharedLogins;
+  return await withLease(`solid-refresh:${id}`, 30_000, async () => {
+    const latest = await store.load(id);
+    if (!latest) return false; // signed out meanwhile
+    if (latest.accessToken !== login.accessToken && Date.now() < latest.expiresAt - 30_000) {
+      Object.assign(login, { accessToken: latest.accessToken, refreshToken: latest.refreshToken, expiresAt: latest.expiresAt });
+      return true;
+    }
+    Object.assign(login, { refreshToken: latest.refreshToken });
+    const ok = await renewHere(login);
+    if (ok) await store.save(id, login);
+    return ok;
+  });
+}
+
+async function renewHere(login: SolidLogin): Promise<boolean> {
   try {
     if (login.clientSecret) {
       await grantClientCredentials(login);

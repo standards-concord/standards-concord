@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import type { FacilitatorPrompt, Meeting, MeetingAnalysis, OntologyProject, Role, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { transaction, get, HttpError, list, mustGet, put, remove } from '../db.js';
+import { transaction, get, HttpError, inTransaction, list, mustGet, put, remove } from '../db.js';
 import { newId, newToken } from '../ids.js';
 import { ontologyDigest } from '../llm/context.js';
 import { FACILITATOR, MEETING_ANALYST } from '../llm/prompts.js';
@@ -10,6 +10,8 @@ import { llm } from '../llm/provider.js';
 import { FacilitatorSchema, MeetingAnalysisSchema } from '../llm/schemas.js';
 import { ontologyStore } from './ontologyStore.js';
 import { getProject, rolesFor } from './ontologies.js';
+import { keepAlive } from '../keepAlive.js';
+import { withLease } from '../lease.js';
 import { withLock } from '../locks.js';
 import { filterAsync } from '../asyncList.js';
 import { adoptInPlace, background, beginBooking, beginRelease, bump, dismissUnconfirmed, drive, driveStrays, idleBot, knownGone, MAX_DISMISSED, normalise, noteStray, settled, tracked } from './botLifecycle.js';
@@ -23,13 +25,15 @@ export const saveMeeting = async (m: Meeting) => await put('meetings', m, m.onto
 const save = saveMeeting;
 
 /**
- * Serialises changes to one meeting (bookings, webhooks, posting, skipping), within this process. That is enough
- * while the backend is one server (the VM). Known limit: on several instances (Vercel Functions) two of them could
- * still interleave a meeting's read and write, so before the backend runs there, every meetingLock and the
- * calendar lock must also hold the database's writer lock (a transaction) for their read-modify-write. See
- * docs/deploy.md, "Before the backend runs on more than one instance".
+ * Serialises changes to one meeting (bookings, webhooks, posting, skipping). The body runs in a database
+ * transaction, which holds the store's one writer lock, so its read-modify-write is atomic across every instance
+ * (each Vercel function instance has locks of its own); the lock in this process only queues this instance's
+ * callers so they don't all wait on the database. Keep the body to reads and writes: nothing over the network.
+ * Called inside a transaction already, it runs straight away: the writer lock is held, so no other holder is
+ * mid-way, and waiting for this process's lock there could deadlock against a holder waiting for the writer lock.
  */
-export const meetingLock = <T>(id: string, fn: () => Promise<T> | T) => withLock(`meeting:${id}`, fn);
+export const meetingLock = <T>(id: string, fn: () => Promise<T> | T): Promise<T> =>
+  inTransaction() ? Promise.resolve().then(fn) : withLock(`meeting:${id}`, () => transaction(fn));
 
 /** Applies a change to the latest stored copy of a meeting, under its lock, so concurrent updates aren't lost. */
 export function mutateMeeting(id: string, change: (m: Meeting) => void): Promise<Meeting> {
@@ -204,33 +208,78 @@ export function parseTranscript(raw: string): TranscriptLine[] {
 /* Analysis                                                                  */
 /* ------------------------------------------------------------------------ */
 
+/** How long one run may take to analyse a call before another may take it over (its server died, say). */
+export const ANALYSIS_CLAIM_MS = 10 * 60_000;
+/** Being analysed by a run that is still within its claim. */
+export const analysing = (m: Meeting) => m.status === 'processing' && (m.analysisClaim?.until ?? 0) > Date.now();
+
+/**
+ * An analysis whose run died (its claim lapsed with the call still 'processing') is started again by whoever reads
+ * the call: the meeting page polls while it shows "processing", so a stuck call recovers without anyone acting.
+ */
+export function recoverAnalysis(m: Meeting) {
+  if (m.status !== 'processing' || analysing(m) || !m.transcript.length || botActive(m) || botOutstanding(m)) return;
+  void keepAlive(analyseMeeting(m)).catch((err) => console.warn(`[meetings] analysis of ${m.id} could not restart: ${(err as Error).message}`));
+}
+
+/**
+ * Analyses a call once. The run claims it on the record (any server instance sees the claim), so a second ask
+ * while it runs gets the call as it is; a claim whose run died lapses after ANALYSIS_CLAIM_MS, and only the run
+ * holding the claim saves its result.
+ */
 export async function analyseMeeting(m: Meeting): Promise<Meeting> {
   m = await getMeeting(m.id);
   if (botActive(m) || botOutstanding(m)) throw new HttpError(409, 'The bot may still be in the call. End the call first.');
   if (!m.transcript.length) throw new HttpError(409, 'The transcript is empty');
   const project = await getProject(m.ontologyId);
+  const token = newToken();
+  let claimed = false;
+  let was: Meeting['status'] = m.status;
   m = await mutateMeeting(m.id, (x) => {
+    if (analysing(x)) return;
+    was = x.status === 'processing' ? 'error' : x.status;
     x.status = 'processing';
+    x.analysisClaim = { token, until: Date.now() + ANALYSIS_CLAIM_MS };
+    claimed = true;
   });
+  if (!claimed) return m;
   emit(m, { type: 'status', status: m.status });
-  const graph = await ontologyStore.working(project);
-  const { value } = await llm.json<MeetingAnalysis>({
-    task: 'meeting-analysis',
-    system: MEETING_ANALYST,
-    schema: MeetingAnalysisSchema as never,
-    maxTokens: 20000,
-    messages: [
-      {
-        role: 'user',
-        content: `Ontology being designed: ${project.title}. ${project.description}\n\nIts current terms (to recognise when people talk about something that already exists):\n${ontologyDigest(graph, 150)}\n\nTranscript of "${m.title}":\n\n${m.transcript.map((l) => `${l.speaker}: ${l.text}`).join('\n')}`,
-      },
-    ],
-    fallback: () => heuristicAnalysis(m.transcript, graph.view().classes.map((c) => c.label ?? '')),
-  });
+  let value: MeetingAnalysis;
+  try {
+    const graph = await ontologyStore.working(project);
+    ({ value } = await llm.json<MeetingAnalysis>({
+      task: 'meeting-analysis',
+      system: MEETING_ANALYST,
+      schema: MeetingAnalysisSchema as never,
+      maxTokens: 20000,
+      messages: [
+        {
+          role: 'user',
+          content: `Ontology being designed: ${project.title}. ${project.description}\n\nIts current terms (to recognise when people talk about something that already exists):\n${ontologyDigest(graph, 150)}\n\nTranscript of "${m.title}":\n\n${m.transcript.map((l) => `${l.speaker}: ${l.text}`).join('\n')}`,
+        },
+      ],
+      fallback: () => heuristicAnalysis(m.transcript, graph.view().classes.map((c) => c.label ?? '')),
+    }));
+  } catch (err) {
+    // Let go of the claim, so the call can be analysed again straight away.
+    const back = await mutateMeeting(m.id, (x) => {
+      if (x.analysisClaim?.token !== token) return;
+      x.status = was;
+      delete x.analysisClaim;
+    });
+    emit(back, { type: 'status', status: back.status });
+    throw err;
+  }
+  let mine = false;
   m = await mutateMeeting(m.id, (x) => {
+    // Taken over after this run's claim lapsed: the run that holds it now saves its own result.
+    if (x.analysisClaim?.token !== token) return;
     x.analysis = value;
     x.status = 'analysed';
+    delete x.analysisClaim;
+    mine = true;
   });
+  if (!mine) return m;
   emit(m, { type: 'status', status: m.status });
   await logActivity({ ontologyId: m.ontologyId, type: 'meeting.analysed', message: `analysed the call “${m.title}”: ${value.useCases.length} use case(s), ${value.terms.length} candidate terms`, link: `/o/${m.ontologyId}/meetings/${m.id}` });
   return m;
@@ -382,7 +431,6 @@ export async function uploadTranscript(project: OntologyProject, user: User, tit
 /* Live co-facilitation                                                      */
 /* ------------------------------------------------------------------------ */
 
-const lastPromptAt = new Map<string, number>();
 /** When the last transcript line of a live call arrived, whichever server instance it reached. */
 export const lastLineTime = (m: Meeting) => m.lastLineAt;
 
@@ -394,6 +442,10 @@ export async function onLiveLine(
 ): Promise<boolean> {
   // Whether to keep the line is decided on the latest copy, under the lock, so a skip or cancellation that just happened counts.
   let accepted = true;
+  // Whether this line is the one to look for a suggestion at: claimed with the line, so of two servers taking
+  // lines at once only one asks.
+  let prompting = false;
+  const gap = opts.minGapLines ?? 4;
   const m = await meetingLock(meetingId, async () => {
     const x = await getMeeting(meetingId);
     const gen = x.bot?.gen;
@@ -409,16 +461,17 @@ export async function onLiveLine(
     opts.before?.(x);
     x.transcript.push(line);
     x.lastLineAt = Date.now();
+    if (x.transcript.length - (x.promptedAtLine ?? 0) >= gap) {
+      x.promptedAtLine = x.transcript.length;
+      prompting = true;
+    }
     return save(x);
   });
   if (!accepted) return false;
   emit(m, { type: 'line', line });
   // A notice about chat posting that failed earlier is retried as the call goes on.
   if (m.chatNoticeError || (m.bot?.status === 'in-call' && m.source !== 'simulation' && !!m.postPromptsToChat !== !!m.chatModeAnnounced)) await announceChatMode(meetingId).catch(() => undefined);
-  const n = m.transcript.length;
-  const gap = opts.minGapLines ?? 4;
-  if (n - (lastPromptAt.get(m.id) ?? 0) < gap) return true;
-  lastPromptAt.set(m.id, n);
+  if (!prompting) return true;
   const prompt = await facilitate(m);
   if (!prompt) return true;
   const entry: FacilitatorPrompt = { at: clock.iso(), t: line.t, text: prompt, posted: false };
@@ -436,7 +489,7 @@ export async function onLiveLine(
 }
 
 /** Sends text into the meeting's chat through the bot. Simulated calls pretend to. */
-async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok: false; error: string }> {
+async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok: false; error: string; uncertain?: boolean }> {
   if (m.bot?.provider === 'recall') {
     if (!m.bot.botId || m.bot.phase !== 'booked' || !['joining', 'in-call'].includes(m.bot.status)) return { ok: false, error: 'The bot is not in the call, so it can’t post in the chat.' };
     return recall.sendChat(m.bot.botId, text);
@@ -445,56 +498,92 @@ async function sendToChat(m: Meeting, text: string): Promise<{ ok: true } | { ok
   return { ok: false, error: 'No meeting bot is connected to this call, so there is no chat to post in.' };
 }
 
-const posting = new Set<string>();
+/**
+ * How long a run may take to send one message into the call's chat before another may try. Claims are kept on the
+ * record, so two server instances never post the same prompt or notice at once; one whose run died lapses.
+ */
+export const CHAT_CLAIM_MS = 2 * 60_000;
+const held = (c?: { until: number }) => !!c && c.until > Date.now();
 
 /** Posts one prompt into the meeting chat. Only that prompt is updated, on the latest copy of the meeting. */
+export const MAYBE_POSTED = 'This suggestion may already be in the call’s chat: posting it was interrupted before Concord heard back. Check the chat, and post it again only if it isn’t there.';
 export async function postPrompt(meetingId: string, index: number, opts: { quiet?: boolean } = {}) {
-  const m = await getMeeting(meetingId);
+  const token = newToken();
+  let claimed = false;
+  let uncertain = false;
+  const m = await mutateMeeting(meetingId, (x) => {
+    const q = x.facilitatorPrompts[index];
+    if (!q || q.posted || held(q.postClaim)) return;
+    // A claim that lapsed: its run may have posted and died before recording it, and Recall.ai's chat has no
+    // idempotency key. That is recorded, and the first request after it is refused, so a facilitator posts it
+    // again only knowingly (the next request goes ahead). Automatic posts never repeat it.
+    if (q.postClaim) {
+      delete q.postClaim;
+      q.postUncertain = true;
+      uncertain = true;
+      return;
+    }
+    if (q.postUncertain && opts.quiet) return;
+    q.postClaim = { token, until: Date.now() + CHAT_CLAIM_MS };
+    claimed = true;
+  });
   const p = m.facilitatorPrompts[index];
   if (!p) throw new HttpError(404, 'No such prompt');
   if (p.posted) return m;
-  const key = `${meetingId}:${index}`;
-  if (posting.has(key)) throw new HttpError(409, 'That prompt is being posted already');
-  posting.add(key);
-  try {
-    const r = await sendToChat(m, p.text);
-    const fresh = await mutateMeeting(meetingId, (x) => {
-      const q = x.facilitatorPrompts[index];
-      if (r.ok) {
-        q.posted = true;
-        q.postedAt = clock.iso();
-        delete q.postError;
-      } else q.postError = r.error;
-    });
-    emit(fresh, { type: 'meeting', meeting: fresh });
-    if (!r.ok && !opts.quiet) throw new HttpError(409, r.error);
-    return fresh;
-  } finally {
-    posting.delete(key);
+  if (uncertain) {
+    emit(m, { type: 'meeting', meeting: m });
+    if (opts.quiet) return m;
+    throw new HttpError(409, MAYBE_POSTED);
   }
+  if (!claimed) {
+    if (opts.quiet) return m;
+    throw new HttpError(409, 'That prompt is being posted already');
+  }
+  const r = await sendToChat(m, p.text);
+  const fresh = await mutateMeeting(meetingId, (x) => {
+    const q = x.facilitatorPrompts[index];
+    // Only the run whose claim still stands records how it went. One whose claim lapsed (it stalled) only records
+    // a post that went through, which is true whoever else is trying.
+    if (q.postClaim?.token === token) {
+      delete q.postClaim;
+      if (!r.ok && !q.posted) q.postError = r.error;
+      // No answer (or a server error): it may be in the chat. Said so, and posted again only when asked again.
+      if (!r.ok && !q.posted && r.uncertain) q.postUncertain = true;
+    } else if (!r.ok) return;
+    if (r.ok) {
+      q.posted = true;
+      q.postedAt = clock.iso();
+      delete q.postError;
+      delete q.postUncertain;
+    }
+  });
+  emit(fresh, { type: 'meeting', meeting: fresh });
+  if (!r.ok && !opts.quiet) throw new HttpError(409, r.uncertain ? `${MAYBE_POSTED} (${r.error})` : r.error);
+  return fresh;
 }
 
 /**
  * Tells the call when posting in its chat is switched on or off, so what the bot
  * said when it joined stays true. Only once the bot is in the call; until then
- * the next check (when it joins) does it.
+ * the next check (when it joins) does it. One notice at a time, on any instance.
  */
-const announcing = new Set<string>();
+const noticeDue = (x: Meeting) => x.source !== 'simulation' && x.bot?.status === 'in-call' && (x.chatModeAnnounced ?? false) !== !!x.postPromptsToChat && !held(x.chatNoticeClaim);
 
 export async function announceChatMode(meetingId: string) {
-  if (announcing.has(meetingId)) return;
-  announcing.add(meetingId);
-  try {
-    await announceOnce(meetingId);
-  } finally {
-    announcing.delete(meetingId);
-  }
-}
-
-async function announceOnce(meetingId: string) {
-  const m = await getMeeting(meetingId);
-  const want = !!m.postPromptsToChat;
-  if (m.source === 'simulation' || m.bot?.status !== 'in-call' || (m.chatModeAnnounced ?? false) === want) return;
+  if (!noticeDue(await getMeeting(meetingId))) return; // the usual case, without a write
+  const token = newToken();
+  let want = false;
+  let claimed = false;
+  const m = await mutateMeeting(meetingId, (x) => {
+    want = !!x.postPromptsToChat;
+    if (!noticeDue(x)) return;
+    // A lapsed claim: that notice may or may not have reached the call. It is sent again (a repeated notice only
+    // restates the setting, and the call must know it), and the record says so until one is confirmed.
+    if (x.chatNoticeClaim) x.chatNoticeError = 'An earlier notice about chat posting was interrupted before Concord heard back, so it may have been sent twice.';
+    x.chatNoticeClaim = { token, until: Date.now() + CHAT_CLAIM_MS };
+    claimed = true;
+  });
+  if (!claimed) return;
   const r = await sendToChat(
     m,
     want
@@ -502,6 +591,10 @@ async function announceOnce(meetingId: string) {
       : `${config.meetBot.botName}: I'll stop posting questions in the chat. I'm still transcribing; my suggestions now go to the facilitator in Concord.`,
   );
   const fresh = await mutateMeeting(meetingId, (x) => {
+    // Only the run whose claim still stands records the outcome: one that stalled past its claim may report a
+    // setting that a newer notice has since replaced.
+    if (x.chatNoticeClaim?.token !== token) return;
+    delete x.chatNoticeClaim;
     if (r.ok) {
       x.chatModeAnnounced = want;
       delete x.chatNoticeError;
@@ -732,7 +825,7 @@ export function finishCall(meetingId: string): Promise<Meeting> {
   const run = (async () => {
     const m = await getMeeting(meetingId);
     emit(m, { type: 'status', status: m.status, bot: m.bot });
-    return m.transcript.length && m.status !== 'analysed' && m.status !== 'processing' ? analyseMeeting(m) : m;
+    return m.transcript.length && m.status !== 'analysed' && !analysing(m) ? analyseMeeting(m) : m;
   })().finally(() => finishing.delete(meetingId));
   finishing.set(meetingId, run);
   return run;
@@ -743,14 +836,22 @@ export function finishCall(meetingId: string): Promise<Meeting> {
  * refused from now on), and the call is analysed only once Recall.ai confirms the
  * bot has gone. Until then this throws, and the clock keeps trying.
  */
-export async function endLiveMeeting(meetingId: string) {
+/**
+ * End a live call: take its bot out, then analyse what it heard. `guard` (a calendar read ending the call because the
+ * invite was cancelled) is checked in the transaction that records the decision: when it says the read has been
+ * overtaken by a newer one, nothing is ended and this returns undefined.
+ */
+export async function endLiveMeeting(meetingId: string, guard?: () => Promise<boolean>) {
   if ((await getMeeting(meetingId)).bot?.provider === 'recall') {
-    await meetingLock(meetingId, async () => {
+    const decided = await meetingLock(meetingId, async () => { return transaction(async () => {
+      if (guard && !(await guard())) return false;
       const m = await getMeeting(meetingId);
       const gen = m.bot?.gen;
       beginRelease(m, 'leave', 'done');
       if (m.bot?.gen !== gen) emit(await save(m), { type: 'meeting', meeting: m });
-    });
+      return true;
+    }); });
+    if (!decided) return undefined;
     await drive(meetingId);
     const m = await getMeeting(meetingId);
     // Every bot of the call's, strays included, must be confirmed gone.
@@ -760,9 +861,13 @@ export async function endLiveMeeting(meetingId: string) {
     }
     return finishCall(meetingId);
   }
-  const m = await mutateMeeting(meetingId, (x) => {
-    if (x.bot && x.bot.status !== 'done') x.bot = { ...x.bot, status: 'done' };
+  const m = await transaction(async () => {
+    if (guard && !(await guard())) return undefined;
+    return await mutateMeeting(meetingId, (x) => {
+      if (x.bot && x.bot.status !== 'done') x.bot = { ...x.bot, status: 'done' };
+    });
   });
+  if (!m) return undefined;
   emit(m, { type: 'meeting', meeting: m });
   return finishCall(meetingId);
 }
@@ -806,36 +911,87 @@ export const SIMULATED_CALL: TranscriptLine[] = [
   { speaker: 'Priya Shah', text: "Great. I'll ask Concord to write this up as use cases and a draft change request, and we'll review it asynchronously rather than meeting again." },
 ];
 
-const runningSimulations = new Set<string>();
-
-/** Replays the scripted call line by line so testers can watch the co-facilitator work. */
+/**
+ * Replays the scripted call line by line so testers can watch the co-facilitator work. Its progress is on the
+ * meeting record (lines are due one every `delayMs` from the start), and any server instance asked about the call
+ * adds the lines whose time has come (advanceSimulation): this one carries it on while it runs, and on Vercel,
+ * where an instance may stop once it has answered, reading the call carries it on.
+ */
 export async function simulateCall(project: OntologyProject, user: User, title: string, opts: { delayMs?: number; postPromptsToChat?: boolean } = {}) {
+  const delay = Math.max(0, opts.delayMs ?? 1800);
   const m = await newMeeting(project, user, title || 'Volunteering standard: use case call (simulated)', 'simulation', {
     meetingUrl: 'https://meet.google.com/sim-ulat-ion',
     postPromptsToChat: !!opts.postPromptsToChat,
     bot: { provider: 'simulated', status: 'in-call' },
+    simulation: { startedAt: Date.now(), delayMs: delay, next: 0 },
   });
-  const delay = opts.delayMs ?? 1800;
-  runningSimulations.add(m.id);
-  const run = async () => {
-    for (const line of SIMULATED_CALL) {
-      if (!runningSimulations.has(m.id)) return;
-      if (delay) await new Promise((r) => setTimeout(r, delay));
-      await onLiveLine(m.id, { ...line, t: (await getMeeting(m.id)).transcript.length * 20 }, { minGapLines: 4 });
-    }
-    runningSimulations.delete(m.id);
-    const done = await mutateMeeting(m.id, (x) => {
-      x.bot = { provider: 'simulated', status: 'done' };
-    });
-    emit(done, { type: 'status', status: done.status, bot: done.bot });
-    await analyseMeeting(done);
-  };
-  if (delay) void run().catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
-  else await run();
+  if (delay) void keepAlive(carryOn(m.id, delay)).catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
+  else await advanceSimulation(m.id);
   await logActivity({ ontologyId: project.id, actorId: user.id, type: 'meeting.simulated', message: `started a simulated call “${m.title}”`, link: `/o/${project.id}/meetings/${m.id}` });
   return await getMeeting(m.id);
 }
 
-export function stopSimulation(id: string) {
-  runningSimulations.delete(id);
+async function carryOn(id: string, delay: number) {
+  for (let more = true; more; more = await advanceSimulation(id)) await new Promise((r) => setTimeout(r, delay).unref?.());
+}
+
+/** Whether a simulated call still has lines to come. */
+export const simulationRunning = (m: Meeting) => !!m.simulation && !m.simulation.stopped && !m.simulation.finished;
+
+/**
+ * Adds a simulated call's lines whose time has come, then (after the last) ends and analyses it. One instance at
+ * a time (a lease); each line is added exactly once, by the step that moves `next` on in the same transaction.
+ * True while lines remain.
+ */
+export async function advanceSimulation(id: string): Promise<boolean> {
+  return (await withLease(`simulation:${id}`, 60_000, () => advanceNow(id), { wait: false })) ?? true;
+}
+
+async function advanceNow(id: string): Promise<boolean> {
+  for (;;) {
+    const m = await get<Meeting>('meetings', id);
+    const sim = m?.simulation;
+    if (!m || !sim || sim.stopped || sim.finished) return false;
+    if (sim.next >= SIMULATED_CALL.length) return finishSimulation(id);
+    const due = sim.delayMs ? Math.floor((Date.now() - sim.startedAt) / sim.delayMs) : SIMULATED_CALL.length;
+    if (sim.next >= due) return true;
+    const i = sim.next;
+    await onLiveLine(
+      id,
+      { ...SIMULATED_CALL[i], t: m.transcript.length * 20 },
+      {
+        minGapLines: 4,
+        accept: (x) => x.simulation?.next === i && !x.simulation.stopped,
+        before: (x) => void (x.simulation!.next = i + 1),
+      },
+    );
+  }
+}
+
+async function finishSimulation(id: string): Promise<false> {
+  let mine = false;
+  const done = await mutateMeeting(id, (x) => {
+    if (!x.simulation || x.simulation.finished || x.simulation.stopped) return;
+    x.simulation.finished = true;
+    x.bot = { provider: 'simulated', status: 'done' };
+    mine = true;
+  });
+  if (!mine) return false;
+  emit(done, { type: 'status', status: done.status, bot: done.bot });
+  await analyseMeeting(done);
+  return false;
+}
+
+/** Simulated calls still running, carried on (from the scheduler: a call nobody is watching still finishes). */
+export async function carryOnSimulations() {
+  for (const m of await list<Meeting>('meetings')) if (m.source === 'simulation' && simulationRunning(m)) await advanceSimulation(m.id);
+}
+
+/** End call on a simulated call: no more lines, on any instance. */
+export async function stopSimulation(id: string) {
+  const m = await get<Meeting>('meetings', id);
+  if (!m || !simulationRunning(m)) return;
+  await mutateMeeting(id, (x) => {
+    if (x.simulation && !x.simulation.finished) x.simulation.stopped = true;
+  });
 }
