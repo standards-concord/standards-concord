@@ -24,7 +24,7 @@ export function UseCaseDetailPage() {
   const { useCaseId = '' } = useParams();
   const { id, userById, hasRole } = useOntology();
   const nav = useNavigate();
-  const uc = useAsync(() => api.useCase(useCaseId), [useCaseId]);
+  const uc = useAsync(() => api.useCase(useCaseId), [useCaseId], { keep: `useCase|${useCaseId}` });
   const start = useStartInterview(id);
   const archive = useAction(async () => uc.setData(await api.updateUseCase(useCaseId, { status: 'archived' })));
   const synth = useAction(async () => {

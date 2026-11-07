@@ -4,6 +4,7 @@ import * as oauth from 'oauth4webapi';
 import { Parser, type Quad } from 'n3';
 import { config } from './config.js';
 import { ConnectionPool, FetchError, ipLiteral, isPublicAddress, safeRequest } from './safeFetch.js';
+import { refuseWhenReadOnly } from './db.js';
 
 /**
  * Signing in with your own WebID (Solid-OIDC), as a relying party.
@@ -128,7 +129,12 @@ const podPool = () => podConnections;
  * sharing, admins' reads): the same guarded transport, its origin only, with a
  * larger byte cap.
  */
-export const podFetch = guarded(POD_MAX_BYTES, podUrl, podConnections);
+const podFetchAny = guarded(POD_MAX_BYTES, podUrl, podConnections);
+/** While Concord is read-only (CONCORD_READ_ONLY), only reads reach the pod server. */
+export const podFetch: typeof podFetchAny = (input, init) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes((init?.method ?? 'GET').toUpperCase())) refuseWhenReadOnly();
+  return podFetchAny(input, init);
+};
 /** podFetch for a request that already holds one of the pod server's connections. */
 const podFetchHeld = guarded(POD_MAX_BYTES, podUrl, 'held');
 

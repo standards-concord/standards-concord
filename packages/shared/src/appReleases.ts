@@ -53,6 +53,40 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.44.1',
+    date: '2026-11-07',
+    title: 'Validate data takes every value the ontology allows',
+    pr: 117,
+    changes: [
+      {
+        id: 'derived-datatypes-validate',
+        type: 'fix',
+        title: 'Numbers and dates written as a narrower type now pass Validate data',
+        detail: 'A minimum age written as "16"^^xsd:unsignedByte, or a time written as an xsd:dateTimeStamp, was reported as the wrong type although the ontology allows it. Datatypes an ontology defines itself are now checked as the type they are based on, with their limits.',
+        roles: ['agent', 'contributor'],
+        to: '{o}/validate',
+      },
+    ],
+  },
+  {
+    version: '0.44.0',
+    date: '2026-11-07',
+    title: 'Read Concord with no connection',
+    pr: 116,
+    changes: [
+      {
+        id: 'offline-reading',
+        type: 'feat',
+        title: 'Pages you have opened work offline',
+        detail:
+          'Concord now saves the app and the pages you open while signed in on this device. With no connection, or after a reload on a train, it opens as you and shows what it saved: lists, change requests, releases, use cases, meetings, the ontology itself. A notice says you’re offline. Changes still need a connection for now. Only your account can see what was saved, and signing out deletes it.',
+        roles: [],
+        to: '{o}/changes',
+        ask: 'Did Concord show what you expected when you were offline? Was anything missing that you needed?',
+      },
+    ],
+  },
+  {
     version: '0.43.0',
     date: '2026-11-07',
     title: 'Fewer words on the welcome page and around the hub',

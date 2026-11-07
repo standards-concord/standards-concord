@@ -10,7 +10,7 @@ const Ctx = createContext<AsyncState<OntologySummary[]> | null>(null);
 export function OntologiesProvider({ children }: { children: ReactNode }) {
   const { session } = useSession();
   const userId = session?.user?.id;
-  const state = useAsync(async () => (userId ? api.ontologies() : []), [userId]);
+  const state = useAsync(async () => (userId ? api.ontologies() : []), [userId], { keep: 'ontologies|' });
   return <Ctx.Provider value={state}>{children}</Ctx.Provider>;
 }
 

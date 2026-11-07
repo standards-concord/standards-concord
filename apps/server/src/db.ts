@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { config } from './config.js';
 import { type DocStore, openStore, type StoreOptions } from './store/index.js';
 
 /**
@@ -48,9 +49,33 @@ export type Collection =
 let store: Promise<DocStore> | undefined;
 
 /** Open the store (once; later calls return the same one). */
+/** A write refused because Concord is read-only (CONCORD_READ_ONLY) while it moves; answered with 503. */
+export class ReadOnlyError extends Error {
+  constructor() {
+    super('Concord is read-only for a few minutes while it moves to a new home. Try again shortly.');
+  }
+}
+/**
+ * Refuses a change that isn't to the database (a pod, private files, git refs) while Concord is read-only: the
+ * store's own refusal comes too late for work that writes elsewhere first.
+ */
+export function refuseWhenReadOnly() {
+  if (config.readOnly) throw new ReadOnlyError();
+}
+const WRITES = new Set(['put', 'remove', 'take', 'claim', 'insertOnce', 'removeWhereAtMost', 'clearAll', 'putRows', 'scrubFreeSpace']);
+/** The store, refusing every write (reads and transactions of reads still work). */
+export const readOnlyStore = (s: DocStore): DocStore =>
+  new Proxy(s, {
+    get(target, name, receiver) {
+      if (typeof name === 'string' && WRITES.has(name)) return async () => Promise.reject(new ReadOnlyError());
+      const v = Reflect.get(target, name, receiver);
+      return typeof v === 'function' ? v.bind(target) : v;
+    },
+  });
+
 export function openDb(opts?: StoreOptions): Promise<DocStore> {
   if (!store) {
-    store = openStore(opts);
+    store = openStore(opts).then((s) => (config.readOnly ? readOnlyStore(s) : s));
     store.catch(() => (store = undefined)); // A failed open (database unreachable) is retried on the next call.
   }
   return store;
@@ -169,6 +194,9 @@ export async function removeWhereAtMost(collection: Collection, field: string, m
 export async function clearAll(): Promise<void> {
   await (await conn()).clearAll();
 }
+
+/** The open store itself, for copying a whole database (src/migrate). Application code uses the functions above. */
+export const rawStore = async (): Promise<DocStore> => await conn();
 
 /**
  * Run fn in one transaction: writers take turns, so read-then-write steps inside can't interleave with another

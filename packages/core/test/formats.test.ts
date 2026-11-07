@@ -138,7 +138,9 @@ describe('SHACL', () => {
     expect(val(VOL + 'submittedBy', 'class')).toEqual([VOL + 'Person']);
     expect(val(VOL + 'submittedBy', 'minCount')).toEqual(['1']);
     expect(val(VOL + 'submittedBy', 'maxCount')).toEqual(['1']);
-    expect(val(VOL + 'submittedAt', 'datatype')).toEqual([NS.xsd + 'dateTime']);
+    // xsd:dateTime, and xsd:dateTimeStamp derived from it (#27).
+    expect(val(VOL + 'submittedAt', 'datatype')).toEqual([]);
+    expect(val(VOL + 'submittedAt', 'or')).toHaveLength(1);
     expect(val(VOL + 'submittedAt', 'maxCount')).toEqual(['1']); // functional
     expect(ttl).toContain('a sh:NodeShape');
     expect(ttl).toContain('### Shapes');

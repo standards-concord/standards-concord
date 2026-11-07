@@ -126,7 +126,10 @@ describe('SHACL compact syntax', () => {
     expect(text).toContain('BASE <https://w3id.org/odi/volunteering/shapes>');
     expect(text).toContain('PREFIX vol: <https://w3id.org/odi/volunteering#>');
     expect(text).toMatch(/shape volsh:ApplicationShape -> vol:Application \{[\s\S]*?vol:submittedBy vol:Person \[1\.\.1\] \./);
-    expect(text).toContain('vol:submittedAt xsd:dateTime [0..1] .');
+    // A built-in datatype takes the built-ins derived from it too (#27).
+    expect(text).toContain('vol:submittedAt [0..1] xsd:dateTime|datatype=xsd:dateTimeStamp .');
+    // Text stays one exact check.
+    expect(text).toContain('vol:title xsd:string .');
     // Datatypes outside the short-form list are written explicitly, so they don't read back as classes.
     expect(text).toContain('vol:joiningUrl datatype=xsd:anyURI .');
     expect(text).not.toContain('codeIdentifier');
@@ -219,8 +222,11 @@ describe('SHACL compact syntax', () => {
     const objs = (p: string, pred: string) => on(p).flatMap((b) => shapes.getObjects(b, DataFactory.namedNode(SH + pred), null)).map((o) => o.value);
     // A narrower datatype makes the other redundant: one exact check.
     expect(objs('wp', 'datatype')).toEqual([NS.xsd + 'byte']);
-    // Three types that reduce to one (SZ) give one shape.
-    expect(objs('xs', 'datatype')).toEqual(['https://example.org/e#SZ']);
+    // Three types that reduce to one (SZ) give one shape. SZ is the ontology's own datatype, which no literal is
+    // written as (#27): it is checked as the xsd:string it restricts, with its facets.
+    expect(objs('xs', 'datatype')).toEqual([NS.xsd + 'string']);
+    expect(objs('xs', 'minLength')).toEqual(['1']);
+    expect(objs('xs', 'maxLength')).toEqual(['3']);
     // xsd:nonNegativeInteger and xsd:nonPositiveInteger overlap only in 0: checked by value, not by two exact
     // datatype checks that no literal can pass.
     expect(objs('xn', 'datatype')).toEqual([]);
@@ -259,7 +265,7 @@ describe('SHACL compact syntax', () => {
   it('adds sh:codeIdentifier to the Turtle shapes', async () => {
     const ttl = await toShacl(await loadFixture());
     expect(ttl).toMatch(/volsh:VolunteeringOpportunityShape a sh:NodeShape ;[\s\S]*?sh:codeIdentifier "VolunteeringOpportunity"/);
-    expect(ttl).toMatch(/sh:codeIdentifier "minimumAge" ;\s+sh:datatype xsd:nonNegativeInteger/);
+    expect(ttl).toMatch(/sh:codeIdentifier "minimumAge" ;\s+sh:maxCount 1 ;\s+sh:or \(\s+\[ sh:datatype xsd:nonNegativeInteger \]/);
   });
 });
 
@@ -391,7 +397,10 @@ describe('Generated JavaScript classes', () => {
     expect(mod.ts).toMatch(/export class DC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#positiveInteger"\)/);
     // The ontology's own datatypes count too: e:MyToken restricts xsd:string, so it narrows TA's xsd:string.
     expect(cls('TC').extends).toBeUndefined();
-    expect(mod.ts).toMatch(/export class TC extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#MyToken"\)/);
+    // No literal is written as e:MyToken, MyToken2 or SZ (#27): the shapes check them as the xsd:string they
+    // restrict, so values are written as that.
+    expect(mod.ts).toMatch(/export class TC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#string"\)/);
+    expect(mod.ts).not.toContain('literalWriter("https://example.org/e#');
     // Types neither of which is narrower can't both be expressed: the first is used, and the module says so.
     expect(mod.notes).toEqual(expect.arrayContaining([
       expect.stringMatching(/^UC <https:\/\/example\.org\/e#up>: values must be both <http:\/\/www\.w3\.org\/2001\/XMLSchema#string> and <http:\/\/www\.w3\.org\/2001\/XMLSchema#integer>/),
@@ -402,11 +411,11 @@ describe('Generated JavaScript classes', () => {
     // Values both non-negative and non-positive: whole numbers, checked by value.
     expect(mod.ts).toMatch(/export class XN extends TermWrapper \{\s+get xn\(\): Set<number> \{[^}]*LiteralFrom\.integer\)/);
     // Three restrictions, one narrower than both others (SZ derives from SA1 and SB3), reduce to it, with no note.
-    expect(mod.ts).toMatch(/export class XC extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#SZ"\)/);
+    expect(mod.ts).toMatch(/export class XC extends TermWrapper[\s\S]*?get xs\(\): Set<string>/);
     // Two restrictions on the same class narrow too: xsd:byte within xsd:integer.
     expect(mod.ts).toMatch(/export class WC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#byte"\)/);
     // A datatype with several definitions (an alias and a restriction) derives from each: e:MyToken2 narrows xsd:string.
-    expect(mod.ts).toMatch(/export class VA extends TermWrapper[\s\S]*?literalWriter\("https:\/\/example\.org\/e#MyToken2"\)/);
+    expect(mod.ts).toMatch(/export class VA extends TermWrapper[\s\S]*?get vp\(\): Set<string>/);
     expect(mod.ts).toMatch(/^ \* Note: UC <https:\/\/example\.org\/e#up>: values must be both/m);
     // Every class has the dataset getter it advertises.
     for (const c of mod.classes.filter((c) => c.datasetGetter)) expect(mod.ts).toContain(`get ${c.datasetGetter}(): Iterable<${c.name}>`);
@@ -443,7 +452,7 @@ describe('Generated JavaScript classes', () => {
       expect(dtOf('https://x/dchild', 'https://example.org/e#dq').datatype.value).toBe(XSD + 'positiveInteger');
       const tchild = new m.TChild('https://x/tchild', store, DataFactory);
       tchild.tq = 'ABC';
-      expect(dtOf('https://x/tchild', 'https://example.org/e#tq').datatype.value).toBe('https://example.org/e#MyToken');
+      expect(dtOf('https://x/tchild', 'https://example.org/e#tq').datatype.value).toBe(XSD + 'string');
       const dc = new m.DC('https://x/dc', store, DataFactory);
       dc.dp.add(5);
       expect(dtOf('https://x/dc', 'https://example.org/e#dp').datatype.value).toBe(XSD + 'positiveInteger');
@@ -455,6 +464,47 @@ describe('Generated JavaScript classes', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
+
+  // #27 review: checking an ontology's own integer datatype by value made its accessors numbers, so a value past
+  // 2^53 was rounded. The accessor keeps the declared type; only the datatype values are written as changes.
+  it('keeps an ontology’s own datatype as a string accessor, written as the built-in it restricts', async () => {
+    const g = await OntologyGraph.fromTurtle(`@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix e: <https://example.org/e#> .
+<https://example.org/e> a owl:Ontology .
+e:Big a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:integer ; owl:withRestrictions ( [ xsd:minInclusive 0 ] ) ] .
+e:Account a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:balance ; owl:allValuesFrom e:Big ] , [ a owl:Restriction ; owl:onProperty e:balance ; owl:maxCardinality 1 ] .
+e:balance a owl:DatatypeProperty .
+e:Code a rdfs:Datatype ; owl:equivalentClass xsd:token .
+e:Account rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:code ; owl:allValuesFrom e:Code ] , [ a owl:Restriction ; owl:onProperty e:code ; owl:maxCardinality 1 ] .
+e:code a owl:DatatypeProperty .`);
+    const mod = await toWrapperClasses(g, { name: 'big' });
+    // Review r2: text the ontology defines on xsd:token is checked as xsd:string, so it is written as that, not as a token.
+    expect(await toShacl(g)).toMatch(/sh:datatype xsd:string ;\s+sh:maxCount 1 ;\s+sh:path e:code/);
+    expect(mod.ts).toMatch(/export class Account extends TermWrapper[\s\S]*?get balance\(\): string \| undefined/);
+    mkdirSync(GEN, { recursive: true });
+    const dir = path.join(GEN, `big-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    try {
+      writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}');
+      writeFileSync(path.join(dir, 'index.js'), mod.js);
+      const m = await import(path.join(dir, 'index.js'));
+      const store = new Store();
+      const account = new m.Account('https://x/a', store, DataFactory);
+      account.balance = '9007199254740993';
+      const [q] = store.getQuads(null, DataFactory.namedNode('https://example.org/e#balance'), null, null);
+      expect(q.object.value).toBe('9007199254740993');
+      expect((q.object as any).datatype.value).toBe(NS.xsd + 'integer');
+      expect(account.balance).toBe('9007199254740993');
+      account.code = 'GB';
+      const [c] = store.getQuads(null, DataFactory.namedNode('https://example.org/e#code'), null, null);
+      expect((c.object as any).datatype.value).toBe(NS.xsd + 'string');
+      expect(account.code).toBe('GB');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('works out shared ancestors once, so diamond hierarchies stay fast', async () => {
     // 30 layers of two classes, each a subclass of both classes in the layer above: 2^30 paths to the top.

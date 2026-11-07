@@ -63,6 +63,23 @@ test.describe('Validate data', () => {
     await expect(page.getByTestId('validation-verdict')).toContainText('1 term issue');
   });
 
+  // #27: a datatype in the ontology was one exact sh:datatype check, so a minimum age written as "16"^^xsd:unsignedByte
+  // was rejected although every unsignedByte is a nonNegativeInteger.
+  test('takes a value written as a type derived from the one the ontology asks for, and says so when one isn’t', async ({ page }) => {
+    await page.goto('/o/volunteering/validate');
+    const opportunity = (id: string, age: string) => `ex:${id} a vol:VolunteeringOpportunity ; vol:title "${id}" ; vol:minimumAge ${age} .`;
+    await setEditor(page, `@prefix vol: <${VOL}> .\n@prefix ex: <https://example.org/> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n${opportunity('byte', '"16"^^xsd:unsignedByte')}\n${opportunity('half', '"1.5"^^xsd:decimal')}\n${opportunity('plain', '18')}\n`);
+    const results = page.getByRole('list', { name: 'Problems found' });
+    await expect(results.getByRole('button', { name: /Value "1\.5" is written as xsd:decimal, but the shapes take only xsd:nonNegativeInteger or a type derived from it/ })).toContainText('Line 5');
+    // A plain 18 is an xsd:integer. The shapes check how a value is written, not the number itself, so it is reported
+    // as written that way, with the rewrite they take (an accepted limit of #27).
+    const plain = results.getByRole('button', { name: /Value "18" is written as xsd:integer, but the shapes take only xsd:nonNegativeInteger or a type derived from it/ });
+    await expect(plain).toContainText('Line 6');
+    await expect(plain).toContainText('Write it as "18"^^xsd:nonNegativeInteger');
+    await expect(results.getByRole('button', { name: /unsignedByte|"16"/ })).toHaveCount(0);
+    await expectNoCrash(page);
+  });
+
   test('says when the report lists only the first 1,000 results, and counts them all', async ({ page }) => {
     await page.goto('/o/volunteering/validate');
     // 700 opportunities, each without a role or an organisation: 1,400 violations.

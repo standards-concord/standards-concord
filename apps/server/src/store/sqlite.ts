@@ -4,7 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Collection } from '../db.js';
 import { FifoLock } from './lock.js';
-import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, StoreBusyError, TransactionAbortedError, TransactionEndedError, type TxState } from './types.js';
+import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, StoreBusyError, type StoredRow, TransactionAbortedError, TransactionEndedError, type TxState } from './types.js';
 
 interface SqliteTx {
   state: TxState;
@@ -176,8 +176,33 @@ export class SqliteStore implements DocStore {
     return doc as T;
   }
 
-  async clearAll(): Promise<void> {
-    await this.run(() => this.db.exec('DELETE FROM docs'));
+  async clearAll(except: Collection[] = []): Promise<void> {
+    await this.run(() => this.db.prepare(`DELETE FROM docs WHERE collection NOT IN (${except.map(() => '?').join(', ') || "''"})`).run(...except));
+  }
+
+  async rows(): Promise<StoredRow[]> {
+    const rows = (await this.run(() => this.db.prepare('SELECT collection, id, parent, data, created_at FROM docs ORDER BY created_at, rowid').all())) as {
+      collection: Collection;
+      id: string;
+      parent: string | null;
+      data: string;
+      created_at: string;
+    }[];
+    return rows.map((r) => ({ collection: r.collection, id: r.id, parent: r.parent, data: r.data, createdAt: r.created_at }));
+  }
+
+  async putRows(rows: StoredRow[]): Promise<void> {
+    await this.transaction(async () => {
+      for (const r of rows)
+        await this.run(() =>
+          this.db
+            .prepare(
+              `INSERT INTO docs (collection, id, parent, data, created_at) VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(collection, id) DO UPDATE SET parent = excluded.parent, data = excluded.data, created_at = excluded.created_at`,
+            )
+            .run(r.collection, r.id, r.parent, r.data, r.createdAt),
+        );
+    });
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {

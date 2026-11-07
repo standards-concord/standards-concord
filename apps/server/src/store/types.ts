@@ -49,7 +49,18 @@ export interface DocStore {
   insertOnce<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<boolean>;
   /** Delete the documents in a collection whose `field` is a number at or below `max`; returns how many. */
   removeWhereAtMost(collection: Collection, field: string, max: number): Promise<number>;
-  clearAll(): Promise<void>;
+  /** Deletes every document, or every one outside the `except` collections. */
+  clearAll(except?: Collection[]): Promise<void>;
+  /**
+   * Every row exactly as stored (the document's JSON text, its parent and creation time), in creation order with
+   * insertion order breaking ties: for copying a whole database (src/migrate). Not for application code.
+   */
+  rows(): Promise<StoredRow[]>;
+  /**
+   * Stores rows exactly as given, in order, keeping their creation time (so `list` order carries over), replacing any
+   * row with the same collection and id: the other half of `rows`. Joins the caller's transaction.
+   */
+  putRows(rows: StoredRow[]): Promise<void>;
   /**
    * Run fn as one transaction: all of it commits, or none of it does if fn throws. A nested call joins the outer
    * transaction. Await every call that is meant to be part of it: one still waiting on something else when fn
@@ -73,6 +84,15 @@ export interface DocStore {
    */
   scrubFreeSpace(): Promise<boolean>;
   close(): Promise<void>;
+}
+
+/** A row as the store keeps it. `data` is the document's JSON text, byte for byte. */
+export interface StoredRow {
+  collection: Collection;
+  id: string;
+  parent: string | null;
+  data: string;
+  createdAt: string;
 }
 
 /** The lock or a connection wasn't free in time (at once, inside `withoutWaiting`). */

@@ -3,6 +3,7 @@
  * written with the prefixes from their own data, and finds where in their
  * Turtle each problem is (see turtleDoc.ts), so the editor can underline it.
  */
+import { derivedTypes, primitiveOf } from '@concord/core/xsd-types';
 import { GENERATED_BLANK, RDF, RDF_TYPE, XSD, parseTurtle, termKey, type Placed, type RdfTerm, type Span, type TurtleDoc } from './turtleDoc';
 
 const SH = 'http://www.w3.org/ns/shacl#';
@@ -425,6 +426,26 @@ function describeAlternative(t: RdfTerm, shapes: ShapesIndex, prefixes: [string,
   return out;
 }
 
+/**
+ * The datatype an sh:or stands for when its members are that datatype and every built-in type derived from it,
+ * as Concord writes "an xsd:integer" (#27), so the finding names one type rather than listing them (thirteen for xsd:integer).
+ */
+function datatypeFamily(members: RdfTerm[], shapes: ShapesIndex): string | undefined {
+  if (members.length < 2) return undefined;
+  const types: string[] = [];
+  for (const m of members) {
+    const params = [...(shapes.shape(m)?.params ?? [])].filter(([p]) => !DESCRIPTIVE.has(p));
+    const dt = params.length === 1 && params[0][0] === `${SH}datatype` && params[0][1].length === 1 ? params[0][1][0] : undefined;
+    if (dt?.kind !== 'iri') return undefined;
+    types.push(dt.value);
+  }
+  const all = new Set(types);
+  return types.find((t) => {
+    const family = [t, ...derivedTypes(t)];
+    return family.length === all.size && family.every((d) => all.has(d));
+  });
+}
+
 function joinAlternatives(alts: Part[][], word: string): Part[] {
   const out: Part[] = [];
   alts.forEach((a, k) => {
@@ -501,6 +522,32 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
   const engineNumber = custom ? undefined : /^(?:Fewer|More) than (\d+) values$/.exec(message)?.[1];
   const fallback = (): Part[] => (custom ? [custom] : value ? ['Value ', valuePart, `: ${shortenMessage(message, prefixes).replace(/^Value /, '')}`] : [shortenMessage(message, prefixes) || 'Doesn’t meet a rule from the ontology']);
 
+  /** "Value "sixteen" is of type xsd:string but must be of type xsd:integer", and how to write it if it can be fixed. */
+  const wrongType = (value: RdfTerm, expected: string, orDerived: boolean): [Part[], Part[] | undefined] => {
+    const derived = orDerived ? [' or a type derived from it'] : [];
+    const actual = literalType(value);
+    if (!actual) return [['Value ', valuePart, ' is a resource, but must be a value of type ', iri(expected), ...derived], undefined];
+    const shownValue = { code: value.lang ? `${quote(value.value)}@${value.lang}` : quote(value.value) };
+    // "abc"^^xsd:byte where an integer is asked for has an allowed type, just not a valid value of it.
+    const allowed = actual === expected || (orDerived && derivedTypes(expected).includes(actual));
+    if (allowed && actual !== expected) return [['Value ', shownValue, ' isn’t a valid ', iri(actual)], undefined];
+    // Shapes check how a value is written, not its value: "3"^^xsd:integer is a non-negative integer in OWL, and
+    // "GB"^^xsd:token a string, but neither is written as a type the shapes take. Said so, not that the value is wrong.
+    const parts: Part[] = allowed
+      ? ['Value ', shownValue, ' isn’t a valid ', iri(expected)]
+      : primitiveOf(actual) === primitiveOf(expected)
+        ? ['Value ', shownValue, ' is written as ', iri(actual), ', but the shapes take only ', iri(expected), ...derived]
+        : ['Value ', shownValue, ' is of type ', iri(actual), ' but must be of type ', iri(expected), ...derived];
+    // "sixteen" → 16, but only for a number type and plain text (never change "one"@en into 1).
+    const word = NUMBER_WORDS.indexOf(value.value.trim().toLowerCase());
+    const numeric = expected.startsWith(XSD) && NUMERIC_TYPES.has(expected.slice(XSD.length));
+    const lexical = numeric && !value.lang && word >= 0 ? String(word) : value.value;
+    if (fitsDatatype(lexical, expected) && !(actual === expected && lexical === value.value)) {
+      const fixed = expected === `${XSD}string` ? quote(lexical) : `${quote(lexical)}^^${shortIri(expected, prefixes)}`;
+      return [parts, ['Write it as ', { code: fixed }]];
+    }
+    return [parts, undefined];
+  };
   switch (component) {
     case 'MinCount':
     case 'MaxCount': {
@@ -513,26 +560,8 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
     case 'Datatype': {
       const param = fromShapes('datatype');
       const expected = param?.kind === 'iri' ? param.value : engineIri;
-      if (!value || !expected) {
-        parts = fallback();
-        break;
-      }
-      const actual = literalType(value);
-      if (!actual) {
-        parts = ['Value ', valuePart, ' is a resource, but must be a value of type ', iri(expected)];
-        break;
-      }
-      const shownValue = { code: value.lang ? `${quote(value.value)}@${value.lang}` : quote(value.value) };
-      if (actual === expected) parts = ['Value ', shownValue, ' isn’t a valid ', iri(expected)];
-      else parts = ['Value ', shownValue, ' is of type ', iri(actual), ' but must be of type ', iri(expected)];
-      // "sixteen" → 16, but only for a number type and plain text (never change "one"@en into 1).
-      const word = NUMBER_WORDS.indexOf(value.value.trim().toLowerCase());
-      const numeric = expected.startsWith(XSD) && NUMERIC_TYPES.has(expected.slice(XSD.length));
-      const lexical = numeric && !value.lang && word >= 0 ? String(word) : value.value;
-      if (fitsDatatype(lexical, expected) && !(actual === expected && lexical === value.value)) {
-        const fixed = expected === `${XSD}string` ? quote(lexical) : `${quote(lexical)}^^${shortIri(expected, prefixes)}`;
-        hint = ['Write it as ', { code: fixed }];
-      }
+      if (!value || !expected) parts = fallback();
+      else [parts, hint] = wrongType(value, expected, false);
       break;
     }
     case 'Class': {
@@ -572,6 +601,12 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
       const param = `${SH}${component.toLowerCase()}`;
       const shape = shapes.candidates(pathIri, param);
       const members = shape.length === 1 ? shapes.list(shape[0].params.get(param)![0]) : [];
+      // One datatype, written as it and the types derived from it (#27), reads like a datatype finding.
+      const family = component === 'Or' ? datatypeFamily(members, shapes) : undefined;
+      if (family && value) {
+        [parts, hint] = wrongType(value, family, true);
+        break;
+      }
       const alts = members.map((m) => describeAlternative(m, shapes, prefixes));
       if (alts.length && alts.every((a) => a)) {
         const lead = component === 'Or' ? ' must be ' : component === 'Xone' ? ' must be exactly one of: ' : ' must be all of: ';
