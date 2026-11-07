@@ -6,8 +6,9 @@ import { config } from './config.js';
 import { get, HttpError, put, remove, removeWhereAtMost, transaction } from './db.js';
 import { seal, sealingAvailable, unseal } from './sealed.js';
 import type { AuthProvider } from '@concord/shared';
-import { allUsers, createSession, createUser, destroySession, findByProvider, linkFederatedIdentity, sessionOf, type FederatedIdentity } from './services/users.js';
+import { allUsers, setPodUrl, createSession, createUser, destroySession, findByProvider, linkFederatedIdentity, sessionOf, type FederatedIdentity } from './services/users.js';
 import { clientIdDocument, exportLogin, finishLogin, importLogin, resolveIssuer, sessionKey, shareLogins, SolidLoginError, startLogin, type SolidLogin, type StoredLogin } from './solidOidc.js';
+import { keepOwnPodLogin, loadOwnPodLogin, saveOwnPodLogin, USER_LOGIN_PREFIX, usesOwnPod } from './services/ownPods.js';
 import { clearTesterCookie, mergeTesterRecords, mirrorToPod, moveTesterRecord, testerFor, testerRecordMovedTo } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
@@ -105,9 +106,11 @@ const loadShared = async (key: string): Promise<SolidLogin | undefined> => {
 const saveShared = async (key: string, login: SolidLogin) =>
   void (await put<AdminLoginRow>('kv', { id: adminLoginRow(key), sealed: seal('admin-login', await exportLogin({ ...login, sharedId: key })), adminLoginExpires: Date.now() + ADMIN_LOGIN_DAYS * 86_400_000 }));
 shareLogins({
-  load: loadShared,
+  // People's own-pod logins (one per account) refresh under ids of their own; the rest are administrators' sessions.
+  load: (key) => (key.startsWith(USER_LOGIN_PREFIX) ? loadOwnPodLogin(key) : loadShared(key)),
   // A refresh changes only the tokens (the keys were sealed at sign-in), and keeps the row's expiry.
   save: async (key, login) => {
+    if (key.startsWith(USER_LOGIN_PREFIX)) return await saveOwnPodLogin(key, login);
     const row = await get<AdminLoginRow>('kv', adminLoginRow(key));
     const stored = row && unseal<StoredLogin>('admin-login', row.sealed);
     if (row && stored)
@@ -336,6 +339,11 @@ export function mountAuth(router: Router) {
     const { user, sessionToken } = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
     // Keep an administrator's login for this browser session (to read testers' pods as them); drop everyone else's.
     if (isAdmin(user, 'solid')) await keepAdminLogin(sessionToken, done.login);
+    // Their private data goes to their own pod, written as them (step 5e).
+    if (usesOwnPod(user)) {
+      const kept = await keepOwnPodLogin(user.id, done.login, done.storage);
+      if (kept === 'kept' && user.podUrl !== done.storage) await setPodUrl(user.id, done.storage!);
+    }
     res.redirect(`${config.webUrl}${done.returnTo}`);
   });
 }

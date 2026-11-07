@@ -1,10 +1,11 @@
 import type { User } from '@concord/shared';
 import { config } from '../config.js';
-import { get, list, put, refuseWhenReadOnly } from '../db.js';
+import { get, HttpError, list, put, refuseWhenReadOnly } from '../db.js';
 import { DataFactory, Parser, Writer, type Quad } from 'n3';
 import { slugify } from '../ids.js';
 import { localTag, PreconditionFailed, privateStore, type WriteCondition } from './privateStore.js';
 import { clientCredentialsLogin, podFetch, podRequester, type PodRequest, type SolidLogin } from '../solidOidc.js';
+import { ownPodOf, ownPods, type OwnPod } from './ownPods.js';
 
 /**
  * Private data lives in each person's Solid pod. People never see this:
@@ -20,6 +21,10 @@ import { clientCredentialsLogin, podFetch, podRequester, type PodRequest, type S
  * Without a Solid server configured, the same API falls back to this server's private store (files on the VM,
  * database rows on Vercel: privateStore.ts),
  * and the WebID is a profile document served by this platform.
+ *
+ * People who sign in with Solid, where this server keeps their data in their own pod (config.solidOwnPods, step 5e),
+ * are written to as themselves, in Concord's folder in that pod (ownPods.ts). That folder is made private to them
+ * before the first write, and a write that fails is reported, never kept here instead.
  */
 
 interface PodRecord {
@@ -89,6 +94,49 @@ async function ownerRequest(rec: PodRecord): Promise<PodRequest> {
   return (await podRequester(login))!;
 }
 
+/** Where a person's private data goes when it goes to a pod: Concord's folder in it, and requests as its owner. */
+interface PodAccess {
+  pod: string;
+  webId: string;
+  /** Concord's folder in the pod. */
+  base: string;
+  request(): Promise<PodRequest>;
+  own?: OwnPod;
+}
+
+/**
+ * The pod a person's private data goes to, if any: their own (a Solid account, where own pods are used; throws when
+ * Concord can't write to it now) or the one this server provisioned for them on its Solid server.
+ */
+async function podAccess(userId: string): Promise<PodAccess | undefined> {
+  const own = await ownPodOf(userId);
+  if (own) {
+    const base = `${own.pod}concord/`;
+    return {
+      pod: own.pod,
+      webId: own.webId,
+      base,
+      own,
+      async request() {
+        const req = await own.request();
+        if (!own.privateAt) {
+          await makePrivate(req, base, own.webId);
+          await own.markPrivate();
+          own.privateAt = 'now';
+        }
+        return req;
+      },
+    };
+  }
+  if (!config.solid.serverUrl) return undefined;
+  const rec = await get<PodRecord>('kv', `pod:${userId}`);
+  return rec ? { pod: rec.podUrl, webId: rec.webId, base: `${rec.podUrl}concord/`, request: () => ownerRequest({ ...rec, id: userId }) } : undefined;
+}
+
+/** A failed write to someone's own pod, as the person sees it (the sign-in and configuration messages pass through). */
+const ownPodFailed = (err: unknown) =>
+  err instanceof HttpError || err instanceof PreconditionFailed ? err : new HttpError(502, `Couldn’t save to your pod: ${(err as Error).message}`.slice(0, 300));
+
 /** A precondition for `writeExisting`: replace only this version (ETag), or only create (`*`). */
 export { PreconditionFailed, type WriteCondition } from './privateStore.js';
 
@@ -127,16 +175,17 @@ export const solid = {
   /** Write a private resource (path relative to the user's pod / private area). Returns its URL. */
   async write(userId: string, relPath: string, body: string | Buffer, contentType = 'text/turtle'): Promise<{ kind: 'solid' | 'local'; url: string }> {
     refuseWhenReadOnly(); // a pod or a private file, written before any database write
-    const rec = await get<PodRecord>('kv', `pod:${userId}`);
-    if (this.enabled && rec) {
+    const access = await podAccess(userId);
+    if (access) {
       try {
-        const req = await ownerRequest({ ...rec, id: userId });
-        const url = `${rec.podUrl}concord/${relPath}`;
+        const req = await access.request();
+        const url = `${access.base}${relPath}`;
         const res = await req('PUT', url, { headers: { 'content-type': contentType }, body: typeof body === 'string' ? body : new Uint8Array(body) });
         if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
         return { kind: 'solid', url };
       } catch (err) {
-        // Without a lasting disk (Vercel) there is nowhere quiet to put it: the person is told it failed.
+        // Their own pod, or no lasting disk (Vercel): there is nowhere quiet to put it, so the person is told it failed.
+        if (access.own) throw ownPodFailed(err);
         if (config.privateStore === 'db') throw err;
         console.warn(`[solid] write failed for ${userId}, storing locally: ${(err as Error).message}`);
       }
@@ -146,11 +195,11 @@ export const solid = {
   },
 
   async read(userId: string, relPath: string): Promise<string | undefined> {
-    const rec = await get<PodRecord>('kv', `pod:${userId}`);
-    if (this.enabled && rec) {
+    const access = await podAccess(userId);
+    if (access) {
       try {
-        const req = await ownerRequest({ ...rec, id: userId });
-        const res = await req('GET', `${rec.podUrl}concord/${relPath}`);
+        const req = await access.request();
+        const res = await req('GET', `${access.base}${relPath}`);
         if (res.ok) return await res.text();
       } catch {
         /* fall through to local */
@@ -161,15 +210,18 @@ export const solid = {
 
   /** Pods this server provisioned (user id and pod URL; never the credentials). */
   async pods(): Promise<{ userId: string; podUrl: string; webId: string }[]> {
-    return (await list<PodRecord>('kv'))
+    // People's own pods first: where both exist (a Solid account from before own pods), theirs is where data goes now.
+    const own = await ownPods();
+    const provisioned = (await list<PodRecord>('kv'))
       .filter((r) => typeof r.id === 'string' && r.id.startsWith('pod:') && typeof r.podUrl === 'string')
       .map((r) => ({ userId: r.id.slice(4), podUrl: r.podUrl, webId: r.webId }));
+    return [...own, ...provisioned.filter((p) => !own.some((o) => o.userId === p.userId))];
   },
 
   /** URL of a folder (relative path ending in /) in a user's pod, when it lives on the Solid server. */
   async folderUrl(userId: string, relFolder: string): Promise<string | undefined> {
-    const rec = await get<PodRecord>('kv', `pod:${userId}`);
-    return this.enabled && rec ? `${rec.podUrl}concord/${relFolder}` : undefined;
+    const access = await podAccess(userId).catch(() => undefined);
+    return access && `${access.base}${relFolder}`;
   },
 
   /**
@@ -180,15 +232,16 @@ export const solid = {
    */
   async shareRead(userId: string, relFolder: string, readers: string[], opts: { create?: boolean; force?: boolean } = {}): Promise<'shared' | 'unchanged' | 'missing' | 'local'> {
     refuseWhenReadOnly(); // a pod or a private file, written before any database write
-    const rec = await get<PodRecord>('kv', `pod:${userId}`);
-    if (!this.enabled || !rec) return 'local';
+    const access = await podAccess(userId);
+    if (!access) return 'local';
     const want = [...new Set(readers)].sort();
+    // Per pod: a Solid account that moves to another pod shares the folder there afresh.
     const key = `share:${userId}:${relFolder}`;
-    const prev = await get<Kv<string[]>>('kv', key);
-    if (!opts.force && prev && JSON.stringify(prev.value) === JSON.stringify(want)) return 'unchanged';
-    const req = await ownerRequest({ ...rec, id: userId });
-    const r = await shareFolder(req, `${rec.podUrl}concord/${relFolder}`, rec.podUrl, rec.webId, want, { create: opts.create });
-    if (r === 'shared') await put('kv', { id: key, value: want });
+    const prev = await get<Kv<string[]> & { pod?: string }>('kv', key);
+    if (!opts.force && prev && (prev.pod ?? access.pod) === access.pod && JSON.stringify(prev.value) === JSON.stringify(want)) return 'unchanged';
+    const req = await access.request();
+    const r = await shareFolder(req, `${access.base}${relFolder}`, access.pod, access.webId, want, { create: opts.create });
+    if (r === 'shared') await put('kv', { id: key, value: want, pod: access.pod });
     return r;
   },
 
@@ -202,11 +255,11 @@ export const solid = {
    */
   async keepExisting(userId: string, relPath: string, opts: { ours?: (bytes: Buffer) => boolean } = {}): Promise<WriteCondition & { existing?: Buffer }> {
     refuseWhenReadOnly(); // a pod or a private file, written before any database write
-    const rec = await get<PodRecord>('kv', `pod:${userId}`);
+    const access = await podAccess(userId);
     const asideName = (n: number) => relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}-${n}${ext}`);
-    if (this.enabled && rec) {
-      const req = await ownerRequest({ ...rec, id: userId });
-      const url = `${rec.podUrl}concord/${relPath}`;
+    if (access) {
+      const req = await access.request();
+      const url = `${access.base}${relPath}`;
       const res = await req('GET', url);
       if (res.status === 404 || res.status === 410) return { ifNoneMatch: '*' };
       if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
@@ -240,10 +293,10 @@ export const solid = {
 
   /** What is at a private path now, and the tag that replaces exactly that (the pod's ETag; locally a hash). */
   async readTagged(userId: string, relPath: string): Promise<{ bytes?: Buffer; tag?: string }> {
-    const rec = await get<PodRecord>('kv', `pod:${userId}`);
-    if (this.enabled && rec) {
-      const req = await ownerRequest({ ...rec, id: userId });
-      const url = `${rec.podUrl}concord/${relPath}`;
+    const access = await podAccess(userId);
+    if (access) {
+      const req = await access.request();
+      const url = `${access.base}${relPath}`;
       const res = await req('GET', url);
       if (res.status === 404 || res.status === 410) return {};
       if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
@@ -263,15 +316,27 @@ export const solid = {
    */
   async writeExisting(userId: string, relPath: string, body: string | ArrayBuffer, contentType = 'text/turtle', when: WriteCondition = {}): Promise<{ kind: 'solid' | 'local'; url: string }> {
     refuseWhenReadOnly(); // a pod or a private file, written before any database write
-    const rec = await get<PodRecord>('kv', `pod:${userId}`);
-    if (!(this.enabled && rec)) {
+    const access = await podAccess(userId);
+    if (!access) {
       const bytes = typeof body === 'string' ? Buffer.from(body) : Buffer.from(body);
       if (!when.ifMatch && !when.ifNoneMatch) return this.write(userId, relPath, bytes, contentType);
       await privateStore().writeIf(userId, relPath, bytes, when);
       return { kind: 'local', url: `${config.publicUrl}/people/${userId}/private/${relPath}` };
     }
-    const req = await ownerRequest({ ...rec, id: userId });
-    const url = `${rec.podUrl}concord/${relPath}`;
+    if (access.own) {
+      try {
+        return await this.writeTo(access, relPath, body, contentType, when);
+      } catch (err) {
+        throw ownPodFailed(err);
+      }
+    }
+    return await this.writeTo(access, relPath, body, contentType, when);
+  },
+
+  /** writeExisting's PUT to a pod. */
+  async writeTo(access: PodAccess, relPath: string, body: string | ArrayBuffer, contentType: string, when: WriteCondition): Promise<{ kind: 'solid'; url: string }> {
+    const req = await access.request();
+    const url = `${access.base}${relPath}`;
     const headers: Record<string, string> = { 'content-type': contentType };
     if (when.ifMatch) headers['if-match'] = when.ifMatch;
     if (when.ifNoneMatch) headers['if-none-match'] = when.ifNoneMatch;
@@ -399,6 +464,28 @@ export async function shareFolder(req: PodRequest, folder: string, podUrl: strin
     if (!res.ok) throw new Error(`PUT ${acl} → ${res.status}`);
     return 'shared';
   }
+}
+
+/**
+ * Make Concord's folder in someone's own pod private to them before anything is written in it: an access control of
+ * its own that gives the owner Read, Write and Control, and nobody else anything, so nothing is inherited from the
+ * pod (whose root may be readable by everyone). A folder that already has its own access control is left as it is:
+ * the owner, or Concord before, set it. Pods using ACP are refused without anything written.
+ */
+export async function makePrivate(req: PodRequest, folder: string, owner: string): Promise<void> {
+  let head = await req('HEAD', folder);
+  if (head.status === 404) {
+    const made = await req('PUT', folder, { headers: { 'content-type': 'text/turtle', 'if-none-match': '*' }, body: '' });
+    if (!made.ok && made.status !== 412) throw new Error(`PUT ${folder} → ${made.status}`);
+    head = await req('HEAD', folder);
+  }
+  if (head.status !== 200) throw new Error(`HEAD ${folder} → ${head.status}`);
+  const { acl, acp } = aclOf(head.headers.get('link'), folder);
+  if (acp) throw acpRefusal(folder);
+  if (await readAcl(req, acl, folder)) return;
+  const res = await req('PUT', acl, { headers: { 'content-type': 'text/turtle', 'if-none-match': '*' }, body: await wacMerge(folder, acl, undefined, undefined, owner, []) });
+  if (res.status === 412) return; // made meanwhile (another of this person's requests)
+  if (!res.ok) throw new Error(`PUT ${acl} → ${res.status}`);
 }
 
 const usable = (u: string) => {
