@@ -394,6 +394,17 @@ async function decided(fn: () => Promise<unknown>) {
   }
 }
 
+/**
+ * A member's reaction is still wanted only if they haven't reacted meanwhile: checked on the stored request,
+ * under its lock, just before writing. Throws a 409 when not, so `decided` doesn't count it.
+ */
+function notYet(stillWanted: (c: ChangeRequest) => Promise<boolean>) {
+  return async (c: ChangeRequest) => {
+    if (!(await stillWanted(c))) throw new HttpError(409, 'This member has already reacted to this request.');
+    return true;
+  };
+}
+
 async function personaReaction(p: PersonaSpec, cr: ChangeRequest, compact: (iri: string) => string) {
   const { value } = await llm.json({
     task: 'persona',
@@ -440,13 +451,14 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
         if (!canVote(g.rule, roles) || (await hasVotedOnTheseEdits(cr, u.id))) continue;
         const r = await personaReaction(p, cr, compact);
         // The reaction is to the version read above: if it changed while the persona thought, skip it.
-        if (await decided(() => addVote(cr, u, r.vote, r.comment, cr.round ?? 1))) actions++;
+        // Another step may have run while the persona thought, so whether they have voted is asked again under the lock.
+        if (await decided(() => addVote(cr, u, r.vote, r.comment, cr.round ?? 1, undefined, notYet(async (c) => !(await hasVotedOnTheseEdits(c, u.id)))))) actions++;
       } else {
         // A review from an earlier round (before a resubmission or new edits) no longer counts, so ask again;
         // but anyone who has already said something this round, a comment included, isn't asked twice.
         if ((await hasRespondedThisRound(cr, u.id)) || !(canApprove(g.rule, roles) || roles.includes('member'))) continue;
         const r = await personaReaction(p, cr, compact);
-        if (await decided(() => addReview(cr, u, r.decision, r.comment, cr.round ?? 1))) actions++;
+        if (await decided(() => addReview(cr, u, r.decision, r.comment, cr.round ?? 1, undefined, notYet(async (c) => !(await hasRespondedThisRound(c, u.id)))))) actions++;
       }
     }
   }

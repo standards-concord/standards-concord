@@ -53,8 +53,8 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.42.0',
-    date: '2026-11-06',
+    version: '0.43.0',
+    date: '2026-11-07',
     title: 'Fewer words on the welcome page and around the hub',
     changes: [
       {
@@ -83,6 +83,98 @@ export const APP_RELEASES: AppRelease[] = [
         detail: 'It used to say “Drafted by someone”. FAIR check messages also count properly now (“1 keyword”, not “1 keyword(s)”).',
         roles: ['steward'],
         to: '{o}/releases',
+      },
+    ],
+  },
+  {
+    version: '0.42.0',
+    date: '2026-11-07',
+    title: 'Ontologies checked with what they import, and federations',
+    pr: 109,
+    changes: [
+      {
+        id: 'import-checks',
+        type: 'feat',
+        title: 'Every change is checked together with the ontologies it imports',
+        detail:
+          'An ontology that imports another is now reasoned over with that ontology loaded, so a change that contradicts it is caught, and the checks say which import the problem comes from. Imports that aren’t on Concord are listed as not checked. The Overview shows what an ontology builds on, and anyone signed in can propose importing another.',
+        roles: ['steward', 'contributor'],
+        to: '{o}#imports-title',
+        ask: 'When an import causes a problem, is it clear what to change?',
+      },
+      {
+        id: 'federations',
+        type: 'feat',
+        title: 'Federations: check that ontologies work together (Advanced features)',
+        detail:
+          'With Advanced features on, the hub links to Federations: sets of ontologies, each at a chosen release or following its working draft, that are meant to be used together. Concord checks them alone and together and says which pair conflicts. A change to an ontology that follows its draft is checked against each federation it is in; if the ontology’s owners committed it to the federation, a change that breaks it fails.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Would you use a federation to keep related standards consistent?',
+      },
+      {
+        id: 'federation-releases',
+        type: 'feat',
+        title: 'Federation releases pin every ontology to its content hash',
+        detail:
+          'A federation’s owners can publish a release once every ontology in it is at a release and they work together. It pins each ontology, and everything they import, to its version and an RDFC-1.0 content hash, with the hash of the SHACL shapes derived from them, and is published as an ontology anyone can import at /def/fed/<name>/<version>. The next version is suggested from how the ontologies moved.',
+        roles: ['steward'],
+        to: '/f',
+      },
+      {
+        id: 'federation-compare',
+        type: 'feat',
+        title: 'Sub-federations, and comparing two federations term by term',
+        detail:
+          'A federation can extend another, such as financial services building on government concepts. Compare shows, for every term, whether it is the same, means the same, is refined, loosened or contradicted, or exists on one side only, and how many shared terms the two agree on.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Does the comparison tell you whether one federation is safe to use with another?',
+      },
+      {
+        id: 'federation-forks',
+        type: 'feat',
+        title: 'Fork a federation, propose it back, and hand settled terms upstream',
+        detail:
+          'Anyone can fork a federation: a development fork tries changes (including an ontology’s development fork as a member) and proposes them back for the original’s owners to accept or decline; a divergent fork goes its own way. A federation that extends another can hand its settled terms upstream: each becomes a change request on an ontology of the federation it extends, re-created there and linked back to the original term.',
+        roles: ['steward'],
+        to: '/f',
+        ask: 'Would handing terms upstream this way work for your standard?',
+      },
+    ],
+  },
+  {
+    version: '0.41.4',
+    date: '2026-11-07',
+    title: 'Tidier “Validate from your own code”',
+    pr: 104,
+    changes: [
+      {
+        id: 'validate-api-help-tidy',
+        type: 'fix',
+        title: 'The curl examples on Validate data are highlighted and line up',
+        detail:
+          'In Validate data’s “Validate from your own code” section, the curl examples are now syntax-highlighted like the rest of Concord’s code, each in one box with its own copy button, and the section no longer runs into the card’s edges. The key facts (address, body, answer, status, limits) are a short list instead of one long paragraph.',
+        roles: ['contributor', 'member', 'agent'],
+        to: '{o}/validate',
+        ask: 'Are the examples easy to read and copy?',
+      },
+    ],
+  },
+  {
+    version: '0.41.3',
+    date: '2026-11-07',
+    title: 'Sections you have opened come back at once',
+    pr: 102,
+    changes: [
+      {
+        id: 'instant-sections',
+        type: 'perf',
+        title: 'Moving between sections is instant',
+        detail: 'Change requests, releases, meetings, forks, use cases, app checks, agent reports and the overview show what they showed last time straight away when you come back to them, and quietly bring it up to date. The main lists are also fetched in the background once you open an ontology, so even the first visit to Change requests, Releases, Forks, Use cases or Meetings is instant. Nothing is kept for the next person after you sign out.',
+        roles: [],
+        to: '{o}/changes',
+        ask: 'Does moving between sections feel instant now? Did you ever see out-of-date information that confused you?',
       },
     ],
   },

@@ -8,7 +8,7 @@ GitHub Actions minutes are free and unlimited on a public repository, but metere
 | --- | --- | --- |
 | Push to a branch with no PR | nothing | 0 min |
 | Push to a draft PR | `test` (typecheck, unit tests, build, listing checks) | 14 min |
-| PR marked ready for review, and every push after | `test`, `e2e` (dev and preview), `walkthrough` | 25 min |
+| PR marked ready for review, and every push after | `test`, `e2e` (preview: everything; dev: smoke test), `walkthrough` | 25 min |
 | Push to `main` | all of the above, then `image` (backend deploy) | 30 min |
 | Vercel production deploy | `Live site` smoke test | 2 min |
 | Only `docs/`, `deploy/` or Markdown changed (outside `walkthrough/`) | nothing | 0 min |
@@ -28,6 +28,37 @@ Other savings:
 - Open PRs as drafts while iterating. Mark the PR **ready for review** when you want the browser tests, and wait for `e2e` and `walkthrough` to pass before merging. A draft's green tick only covers `test`.
 - A PR that only touches docs gets no checks at all. That is expected; it can be merged without waiting.
 - To run everything on any branch, use **Actions → CI → Run workflow**.
+
+## Running the checks without Actions
+
+When Actions has no minutes (every job fails within seconds, with an annotation about payments or the spending limit), run the same jobs on your own machine or in a Claude thread's sandbox:
+
+```sh
+git merge origin/main             # test what main will look like after the merge
+scripts/ci-local.sh --report      # test, e2e-dev, e2e-preview, e2e-solid, walkthrough
+scripts/ci-local.sh e2e-dev       # or just some jobs, without posting anything
+```
+
+The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. A full run takes about 10 minutes in a 4-CPU Claude sandbox (it took an hour before these changes), with the CPUs about 93% busy, so on that machine it is now limited by the total work rather than by waiting:
+
+- Jobs run side by side (`--parallel`, one and a half per CPU by default), and the browser suite is split into six shards (`--shards`) of similar length, using the times in [e2e/timings.json](../e2e/timings.json) (`--update-timings` refreshes them). Each shard has its own API server, web server, data directory and ports, so no two share state. More than one and a half pieces per CPU starves the unit tests, whose timing checks then fail.
+- The unit tests start first and keep normal priority, one package's test runner at a time; the browser pieces run at low priority and use the CPU left over. The summary shows each piece's CPU time.
+- The web app is built once, up front.
+- As in CI, the production build gets the whole browser suite and the Vite dev server a smoke test (`pnpm test:e2e:smoke`: the pages, the alpha walkthrough, the reasoner and Validate data). Running all ~490 tests against both took 24 minutes more and caught little: what breaks in only one of them almost always breaks the build.
+- The server's test files run in parallel, each worker with its own Postgres database (apps/server/test/setup.ts).
+- `settle()` in the browser tests waits until the page has no request in flight for 150 ms, instead of Playwright's `networkidle`, which always waits out 500 ms and took about 40% of a typical test. Requests the previous page still had in flight stop counting when a new page loads (Playwright doesn't always report their end, and each one used to cost every later page 10 s).
+- In CI, a browser test's trace and video are recorded only when it is retried after a failure. Recording every test and throwing the recording away when it passed took about half the browser tests' CPU.
+
+With `--report` it records the result for the commit it tested, and refuses to run with uncommitted changes, so the record always describes exactly that commit:
+
+- **Commit statuses** `local/test`, `local/e2e-dev`, `local/e2e-preview`, `local/e2e-solid` and `local/walkthrough`, shown on the pull request, wherever `gh` may post them (your own machine, the Mac).
+- **`ci-local-logs/<commit>/summary.md`**, a table of the same results. A Claude thread's GitHub access can't post statuses, so the thread posts this summary on the pull request as a comment instead.
+
+Merge a pull request only when its head commit, after merging current `main`, has all five jobs passing in one of those records (and the external review has approved). Push nothing after the run, or run again.
+
+A private repository on GitHub's free plan has no branch protection, so GitHub doesn't enforce any of this: it is the rule we follow.
+
+Deploys also come from Actions: the `image` job builds the backend image the server pulls, and [vercel-deploy.yml](../.github/workflows/vercel-deploy.yml) deploys the web app. Without minutes, deploy by hand after a merge: `vercel deploy --prod` from a checkout of `main` (signed in to the jeswr1 team), and build and push `ghcr.io/standards-concord/standards-concord:latest` (`docker buildx build --platform linux/amd64 --push`).
 
 ## Option: a self-hosted runner
 

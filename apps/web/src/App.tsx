@@ -1,5 +1,5 @@
-import { Component, lazy, Suspense, type ReactNode } from 'react';
-import { Navigate, Route, Routes, useLocation } from 'react-router';
+import { Component, lazy, Suspense, useEffect, type ReactNode } from 'react';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { SessionProvider, useSession } from './lib/session';
 import { OntologiesProvider } from './lib/ontologies';
 import { WalkthroughProvider } from './lib/walkthrough';
@@ -7,6 +7,7 @@ import { Page, Shell } from './components/Shell';
 import { Button, ErrorCard, Loading } from './components/ui';
 import { LoginPage } from './pages/Login';
 import { HubPage } from './pages/Hub';
+import { FederationPage, FederationsPage } from './pages/Federations';
 import { AlphaPage } from './pages/Alpha';
 import { FeedbackPage } from './pages/Feedback';
 import { WelcomePage } from './pages/Welcome';
@@ -66,6 +67,29 @@ class ErrorBoundary extends Component<{ children: ReactNode; resetKey: string },
 function RequireUser({ children }: { children: ReactNode }) {
   const { session, loading, error, refresh } = useSession();
   const loc = useLocation();
+  const navigate = useNavigate();
+  const signedOut = !!session && !session.user;
+  useEffect(() => {
+    if (!signedOut) return;
+    const here = loc.pathname + loc.search + loc.hash;
+    const toLogin = () => navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true });
+    toLogin();
+    // Going back just as that redirect is made can land on this same page before the router has shown /login. The
+    // router then sees no change at all, so nothing renders or redirects again, and the page stays blank (#100). So
+    // while this page is up, a move back to it redirects again. (A move anywhere else renders that page instead.)
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onPop = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (window.location.pathname + window.location.search + window.location.hash === here) toLogin();
+      });
+    };
+    window.addEventListener('popstate', onPop);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      clearTimeout(timer);
+    };
+  }, [signedOut, loc, navigate]);
   if (!session && loading) return <Loading label="Connecting…" className="py-24" />;
   if (!session)
     return (
@@ -74,7 +98,7 @@ function RequireUser({ children }: { children: ReactNode }) {
         <p className="mt-4 text-sm text-muted">Concord needs its API server to be running. If you’re developing locally, start it with <code className="font-mono">pnpm --filter @concord/server dev</code>.</p>
       </Page>
     );
-  if (!session.user) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search + loc.hash)}`} replace />;
+  if (!session.user) return null;
   return <>{children}</>;
 }
 
@@ -107,6 +131,8 @@ function Routed() {
           <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
           <Route path="/" element={<RequireUser><HubPage /></RequireUser>} />
           <Route path="/settings" element={<SettingsRoute />} />
+          <Route path="/f" element={<RequireUser><FederationsPage /></RequireUser>} />
+          <Route path="/f/:slug" element={<RequireUser><FederationPage /></RequireUser>} />
           <Route path="/admin/feedback" element={<RequireUser><AdminFeedbackPage /></RequireUser>} />
           <Route path="/o/:id" element={<RequireUser><OntologyLayout /></RequireUser>}>
             <Route index element={<OverviewTab />} />

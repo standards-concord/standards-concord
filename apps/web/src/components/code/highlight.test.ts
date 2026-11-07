@@ -98,6 +98,84 @@ describe('RDF highlighting', () => {
     expect(highlightSegments('import { A } from "https://x/a.js";', 'javascript').find((s) => s.text === 'import')?.cls).toBe('tok-keyword');
   });
 
+  it('shell: the command, flags, URLs, quoted strings, @files and line continuations', () => {
+    const code = "curl -X POST https://example.org/def/vol \\\n  -H 'Content-Type: text/turtle' \\\n  --data-binary @data.ttl";
+    expect(classesOf(code, 'shell', ['curl', '-X', 'POST', 'https://example.org/def/vol', '\\', '-H', "'Content-Type: text/turtle'", '--data-binary', '@data.ttl'])).toEqual({
+      curl: 'tok-func',
+      '-X': 'tok-attr',
+      POST: 'tok-keyword',
+      'https://example.org/def/vol': 'tok-iri',
+      '\\': 'tok-punct',
+      '-H': 'tok-attr',
+      "'Content-Type: text/turtle'": 'tok-string',
+      '--data-binary': 'tok-attr',
+      '@data.ttl': 'tok-variable',
+    });
+    // A continued line carries on the command, so its first word is not a new command.
+    expect(highlightSegments('curl \\\n  example', 'shell').find((s) => s.text === 'example')?.cls).toBeUndefined();
+    // Single quotes have no escapes: a backslash inside them doesn't swallow the closing quote.
+    expect(highlightSegments("echo 'a\\' b", 'shell').find((s) => s.text === "'a\\'")?.cls).toBe('tok-string');
+  });
+
+  it('shell: quoted strings carry on across lines, closed or not', () => {
+    const cls = (code: string, text: string) => highlightSegments(code, 'shell').find((s) => s.text === text)?.cls;
+    // A single-quoted string over two lines: the second line is still the string, not a command or a comment.
+    expect(cls("echo 'a\nb # not a comment' c", "b # not a comment'")).toBe('tok-string');
+    expect(highlightSegments("echo 'a\nb # not a comment' c", 'shell').some((s) => s.cls === 'tok-comment')).toBe(false);
+    expect(cls("echo 'a\nb' c", 'c')).toBeUndefined();
+    // A backslash at the end of a line inside double quotes carries the string on.
+    expect(cls('echo "a \\\nb" c', 'b"')).toBe('tok-string');
+    // An unterminated string runs to the end, rather than turning the next line into a command.
+    expect(cls("echo 'abc\nnext", 'next')).toBe('tok-string');
+  });
+
+  it('shell: # starts a comment only where a new word can begin', () => {
+    const comments = (code: string) => highlightSegments(code, 'shell').filter((s) => s.cls === 'tok-comment').map((s) => s.text);
+    expect(comments("echo 'a'#b")).toEqual([]);
+    expect(comments('echo "a"#b')).toEqual([]);
+    expect(comments('echo $HOME#suffix')).toEqual([]);
+    expect(comments('echo \\#x')).toEqual([]);
+    expect(comments('echo a#b')).toEqual([]);
+    expect(comments('echo a #real')).toEqual(['#real']);
+    expect(comments('echo a;#real')).toEqual(['#real']);
+    expect(comments('# whole line')).toEqual(['# whole line']);
+    // A backslash-newline joins the lines: foo\ then #bar is the one word foo#bar, but a space before the backslash ends the word.
+    expect(comments('echo foo\\\n#bar')).toEqual([]);
+    expect(comments('echo foo \\\n#bar')).toEqual(['#bar']);
+    expect(comments('echo foo\\\n  #bar')).toEqual(['#bar']);
+    // An empty line ends the continued command, so the line after it starts afresh.
+    expect(comments('echo foo\\\n\n#bar')).toEqual(['#bar']);
+    expect(highlightSegments('echo foo\\\n\ncat', 'shell').find((s) => s.text === 'cat')?.cls).toBe('tok-func');
+    // But a quoted string carries on through an empty line.
+    expect(comments("echo 'a\n\n#b'")).toEqual([]);
+  });
+
+  it('shell: a flag stays a flag with its value quoted straight after it', () => {
+    const segs = highlightSegments("curl -H'Content-Type: text/turtle' -d\"x\"", 'shell');
+    expect(segs.find((s) => s.text === '-H')?.cls).toBe('tok-attr');
+    expect(segs.find((s) => s.text === "'Content-Type: text/turtle'")?.cls).toBe('tok-string');
+    expect(segs.find((s) => s.text === '-d')?.cls).toBe('tok-attr');
+    // A command split over lines: after a pipe and a continuation, the next word is still a command.
+    expect(highlightSegments('echo a |\\\n  cat', 'shell').find((s) => s.text === 'cat')?.cls).toBe('tok-func');
+  });
+
+  it('shell: URLs and @files stop at operators and backslashes', () => {
+    const segs = (code: string) => highlightSegments(code, 'shell');
+    const pipe = segs('curl https://example.org/a|cat');
+    expect(pipe.find((s) => s.cls === 'tok-iri')?.text).toBe('https://example.org/a');
+    expect(pipe.find((s) => s.text === 'cat')?.cls).toBe('tok-func');
+    for (const op of [';', '&&']) expect(segs(`curl https://example.org/a${op}ls`).find((s) => s.text === 'ls')?.cls).toBe('tok-func');
+    // A backslash straight after a URL still continues the line.
+    const cont = segs('curl https://example.org/a\\\n  -H x');
+    expect(cont.find((s) => s.cls === 'tok-iri')?.text).toBe('https://example.org/a');
+    expect(cont.find((s) => s.text === '\\')?.cls).toBe('tok-punct');
+    expect(cont.find((s) => s.text === '-H')?.cls).toBe('tok-attr');
+    const file = segs('curl --data-binary @data.ttl;ls');
+    expect(file.find((s) => s.cls === 'tok-variable')?.text).toBe('@data.ttl');
+    expect(file.find((s) => s.text === 'ls')?.cls).toBe('tok-func');
+    expect(segs('curl @data.ttl\\\n  -H x').find((s) => s.cls === 'tok-variable')?.text).toBe('@data.ttl');
+  });
+
   it('plain text is left alone', () => {
     expect(highlightSegments('hello', 'text')).toEqual([{ text: 'hello' }]);
   });

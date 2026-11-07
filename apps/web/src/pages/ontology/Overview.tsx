@@ -11,6 +11,7 @@ import { ActivityFeed } from '../../components/ActivityFeed';
 import { LevelBadge, RoleChips, RoleRingLegend, StatusPill } from '../../components/badges';
 import { Disclosure } from '../../components/Disclosure';
 import { ValidationDetails } from '../../components/Validation';
+import { ImportsSection } from '../../components/Imports';
 import { Avatar, ErrorCard, Loading } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -28,8 +29,8 @@ export function OverviewTab() {
   const { id, ontology: o, label, myRoles, hasRole } = useOntology();
   const { session, now } = useSession();
   const me = session?.user?.id;
-  const validation = useAsync(() => api.validation(id, 'working'), [id]);
-  const changes = useAsync(() => api.changeRequests(id), [id]);
+  const validation = useAsync(() => api.validation(id, 'working'), [id], { keep: `validation|${id}|working` });
+  const changes = useAsync(() => api.changeRequests(id), [id], { keep: `changeRequests|${id}|` });
   const loc = useLocation();
   const wantsHealth = loc.hash === '#health';
   const healthRef = useRef<HTMLElement>(null);
@@ -209,6 +210,8 @@ export function OverviewTab() {
             </div>
           )}
         </section>
+
+        <ImportsSection ontologyId={id} ontologyIRI={o.ontologyIRI} report={validation.data} canPropose={!!session?.user} />
 
         <section id="health" ref={healthRef} tabIndex={-1} className="scroll-mt-20 outline-none" aria-labelledby="health-title">
           <h2 id="health-title" className="text-xl font-bold">

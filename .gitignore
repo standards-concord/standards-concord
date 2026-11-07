@@ -12,3 +12,4 @@ e2e/.auth
 .gen/
 walkthrough/out
 walkthrough/.cache
+ci-local-logs/

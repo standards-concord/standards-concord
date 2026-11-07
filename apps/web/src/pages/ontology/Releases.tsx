@@ -91,7 +91,7 @@ function DraftReleaseDialog({ open, onClose }: { open: boolean; onClose: () => v
 
 export function ReleasesTab() {
   const { id, ontology } = useOntology();
-  const list = useAsync(() => api.releases(id), [id]);
+  const list = useAsync(() => api.releases(id), [id], { keep: `releases|${id}` });
   const [open, setOpen] = useState(false);
   return (
     <div>

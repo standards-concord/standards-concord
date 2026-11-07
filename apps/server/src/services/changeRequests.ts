@@ -11,6 +11,8 @@ import {
 } from '@concord/core';
 import type { ChangeOp, ValidationReport } from '@concord/core/types';
 import { fairContext } from './fairResolution.js';
+import { hostedImportClosure } from './importClosure.js';
+import { breaks, federationImpact } from './federations.js';
 import type {
   AiAnalysis,
   ChangeRequest,
@@ -195,7 +197,21 @@ export interface CreateInput {
   atSave?: () => Promise<void> | void;
 }
 
+/**
+ * The most edits one change request may hold. Checking a request runs on the server's main thread, and
+ * every edit adds to it (5,000 took about 18 s, and nothing else was served meanwhile), so a longer list
+ * is refused with a request to split it. Real changes are a few dozen edits at most.
+ */
+export const MAX_EDITS = 500;
+
+/** Refuses an edit list longer than MAX_EDITS, before any work is done on it. */
+export function checkEditCount(ops: readonly unknown[] | undefined) {
+  if (ops && ops.length > MAX_EDITS)
+    throw new HttpError(413, `A change request can have at most ${MAX_EDITS} edits, and this one has ${ops.length}. Split it into smaller change requests.`);
+}
+
 export function createChangeRequest(project: OntologyProject, author: User, input: CreateInput): Promise<ChangeRequest> {
+  checkEditCount(input.ops);
   return withTriageBudget(author, () => createNow(project, author, input));
 }
 
@@ -214,6 +230,7 @@ async function createNow(project: OntologyProject, author: User, input: CreateIn
     tests = drafted.tests;
     title ||= drafted.title;
     analysis ??= drafted.analysis;
+    checkEditCount(ops);
   }
 
   const now = clock.iso();
@@ -336,14 +353,20 @@ export function heuristicProposal(graph: OntologyGraph, text: string): Proposal 
 /* Triage: apply, diff, classify, validate, analyse                         */
 /* ------------------------------------------------------------------------ */
 
-export async function preview(project: OntologyProject, ops: ChangeOp[], tests: ChangeRequest['tests'], author?: User) {
-  const before = await ontologyStore.working(project);
+/** `base` is the working draft to check against, when the caller has already read it. */
+export async function preview(project: OntologyProject, ops: ChangeOp[], tests: ChangeRequest['tests'], author?: User, base?: OntologyGraph) {
+  const before = base ?? (await ontologyStore.working(project));
   const { graph: after, warnings } = applyChangeOps(before, ops, { author: author?.name, date: clock.iso().slice(0, 10) });
   const diff = diffOntologies(before, after);
   const classification = classifyChange(diff, before, after);
   // The request's own tests are marked as such, so readers can tell them from use cases' questions.
   const cqs = [...await competencyTests(project.id), ...(tests ?? []).map((t) => ({ ...t, source: OWN_TEST }))];
-  const validation = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI) });
+  const checked = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI), imports: await hostedImportClosure(after) });
+  // Across federations: advisory, except that breaking one the ontology committed to (or not being able to check it) fails the change.
+  const federations = await federationImpact(project, after);
+  const validation: ValidationReport = federations.length
+    ? { ...checked, federations, passed: checked.passed && !federations.some((i) => i.committed && (breaks(i) || i.error !== undefined)) }
+    : checked;
   return { before, after, diff, classification, validation, warnings };
 }
 
@@ -358,15 +381,80 @@ function validationPassed(v: ValidationReport | undefined) {
  * if the edits themselves changed meanwhile, its now-stale results are dropped.
  */
 export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}): Promise<ChangeRequest> {
+  // The draft can keep moving while a check runs: the request is checked again, and the last time holding the lock (see triageOnce).
+  for (let attempt = 1; ; attempt++) {
+    const out = await triageOnce(cr, opts, attempt >= TRIAGE_TRIES);
+    if (!out.again) return out.cr;
+    cr = out.cr;
+  }
+}
+
+/** How many times triage checks a request again because the draft moved while it was checking. */
+const TRIAGE_TRIES = 3;
+
+/** A validation report for a check that didn't happen: it claims nothing, and doesn't pass. */
+function uncheckedValidation(code: string, message: string): ValidationReport {
+  return {
+    lint: [{ severity: 'error', code, message }],
+    fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
+    // Nothing was checked, so nothing is claimed: a "consistent" here was read as a real verdict.
+    reasoner: {
+      engine: 'none',
+      available: false,
+      checked: 'none',
+      consistent: false,
+      unsatisfiable: [],
+      inferredSubClassOf: [],
+      explanation: 'The change could not be validated, so the ontology was not checked.',
+      durationMs: 0,
+    },
+    competencyQuestions: [],
+    passed: false,
+  };
+}
+
+/**
+ * The working draft and the commit it is, for a check. Read as the commit, then the draft, then the commit again: if
+ * the draft moved during the read, it is read again. If it never holds still, the earlier commit is named, so the
+ * results are never taken to describe a later draft than they do.
+ */
+async function readDraft(project: OntologyProject): Promise<{ graph: OntologyGraph; head: string }> {
+  for (let attempt = 1; ; attempt++) {
+    const head = await ontologyStore.head(project);
+    const graph = await ontologyStore.working(project);
+    if ((await ontologyStore.head(project)) === head || attempt >= TRIAGE_TRIES) return { graph, head };
+  }
+}
+
+/**
+ * One check. Results are written only if they describe the draft as it is when they are written. If the draft moved
+ * meanwhile, results a newer check stored for the current draft stand; otherwise the request is checked again
+ * (`again`). The last try holds the ontology's lock throughout, so the draft (which only changes under that lock:
+ * merges and releases) can't move while it runs; it skips the AI analysis, so the lock is never held for an LLM call.
+ * Merges and edits wait for it (up to the lock's wait time), which only happens when two tries in a row saw the draft move.
+ */
+function triageOnce(cr: ChangeRequest, opts: { analyse?: boolean }, lastTry: boolean): Promise<{ cr: ChangeRequest; again?: boolean }> {
+  return lastTry ? withOntologyLocks(cr.ontologyId, () => checkAndWrite(cr, { ...opts, analyse: false }, true)) : checkAndWrite(cr, opts, false);
+}
+
+async function checkAndWrite(cr: ChangeRequest, opts: { analyse?: boolean }, lastTry: boolean): Promise<{ cr: ChangeRequest; again?: boolean }> {
   // Triage works on stored requests only: one never stored (or since discarded) is never written back.
-  if (!(await get<ChangeRequest>('changeRequests', cr.id))) return cr;
+  const stored = await get<ChangeRequest>('changeRequests', cr.id);
+  if (!stored) return { cr };
+  // Which results were stored when this check began: any written after are newer than this check's.
+  const seqAtStart = stored.triageSeq ?? 0;
   const project = await getProject(cr.ontologyId);
   const author = await getUser(cr.authorId);
   const opsKey = JSON.stringify(cr.ops);
   const result: Pick<ChangeRequest, 'diff' | 'classification' | 'validation' | 'warnings' | 'kgcl' | 'analysis'> = {};
   let event: TimelineEvent;
+  // The draft this check ran against, read together with it, so a check that then fails still says which draft it
+  // failed on. Unknown only if the draft couldn't be read at all.
+  let checkedHead: string | undefined;
   try {
-    const p = await preview(project, cr.ops, cr.tests, author);
+    const base = await readDraft(project);
+    checkedHead = base.head;
+    const p = await preview(project, cr.ops, cr.tests, author, base.graph);
     result.diff = trimDiff(p.diff);
     result.classification = withDeclaredLevel(p.classification, cr.declaredLevel);
     result.validation = p.validation;
@@ -383,32 +471,32 @@ export async function triage(cr: ChangeRequest, opts: { analyse?: boolean } = {}
     if (opts.analyse !== false && project.governance.automation.autoTriage) result.analysis = await analyse(project, { ...cr, ...result }, p.after);
   } catch (err) {
     const message = err instanceof ChangeOpError ? `Edit ${err.opIndex + 1} cannot be applied: ${err.message}` : (err as Error).message;
-    result.validation = {
-      // An edit that no longer applies, or (anything else) a check that couldn't run: either way, not validated.
-      lint: [{ severity: 'error', code: err instanceof ChangeOpError ? 'change-not-applicable' : 'triage-failed', message }],
-      fair: { score: 0, checks: [], byPrinciple: { F: { passed: 0, total: 0, score: 0 }, A: { passed: 0, total: 0, score: 0 }, I: { passed: 0, total: 0, score: 0 }, R: { passed: 0, total: 0, score: 0 } } },
-      // Nothing was checked, so nothing is claimed: a "consistent" here was read as a real verdict.
-      reasoner: {
-        engine: 'none',
-        available: false,
-        checked: 'none',
-        consistent: false,
-        unsatisfiable: [],
-        inferredSubClassOf: [],
-        explanation: 'The change could not be validated, so the ontology was not checked.',
-        durationMs: 0,
-      },
-      competencyQuestions: [],
-      passed: false,
-    };
+    // An edit that no longer applies, or (anything else) a check that couldn't run: either way, not validated.
+    result.validation = uncheckedValidation(err instanceof ChangeOpError ? 'change-not-applicable' : 'triage-failed', message);
     event = ev('validated', message);
   }
-  return locked(cr, async (latest) => {
+  let again = false;
+  const out = await locked(cr, async (latest) => {
     if (JSON.stringify(latest.ops) !== opsKey) return latest;
+    const now = await ontologyStore.head(project);
+    if (checkedHead !== now) {
+      // Results a newer check stored for the draft as it is now stand, over a check that couldn't read the draft too.
+      // (Only newer ones: a check that fails, at merge time say, still replaces results from before it began.)
+      if (latest.triagedHead === now && (checkedHead !== undefined || (latest.triageSeq ?? 0) > seqAtStart)) return latest;
+      if (checkedHead !== undefined) {
+        // These results describe an older draft: check again. (On the last try the draft can't have moved, as it held
+        // the lock; if it somehow did, what is stored is left as it is rather than replaced with older results.)
+        again = !lastTry;
+        return latest;
+      }
+    }
     for (const [k, v] of Object.entries(result)) if (v !== undefined) (latest as unknown as Record<string, unknown>)[k] = v;
+    latest.triagedHead = checkedHead;
+    latest.triageSeq = (latest.triageSeq ?? 0) + 1;
     latest.timeline.push(event);
     return await save(latest);
   });
+  return { cr: out, again };
 }
 
 function trimDiff(d: ChangeRequest['diff']) {
@@ -651,6 +739,7 @@ const editsBasis = (cr: ChangeRequest) => `${cr.opsUpdatedAt ?? cr.createdAt} ${
 
 export async function updateOps(cr: ChangeRequest, actor: User, patch: EditsPatch) {
   const { title, description, ops } = patch;
+  checkEditCount(ops);
   await canEdit(cr, actor);
   return withTriageBudget(actor, () => updateOpsNow(cr, actor, { title, description, ops }));
 }
@@ -665,6 +754,8 @@ async function updateOpsNow(
   actor: User,
   patch: EditsPatch & { basis?: string; tests?: ChangeRequest['tests']; warnings?: string[]; note?: string },
 ) {
+  // Every path that replaces the edits (an AI revision included) comes through here.
+  checkEditCount(patch.ops);
   await locked(cr, async (c) => {
     await canEdit(c, actor);
     // Checked under the lock the edit is stored with, so a withdrawal during an AI revision counts.
