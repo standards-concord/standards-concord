@@ -85,15 +85,21 @@ ex:helper a vol:Role .
     let release: () => void = () => {};
     const held = new Promise<void>((r) => (release = r));
     const draftSource = /\/api\/ontologies\/[^/]+\/source\?.*ref=working/;
-    await page.route(draftSource, async (route) => {
-      await held;
-      await route.continue();
+    // Used to fail now and then on a busy machine with "Route is already handled!": unroute ran
+    // before the released handler had continued its request, and so let the request through
+    // itself. Now the test waits for every held request to be continued before unrouting.
+    const continued: Promise<void>[] = [];
+    await page.route(draftSource, (route) => {
+      const done = held.then(() => route.continue());
+      continued.push(done);
+      return done;
     });
     await setData(page, (await editor(page).innerText()).replace('"sixteen"', '16'));
     await expect(page.getByTestId('validation-report')).toHaveAttribute('aria-busy', 'true');
     await expect(editor(page).locator('.cm-lintRange-error')).toHaveCount(0);
     await expect(list.getByRole('button')).toHaveCount(0);
     release();
+    await Promise.all(continued);
     await page.unroute(draftSource);
     await setData(page, (await editor(page).innerText()).replace(/vol:minimumAge 16/, 'vol:minimumAge "16"^^<http://www.w3.org/2001/XMLSchema#nonNegativeInteger>'));
     await checked(page);
