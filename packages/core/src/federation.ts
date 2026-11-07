@@ -33,7 +33,11 @@ export function federationRoot(iri: string): OntologyGraph {
   return new OntologyGraph(store, {});
 }
 
-/** Every graph a set of members brings in (members and their imports), each ontology version once. */
+/**
+ * Every graph a set of members brings in (members and their imports), each ontology version once.
+ * Members come first, so a member's graph (which may be a proposed change to its draft) wins over a copy
+ * of the same ontology version that another member's imports loaded.
+ */
 function graphsOf(members: FederationMemberInput[]): Pick<ResolvedImport, 'graph'>[] {
   const seen = new Set<string>();
   const out: Pick<ResolvedImport, 'graph'>[] = [];
@@ -42,10 +46,8 @@ function graphsOf(members: FederationMemberInput[]): Pick<ResolvedImport, 'graph
     seen.add(key);
     out.push({ graph });
   };
-  for (const m of members) {
-    add(`${m.id}@${m.version}`, m.graph);
-    for (const r of m.closure.imported) add(`${r.ontologyId ?? r.iri}@${r.version}`, r.graph);
-  }
+  for (const m of members) add(`${m.id}@${m.version}`, m.graph);
+  for (const m of members) for (const r of m.closure.imported) add(`${r.ontologyId ?? r.iri}@${r.version}`, r.graph);
   return out;
 }
 

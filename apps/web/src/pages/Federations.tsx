@@ -356,7 +356,7 @@ function Releases({ fed }: { fed: FederationDetail }) {
         Releases
       </h2>
       <p className="text-sm text-muted">
-        A release pins every ontology, and everything they import, to a release and its content hash (RDFC-1.0, SHA-256), with the hash of the SHACL shapes derived from them. It is published as an ontology anyone can import.
+        A release pins every ontology, and everything they import, to a release and its content hash (RDFC-1.0, SHA-256), with the hash of the SHACL shapes derived from them. It is published as an ontology anyone can import, which loads exactly the pinned content.
       </p>
       {fed.canEdit && plan.data && (
         <Card className="space-y-3 p-4">
@@ -411,6 +411,14 @@ function Releases({ fed }: { fed: FederationDetail }) {
                 <a href={`/def/fed/${encodeURIComponent(fed.slug)}/${r.version}/shapes`} className="text-accent hover:underline">
                   shapes
                 </a>
+                {r.closureHash && (
+                  <>
+                    {' · '}
+                    <a href={`/def/fed/${encodeURIComponent(fed.slug)}/${r.version}/closure`} className="text-accent hover:underline" title="Every pinned ontology merged, exactly as checked">
+                      frozen closure
+                    </a>
+                  </>
+                )}
               </p>
             </li>
           ))}

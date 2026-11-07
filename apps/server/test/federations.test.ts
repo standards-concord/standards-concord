@@ -2,7 +2,7 @@ import request from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { OntologyGraph } from '@concord/core';
 import { createApp } from '../src/app.js';
-import { openDb } from '../src/db.js';
+import { openDb, put } from '../src/db.js';
 import { findProject, getProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
@@ -124,5 +124,56 @@ describe('federations', () => {
     // Every one of the parent's terms is kept or refined, so they agree on all shared terms.
     expect(cmp.body.agreeing).toBe(cmp.body.shared);
     expect(cmp.body.counts['only-a']).toBe(0);
+  });
+
+  // Review r1: the list of federations following a draft was cut to five (sorted by title) before
+  // commitments were read, so advisory federations could push a committed one out and its breakage
+  // never failed the change.
+  it('checks every federation an ontology is committed to, however many others follow its draft', async () => {
+    const owner = await login('Many federations owner');
+    const o = await coUser(owner);
+    for (let i = 0; i < 6; i++) await owner.post('/api/federations').send({ title: `A advisory ${i} ${Date.now()}`, members: [{ ontologyId: volId, version: '1.0.0' }, { ontologyId: o.id, version: 'draft' }] });
+    const fed = (await owner.post('/api/federations').send({ title: `Z committed ${Date.now()}`, members: [{ ontologyId: volId, version: '1.0.0' }, { ontologyId: o.id, version: 'draft' }] })).body;
+    expect((await owner.post(`/api/ontologies/${o.id}/federations/${fed.id}/commitment`).send({ committed: true })).status).toBe(200);
+    const cr = await owner.post(`/api/ontologies/${o.id}/change-requests`).send(hybrid());
+    const impacts = cr.body.validation.federations as { federationId: string; committed: boolean }[];
+    expect(impacts.find((i) => i.federationId === fed.id)).toMatchObject({ committed: true, passedAfter: false });
+    expect(impacts.filter((i) => !i.committed)).toHaveLength(5);
+    expect(cr.body.validation.passed).toBe(false);
+  });
+
+  // Review r1: an import Concord can't load was left out of the check, which could still pass, so a
+  // committed federation vouched for a union it never saw in full.
+  it('fails a change for a committed federation it could check only in part', async () => {
+    const owner = await login('Unresolved import owner');
+    const o = await coUser(owner);
+    const project = await getProject(o.id);
+    const g = await ontologyStore.working(project);
+    const ttl = `${await g.toTurtle()}\n<${project.ontologyIRI}> <http://www.w3.org/2002/07/owl#imports> <https://elsewhere.example/vocab> .`;
+    await ontologyStore.commitWorking(project, await OntologyGraph.fromTurtle(ttl), 'Import something hosted elsewhere', { name: 'Test' });
+    const fed = (await owner.post('/api/federations').send({ title: `Partly checked ${Date.now()}`, members: [{ ontologyId: volId, version: '1.0.0' }, { ontologyId: o.id, version: 'draft' }] })).body;
+    expect((await owner.post(`/api/ontologies/${o.id}/federations/${fed.id}/commitment`).send({ committed: true })).status).toBe(200);
+    const cr = await owner.post(`/api/ontologies/${o.id}/change-requests`).send({
+      title: 'A harmless class',
+      kind: 'feature',
+      ops: [{ op: 'addClass', localName: 'Harmless', label: 'harmless', definition: 'A class that breaks nothing, for testing partial checks.' }],
+    });
+    expect(cr.status).toBe(201);
+    expect(cr.body.validation.federations[0]).toMatchObject({ committed: true, error: expect.stringContaining('https://elsewhere.example/vocab') });
+    expect(cr.body.validation.passed).toBe(false);
+  });
+
+  // Review r1: members were read without the public hold check (imports always had it), so a version
+  // waiting for a steward's approval could reach checks, comparisons and upstream proposals.
+  it('never reads a version that is waiting for approval', async () => {
+    const owner = await login('Held member owner');
+    const o = await coUser(owner);
+    const fed = (await owner.post('/api/federations').send({ title: `Held ${Date.now()}`, members: [{ ontologyId: o.id, version: 'draft' }] })).body;
+    await put('kv', { id: `public-hold:${o.id}`, ontologyId: o.id, versions: ['draft'], since: '2026-11-07T00:00:00Z' });
+    const check = await owner.get(`/api/federations/${fed.slug}/check`);
+    expect(check.status).toBe(409);
+    expect(check.body.error).toMatch(/being reviewed/);
+    const add = await owner.post('/api/federations').send({ title: `Held again ${Date.now()}`, members: [{ ontologyId: o.id, version: 'draft' }] });
+    expect(add.status).toBe(400);
   });
 });

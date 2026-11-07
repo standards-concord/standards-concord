@@ -96,16 +96,24 @@ export function unionGraph(root: OntologyGraph, imported: Pick<ResolvedImport, '
   const store = new Store();
   const rootIRI = root.ontologyIRI;
   const headers = new Set<string>();
-  const add = (g: OntologyGraph, tag: string | undefined) => {
+  // Every input, the root included, gets its own fresh blank nodes, so no two inputs' nodes can meet
+  // whatever labels they use.
+  const add = (g: OntologyGraph) => {
     for (const h of g.store.getSubjects(DataFactory.namedNode(RDF_TYPE), DataFactory.namedNode(OWL_ONTOLOGY), null)) headers.add(h.value);
-    const rename = (t: Term): Term => (tag && t.termType === 'BlankNode' ? DataFactory.blankNode(`${tag}_${t.value}`) : t);
+    const fresh = new Map<string, Term>();
+    const rename = (t: Term): Term => {
+      if (t.termType !== 'BlankNode') return t;
+      let b = fresh.get(t.value);
+      if (!b) fresh.set(t.value, (b = store.createBlankNode()));
+      return b;
+    };
     for (const q of g.store.getQuads(null, null, null, null)) {
       if (q.predicate.value === OWL_IMPORTS) continue;
       store.addQuad(DataFactory.quad(rename(q.subject) as any, q.predicate, rename(q.object) as any));
     }
   };
-  add(root, undefined);
-  imported.forEach((r, i) => add(r.graph, `imp${i}`));
+  add(root);
+  imported.forEach((r) => add(r.graph));
   // Only the root keeps its header. An imported ontology's header and its annotations go:
   // sparq rejects a graph with more than one owl:Ontology.
   for (const h of headers) {

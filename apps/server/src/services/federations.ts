@@ -21,6 +21,7 @@ import { closureFingerprint, hostedImportClosure } from './importClosure.js';
 import { findProject, getProject, rolesFor, updateProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 import { findFork, listForks } from './forks.js';
+import { isHeld } from '../public/holds.js';
 
 /** Members a federation may have: each one is reasoned over alone and, for blame, in pairs. */
 export const MAX_MEMBERS = 12;
@@ -45,6 +46,8 @@ const newestFirst = (vs: string[]) => [...vs].sort((a, b) => {
   return 0;
 });
 
+const heldName = (title: string, version: string) => (version === 'draft' ? `${title}'s working draft` : `${title} ${version}`);
+
 const canEdit = (f: Federation, user?: User) => !!user && (user.isPlatformAdmin || f.ownerIds.includes(user.id));
 
 async function checkMembers(input: unknown): Promise<FederationMember[]> {
@@ -60,7 +63,11 @@ async function checkMembers(input: unknown): Promise<FederationMember[]> {
     if (version.startsWith('fork:')) {
       // An ontology's development fork, for trying a change in the federation before proposing it.
       if (!(await findFork(version.slice('fork:'.length), project))) throw new HttpError(400, `${project.title} has no fork “${version.slice('fork:'.length)}”`);
-    } else if (version !== 'draft' && !(await ontologyStore.versions(project)).includes(version)) throw new HttpError(400, `${project.title} has no release ${version}`);
+    } else {
+      if (version !== 'draft' && !(await ontologyStore.versions(project)).includes(version)) throw new HttpError(400, `${project.title} has no release ${version}`);
+      // A version waiting for a steward's approval isn't public, so it can't be read into a federation (as with imports).
+      if (await isHeld(project, version)) throw new HttpError(400, `${heldName(project.title, version)} is being reviewed before it is published`);
+    }
     out.push({ ontologyId: project.id, version });
   }
   return out;
@@ -181,38 +188,75 @@ export async function setCommitment(project: OntologyProject, f: Federation, com
   await updateProject({ ...p, committedFederations: [...set] });
 }); }
 
-/** A member's graph and import closure. `override` replaces one ontology's working draft (a proposed change). */
+/**
+ * A member's graph and import closure. `override` replaces one ontology's working draft (a proposed
+ * change): for the member itself and wherever another member's imports load that draft.
+ */
 async function memberInputs(f: Federation, override?: { ontologyId: string; graph: OntologyGraph }): Promise<{ inputs: FederationMemberInput[]; key: string }> {
   const inputs: FederationMemberInput[] = [];
   const parts: string[] = [];
+  const proposedRevision = override ? `proposed:${createHash('sha256').update(await override.graph.toTurtle()).digest('hex').slice(0, 16)}` : '';
   for (const m of f.members) {
     const p = await getProject(m.ontologyId);
     const overridden = override && override.ontologyId === p.id && m.version === 'draft';
-    const fork = m.version.startsWith('fork:') ? await findFork(m.version.slice('fork:'.length), p) : undefined;
-    if (m.version.startsWith('fork:') && !fork) throw new HttpError(409, `${p.title}'s fork “${m.version.slice('fork:'.length)}” no longer exists`);
-    const graph = overridden ? override.graph : fork ? await ontologyStore.graphAt(p, fork.head) : await ontologyStore.at(p, m.version === 'draft' ? 'working' : m.version);
-    const closure = await hostedImportClosure(graph);
+    let graph: OntologyGraph;
+    let revision: string;
+    if (overridden) {
+      graph = override.graph;
+      revision = proposedRevision;
+    } else if (m.version.startsWith('fork:')) {
+      const fork = await findFork(m.version.slice('fork:'.length), p);
+      if (!fork) throw new HttpError(409, `${p.title}'s fork “${m.version.slice('fork:'.length)}” no longer exists`);
+      const head = fork.head;
+      graph = await ontologyStore.graphAt(p, head);
+      revision = head;
+    } else {
+      // Held versions aren't public: never read one into a check (its results, comparisons and upstream
+      // proposals are shown to others), as the import resolver never loads one.
+      if (await isHeld(p, m.version)) throw new HttpError(409, `${heldName(p.title, m.version)} is being reviewed before it is published`);
+      if (m.version === 'draft') {
+        // The graph and the revision it is at, read together, so a cached result always names what was checked.
+        const w = await ontologyStore.workingAt(p);
+        graph = w.graph;
+        revision = w.head;
+      } else {
+        graph = await ontologyStore.at(p, m.version);
+        revision = m.version;
+      }
+    }
+    let closure = await hostedImportClosure(graph);
+    if (override && closure.imported.some((r) => r.ontologyId === override.ontologyId && r.version === 'draft'))
+      closure = { ...closure, imported: closure.imported.map((r) => (r.ontologyId === override.ontologyId && r.version === 'draft' ? { ...r, graph: override.graph, revision: proposedRevision } : r)) };
     inputs.push({ id: p.id, title: p.title, version: m.version, graph, closure });
-    const revision = overridden ? `proposed:${createHash('sha256').update(await graph.toTurtle()).digest('hex').slice(0, 16)}` : fork ? `fork@${fork.head}` : m.version === 'draft' ? `draft@${await ontologyStore.head(p)}` : m.version;
-    parts.push(`${p.id}@${revision}[${closureFingerprint(closure)}]`);
+    // The member's version (which fork, say) and the exact content it was at.
+    parts.push(`${p.id}@${m.version}@${revision}[${closureFingerprint(closure)}]`);
   }
   return { inputs, key: `${f.id}:${parts.join(';')}` };
 }
 
 const checkCache = new Map<string, Promise<FederationCheck>>();
 
-/** The federation's check, as its members stand now (or with one ontology's draft replaced). Cached by exactly what was loaded. */
-export async function checkFederationNow(f: Federation, override?: { ontologyId: string; graph: OntologyGraph }): Promise<FederationCheck> {
-  const { inputs, key } = await memberInputs(f, override);
+/** A check the reasoner couldn't finish (unavailable, out of budget) is worth trying again, so it isn't kept. */
+const unfinished = (c: FederationCheck) => c.joint.checked === 'none' || c.members.some((m) => m.checked === 'none');
+
+/** Checks federation `iri` over exactly these inputs, cached by `key` (what was loaded). */
+export function checkInputs(iri: string, inputs: FederationMemberInput[], key: string): Promise<FederationCheck> {
   let p = checkCache.get(key);
   if (!p) {
-    p = checkFederation(federationIRI(f.slug), inputs, reasonInWorker, { now: () => clock.iso() });
+    p = checkFederation(iri, inputs, reasonInWorker, { now: () => clock.iso() });
     checkCache.set(key, p);
-    p.catch(() => checkCache.delete(key));
+    const forget = () => (checkCache.get(key) === p ? checkCache.delete(key) : undefined);
+    p.then((c) => (unfinished(c) ? forget() : undefined), forget);
     // Keep the cache small: proposed changes each add an entry.
     if (checkCache.size > 200) checkCache.delete(checkCache.keys().next().value!);
   }
   return p;
+}
+
+/** The federation's check, as its members stand now (or with one ontology's draft replaced). Cached by exactly what was loaded. */
+export async function checkFederationNow(f: Federation, override?: { ontologyId: string; graph: OntologyGraph }): Promise<FederationCheck> {
+  const { inputs, key } = await memberInputs(f, override);
+  return checkInputs(federationIRI(f.slug), inputs, key);
 }
 
 /**
@@ -220,8 +264,10 @@ export async function checkFederationNow(f: Federation, override?: { ontologyId:
  * draft. Federations that pin a release aren't affected until someone moves them to a new one.
  */
 export async function federationImpact(project: OntologyProject, after: OntologyGraph): Promise<FederationImpact[]> {
-  const following = (await federationsOf(project.id)).filter((f) => f.members.some((m) => m.ontologyId === project.id && m.version === 'draft')).slice(0, MAX_IMPACT);
   const committed = new Set((await getProject(project.id)).committedFederations ?? []);
+  const all = (await federationsOf(project.id)).filter((f) => f.members.some((m) => m.ontologyId === project.id && m.version === 'draft'));
+  // Every federation the ontology is committed to is checked; the advisory ones only up to a limit.
+  const following = [...all.filter((f) => committed.has(f.id)), ...all.filter((f) => !committed.has(f.id)).slice(0, MAX_IMPACT)];
   const out: FederationImpact[] = [];
   for (const f of following) {
     try {
@@ -237,7 +283,12 @@ export async function federationImpact(project: OntologyProject, after: Ontology
         passedAfter: next.passed,
         newlyUnsatisfiable: next.joint.unsatisfiable.map((u) => u.iri).filter((c) => !was.has(c)),
         becomesInconsistent: before.joint.consistent && !next.joint.consistent,
-        ...(next.joint.checked === 'none' ? { error: next.joint.error ?? 'the reasoner gave no verdict' } : {}),
+        // An import Concord can't load means the check left part of the federation out: it can't vouch for it.
+        ...(next.joint.checked === 'none'
+          ? { error: next.joint.error ?? 'the reasoner gave no verdict' }
+          : next.unresolved.length
+            ? { error: `it imports ${[...new Set(next.unresolved.map((u) => u.iri))].join(', ')}, which Concord can’t load, so it couldn’t be checked in full` }
+            : {}),
       });
     } catch (e) {
       out.push({ federationId: f.id, slug: f.slug, title: f.title, committed: committed.has(f.id), passedBefore: false, passedAfter: false, newlyUnsatisfiable: [], becomesInconsistent: false, error: (e as Error).message });
@@ -266,10 +317,12 @@ export async function compareFederations(a: Federation, b: Federation): Promise<
       const [ra, rb] = [await reasonInWorker(ua), await reasonInWorker(ub)];
       const r = await compareGraphs(ua, ub, { reasonerA: ra, reasonerB: rb });
       const ref = (x: Federation) => ({ id: x.id, slug: x.slug, title: x.title });
-      return { a: ref(a), b: ref(b), ...r };
+      // Without the reasoner, entailed superclasses are missing: tried again next time rather than kept.
+      return { a: ref(a), b: ref(b), ...r, ...(!ra.available || !rb.available ? { unfinished: true } : {}) };
     })();
     compareCache.set(key, p);
-    p.catch(() => compareCache.delete(key));
+    const forget = () => (compareCache.get(key) === p ? compareCache.delete(key) : undefined);
+    p.then((c) => (c.unfinished ? forget() : undefined), forget);
     if (compareCache.size > 50) compareCache.delete(compareCache.keys().next().value!);
   }
   return p;
@@ -369,7 +422,6 @@ export async function proposeUpstream(f: Federation, user: User | undefined, inp
   ].join('\n');
   const { createChangeRequest } = await import('./changeRequests.js');
   const { rolesFor: roles, setRoles } = await import('./ontologies.js');
-  if (!(await roles(target.id, user.id)).length) await setRoles(target.id, user.id, ['contributor']);
   const cr = await createChangeRequest(target, user, {
     title: input.title?.trim() || `Adopt ${plan.ops.length === 1 ? 'a term' : `${plan.ops.length} terms`} from ${fed.title}`,
     description: [input.description?.trim(), evidence].filter(Boolean).join('\n\n'),
@@ -378,6 +430,10 @@ export async function proposeUpstream(f: Federation, user: User | undefined, inp
     ops: plan.ops,
     warnings: plan.warnings,
   });
+  // The same rule as any change request (POST /ontologies/:id/change-requests): whoever proposes a change
+  // to an ontology they have no role in becomes a contributor, which lets them follow and discuss it. It
+  // gives no say over the change; the ontology's own governance decides it. Only once the request exists.
+  if (!(await roles(target.id, user.id)).length) await setRoles(target.id, user.id, ['contributor']);
   await transaction(async () => {
     const now = await findFederation(fed.id);
     await put('federations', { ...now, upstream: [...(now.upstream ?? []), { changeRequestId: cr.id, ontologyId: target.id, mapping: plan.mapping, by: user.id, at: clock.iso() }], updatedAt: clock.iso() });

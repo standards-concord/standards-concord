@@ -2,20 +2,21 @@
  * Federation releases: snapshots that pin every member of a federation, and everything the members
  * import, to a released version and its RDFC-1.0 content hash (computed by sparq's Rust engine), plus
  * the hash of the SHACL shapes derived from the members' OWL. A release is published as an OWL
- * ontology at /def/fed/<slug>/<version> that imports each member's version IRI; it never changes.
+ * ontology at /def/fed/<slug>/<version> that imports its frozen closure (/closure: every pinned graph,
+ * merged, as checked) and lists the pins; it never changes.
  *
  * A federation can be released only when it would pin exactly what it checked: every member at a
  * release (not a working draft), nothing imported that Concord can't pin, and the members usable together.
  */
 import { Store } from 'n3';
-import { deriveShapes, fedVersionIRI, manifestGraph, OntologyGraph, rdfcHash, shaclStore, suggestFederationVersion, unionGraph, type FederationPin } from '@concord/core';
+import { deriveShapes, federationUnion, fedVersionIRI, manifestGraph, OntologyGraph, rdfcHash, shaclStore, suggestFederationVersion, unionGraph, type FederationMemberInput, type FederationPin } from '@concord/core';
 import type { Federation, FederationRelease, FederationReleasePlan, User } from '@concord/shared';
 import { clock } from '../clock.js';
 import { HttpError, list, put, transaction } from '../db.js';
 import { newId } from '../ids.js';
 import { isHeld } from '../public/holds.js';
-import { checkFederationNow, federationIRI, findFederation } from './federations.js';
-import { hostedImportClosure } from './importClosure.js';
+import { checkInputs, federationIRI, findFederation } from './federations.js';
+import { closureFingerprint, hostedImportClosure } from './importClosure.js';
 import { getProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
 
@@ -49,12 +50,18 @@ export async function findFederationRelease(f: Federation, version: string | und
 }
 
 
-/** What a release would pin now, what stands in the way, and the version it should take. */
-export async function releasePlan(f: Federation): Promise<FederationReleasePlan & { memberUnions: OntologyGraph[] }> {
+/**
+ * What a release would pin now, what stands in the way, and the version it should take. The check runs
+ * over the very graphs that are pinned and hashed here (`inputs`), so a release never vouches for
+ * different content from what it publishes.
+ */
+export async function releasePlan(f: Federation): Promise<FederationReleasePlan & { memberUnions: OntologyGraph[]; inputs: FederationMemberInput[] }> {
   const blockers: string[] = [];
   const pins: FederationPin[] = [];
   /** Each member with everything it imports, under its own header (so its shapes are derived for its own namespace). */
   const memberUnions: OntologyGraph[] = [];
+  const inputs: FederationMemberInput[] = [];
+  const keys: string[] = [];
   const seen = new Set<string>();
   if (!f.members.length) blockers.push('Add at least one ontology first.');
   for (const m of f.members) {
@@ -63,11 +70,17 @@ export async function releasePlan(f: Federation): Promise<FederationReleasePlan 
       blockers.push(m.version === 'draft' ? `${p.title} follows its working draft: pick one of its releases to pin.` : `${p.title} is a development fork: pick one of its releases to pin.`);
       continue;
     }
-    if (await isHeld(p, m.version)) blockers.push(`${p.title} ${m.version} is being reviewed before it is published.`);
+    // A held version isn't public: it is never read, let alone hashed.
+    if (await isHeld(p, m.version)) {
+      blockers.push(`${p.title} ${m.version} is being reviewed before it is published.`);
+      continue;
+    }
     const graph = await ontologyStore.at(p, m.version);
     seen.add(`${p.id}@${m.version}`);
     pins.push({ role: 'member', ontologyId: p.id, title: p.title, ontologyIRI: p.ontologyIRI, version: m.version, versionIRI: versionIRIOf(p.ontologyIRI, m.version), hash: await hashOf(`${p.id}@${m.version}`, async () => graph) });
     const closure = await hostedImportClosure(graph);
+    inputs.push({ id: p.id, title: p.title, version: m.version, graph, closure });
+    keys.push(`${p.id}@${m.version}[${closureFingerprint(closure)}]`);
     memberUnions.push(unionGraph(graph, closure.imported));
     for (const u of closure.unresolved) blockers.push(`${p.title} imports ${u.iri}, which Concord ${u.reason === 'held' ? 'is still reviewing' : "doesn't host"}, so it can't be pinned.`);
     for (const r of closure.imported) {
@@ -83,11 +96,11 @@ export async function releasePlan(f: Federation): Promise<FederationReleasePlan 
     }
   }
   if (!blockers.length) {
-    const check = await checkFederationNow(f);
+    const check = await checkInputs(federationIRI(f.slug), inputs, `${f.id}:release:${keys.join(';')}`);
     if (!check.passed) blockers.push('Its ontologies can’t be used together yet: see “Used together”.');
   }
   const latest = (await listFederationReleases(f.id))[0];
-  return { ready: blockers.length === 0, blockers, suggested: suggestFederationVersion(latest, pins), pins, memberUnions };
+  return { ready: blockers.length === 0, blockers, suggested: suggestFederationVersion(latest, pins), pins, memberUnions, inputs };
 }
 
 export async function publishFederationRelease(f: Federation, user: User | undefined, input: { version?: string; notes?: string }): Promise<FederationRelease> {
@@ -108,7 +121,22 @@ export async function publishFederationRelease(f: Federation, user: User | undef
   const shapes = new OntologyGraph(shapesStore, { sh: 'http://www.w3.org/ns/shacl#', xsd: 'http://www.w3.org/2001/XMLSchema#' });
   const shapesHash = await rdfcHash(shapes);
   const iri = federationIRI(fed.slug);
-  const manifest = manifestGraph({ iri, version, title: fed.title, description: fed.description || undefined, issued: clock.iso(), previousVersion: latest?.version, pins: plan.pins, shapes: { iri: `${fedVersionIRI(iri, version)}/shapes`, hash: shapesHash } });
+  // The frozen closure: every pinned graph merged, exactly as it was checked, under its own header and
+  // with no owl:imports, so importing it loads the pinned content and nothing else.
+  const closureIRI = `${fedVersionIRI(iri, version)}/closure`;
+  const closure = federationUnion(closureIRI, plan.inputs);
+  const closureHash = await rdfcHash(closure);
+  const manifest = manifestGraph({
+    iri,
+    version,
+    title: fed.title,
+    description: fed.description || undefined,
+    issued: clock.iso(),
+    previousVersion: latest?.version,
+    pins: plan.pins,
+    shapes: { iri: `${fedVersionIRI(iri, version)}/shapes`, hash: shapesHash },
+    closure: { iri: closureIRI, hash: closureHash },
+  });
   return transaction(async () => {
     if ((await listFederationReleases(fed.id)).some((r) => r.version === version)) throw new HttpError(409, `${version} is already released`);
     const release: FederationRelease = {
@@ -118,12 +146,14 @@ export async function publishFederationRelease(f: Federation, user: User | undef
       notes: input.notes?.trim() ?? '',
       pins: plan.pins,
       shapesHash,
+      closureHash,
       hash: await rdfcHash(manifest),
       ...(latest ? { previousVersion: latest.version } : {}),
       publishedAt: clock.iso(),
       publishedBy: user.id,
       manifest: await manifest.toTurtle(),
       shapes: await shapes.toTurtle(),
+      closure: await closure.toTurtle(),
     };
     return await put('federationReleases', release, fed.id);
   });
@@ -131,8 +161,8 @@ export async function publishFederationRelease(f: Federation, user: User | undef
 
 /** For the API: a plan without the loaded graphs. */
 export async function releasePlanOut(f: Federation): Promise<FederationReleasePlan> {
-  const { memberUnions: _unions, ...plan } = await releasePlan(f);
+  const { memberUnions: _unions, inputs: _inputs, ...plan } = await releasePlan(f);
   return plan;
 }
 
-export const releaseOut = ({ manifest: _m, shapes: _s, ...r }: FederationRelease) => r;
+export const releaseOut = ({ manifest: _m, shapes: _s, closure: _c, ...r }: FederationRelease) => r;

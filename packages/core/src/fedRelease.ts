@@ -1,9 +1,14 @@
 /**
  * A federation release: a snapshot that pins every ontology in a federation, members and everything
  * they import, to a released version and its RDFC-1.0 content hash, together with the hash of the
- * SHACL shapes derived from the members' OWL. It is published as an OWL ontology that imports each
- * member's version IRI, so any OWL tool can load the federation as one ontology; the pins use the SPDX
+ * SHACL shapes derived from the members' OWL. It is published as an OWL ontology; the pins use the SPDX
  * checksum vocabulary, and owl:priorVersion links releases into a chain.
+ *
+ * The manifest owl:imports one thing: the release's frozen closure, every pinned graph merged as it was
+ * checked, with no owl:imports of its own. Importing the members' version IRIs instead would not freeze
+ * anything: a member that imports an ontology without naming a version would get whatever that ontology
+ * is when the tool loads it. So any OWL tool that imports the manifest loads exactly the pinned content,
+ * and the pins say what it is made of (dcterms:hasPart for members, dcterms:requires for their imports).
  */
 import { DataFactory, Store, type Quad_Object, type Quad_Subject } from 'n3';
 import { OntologyGraph } from './graph.js';
@@ -26,6 +31,8 @@ export interface ManifestInput {
   pins: FederationPin[];
   /** Where the derived shapes are published, and their hash. */
   shapes: { iri: string; hash: string };
+  /** Where the frozen closure (every pinned graph, merged) is published, and its hash. */
+  closure: { iri: string; hash: string };
 }
 
 export const fedVersionIRI = (iri: string, version: string) => `${iri.replace(/[#/]+$/, '')}/${version}`;
@@ -51,12 +58,14 @@ export function manifestGraph(m: ManifestInput): OntologyGraph {
   if (m.previousVersion) add(fed, NS.owl + 'priorVersion', nn(fedVersionIRI(m.iri, m.previousVersion)));
   for (const p of m.pins) {
     const v = nn(p.versionIRI);
-    add(fed, p.role === 'member' ? NS.owl + 'imports' : NS.dcterms + 'requires', v);
+    add(fed, p.role === 'member' ? NS.dcterms + 'hasPart' : NS.dcterms + 'requires', v);
     add(v, NS.dcterms + 'isVersionOf', nn(p.ontologyIRI));
     add(v, NS.owl + 'versionInfo', literal(p.version));
     add(v, NS.dcterms + 'title', literal(p.title, 'en'));
     checksum(p.versionIRI, p.hash);
   }
+  add(fed, NS.owl + 'imports', nn(m.closure.iri));
+  checksum(m.closure.iri, m.closure.hash);
   add(fed, NS.sh + 'shapesGraph', nn(m.shapes.iri));
   checksum(m.shapes.iri, m.shapes.hash);
   return new OntologyGraph(s, { owl: NS.owl, dcterms: NS.dcterms, sh: NS.sh, spdx: SPDX, xsd: NS.xsd });

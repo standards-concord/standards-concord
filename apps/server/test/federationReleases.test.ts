@@ -53,7 +53,9 @@ describe('federation releases', () => {
     expect(latest.type).toBe('text/turtle');
     const manifest = await OntologyGraph.fromTurtle(latest.text);
     expect(manifest.ontologyIRI).toBe(`${config.publicUrl}/def/fed/${fed.slug}`);
-    expect(manifest.metadata().imports).toEqual(['https://w3id.org/odi/volunteering/1.0.0']);
+    // It imports only the frozen closure (every pinned graph merged as checked), and lists the pinned member.
+    expect(manifest.metadata().imports).toEqual([`${config.publicUrl}/def/fed/${fed.slug}/1.0.0/closure`]);
+    expect(latest.text).toContain('dcterms:hasPart <https://w3id.org/odi/volunteering/1.0.0>');
     expect(latest.text).toContain(volHash.slice('sha256:'.length));
     expect(await rdfcHash(manifest)).toBe(rel.body.hash);
     expect((await request(app).get(`/def/fed/${fed.slug}/1.0.0`)).text).toBe(latest.text);
@@ -62,6 +64,15 @@ describe('federation releases', () => {
     expect(await rdfcHash(await OntologyGraph.fromTurtle(shapes.text))).toBe(rel.body.shapesHash);
     // Derived from the member's OWL: a node shape for each of its classes.
     expect(shapes.text).toMatch(/sh:targetClass <https:\/\/w3id\.org\/odi\/volunteering#Person>/);
+    // Review r1: importing members' version IRIs didn't freeze what they import without a version. The
+    // closure is the frozen content: no owl:imports, the member's terms, and the hash the manifest pins.
+    const closure = await request(app).get(`/def/fed/${fed.slug}/1.0.0/closure`);
+    expect(closure.status).toBe(200);
+    const frozen = await OntologyGraph.fromTurtle(closure.text);
+    expect(frozen.metadata().imports).toEqual([]);
+    expect(frozen.isDeclared('https://w3id.org/odi/volunteering#Person')).toBe(true);
+    expect(await rdfcHash(frozen)).toBe(rel.body.closureHash);
+    expect(latest.text).toContain(rel.body.closureHash.slice('sha256:'.length));
     expect((await request(app).get(`/def/fed/${fed.slug}/9.9.9`)).status).toBe(404);
 
     // The next release: nothing moved, so a patch, and it must come after 1.0.0.

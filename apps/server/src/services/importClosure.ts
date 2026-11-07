@@ -43,10 +43,14 @@ export function hostedImportResolver(projects: OntologyProject[]): ImportResolve
     if (version === undefined) version = (await latestVersion(project)) ?? 'draft';
     else if (version !== 'draft' && !(await ontologyStore.versions(project)).includes(version)) return null;
     if (await isHeld(project, version)) return { unresolved: 'held' };
-    const graph: OntologyGraph = await ontologyStore.at(project, version === 'draft' ? 'working' : version);
-    // A release never changes; the draft is named by its revision.
-    const revision = version === 'draft' ? `draft@${await ontologyStore.head(project)}` : version;
-    return { iri, graph, title: project.title, version, ontologyId: project.id, revision };
+    // A release never changes; the draft is named by its revision, read together with its graph so the
+    // revision always names exactly what was loaded.
+    if (version === 'draft') {
+      const { graph, head } = await ontologyStore.workingAt(project);
+      return { iri, graph, title: project.title, version, ontologyId: project.id, revision: `draft@${head}` };
+    }
+    const graph: OntologyGraph = await ontologyStore.at(project, version);
+    return { iri, graph, title: project.title, version, ontologyId: project.id, revision: version };
   };
 }
 

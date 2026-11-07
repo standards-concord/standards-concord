@@ -3,7 +3,7 @@
  * other, and up to which terms they agree.
  *
  * Each term both define is put in one relation, judged from B's side:
- *   same       everything said about it is identical (equal term hashes);
+ *   same       everything said about it is identical (equal term hashes and the same entailed facts);
  *   equivalent the same meaning said differently: other labels or notes, or a restated hierarchy;
  *   tightened  B says everything A says about it, and more (B's meaning is narrower: a safe refinement);
  *   loosened   A says everything B says, and more;
@@ -121,8 +121,10 @@ export async function compareGraphs(a: OntologyGraph, b: OntologyGraph, opts: { 
     }
     const onlyInB = [...y.logical].filter((f) => !x.logical.has(f)).sort();
     const onlyInA = [...x.logical].filter((f) => !y.logical.has(f)).sort();
+    // "Same" needs the same statements AND the same logical facts: an unchanged term whose superclass
+    // gained or lost a superclass has a different entailed closure, so it is at most equivalent in wording.
     const relation: TermRelation =
-      x.hash === y.hash ? 'same' : !onlyInA.length && !onlyInB.length ? 'equivalent' : !onlyInA.length ? 'tightened' : !onlyInB.length ? 'loosened' : 'conflict';
+      onlyInA.length && onlyInB.length ? 'conflict' : onlyInA.length ? 'loosened' : onlyInB.length ? 'tightened' : x.hash === y.hash ? 'same' : 'equivalent';
     terms.push({ iri, kind: y.kind, label: y.label ?? x.label, relation, onlyInB: onlyInB.map(pretty), onlyInA: onlyInA.map(pretty) });
   }
   for (const [iri, y] of fb) if (!fa.has(iri)) terms.push({ iri, kind: y.kind, label: y.label, relation: 'only-b', onlyInB: [], onlyInA: [] });

@@ -53,4 +53,15 @@ describe('comparing two federations term by term', () => {
     const r = await compareGraphs(a, b);
     expect(r.terms.find((t) => t.iri.endsWith('#Charity'))?.relation).toBe('equivalent');
   });
+
+  // Review r1: equal term hashes overrode a change in entailed facts, so a class whose superclass gained
+  // a superclass was still called "the same".
+  it('does not call a term the same when what it entails has changed', async () => {
+    const a = await OntologyGraph.fromTurtle(`${H}\n:Top a owl:Class . :Mid a owl:Class . :Leaf a owl:Class ; rdfs:subClassOf :Mid .`);
+    const b = await OntologyGraph.fromTurtle(`${H}\n:Top a owl:Class . :Mid a owl:Class ; rdfs:subClassOf :Top . :Leaf a owl:Class ; rdfs:subClassOf :Mid .`);
+    const r = await compareGraphs(a, b, { reasonerA: await owlReasoner(a), reasonerB: await owlReasoner(b) });
+    const leaf = r.terms.find((t) => t.iri.endsWith('#Leaf'))!;
+    expect(leaf.relation).toBe('tightened');
+    expect(leaf.onlyInB).toEqual(['subClassOf Top']);
+  });
 });

@@ -132,14 +132,19 @@ test.describe('federations', () => {
     await expect(list).toContainText('First pinned set');
     await expect(list).toContainText(`${demo.title} 1.0.0`);
 
-    // The manifest is public Turtle: an ontology that imports the pinned version, with its hash.
+    // The manifest is public Turtle: an ontology that imports the frozen closure, listing the pinned version and its hash.
     const manifest = await request.get(`/def/fed/${slug}/1.0.0`);
     expect(manifest.status()).toBe(200);
     expect(manifest.headers()['content-type']).toContain('text/turtle');
     const ttl = await manifest.text();
-    expect(ttl).toContain('owl:imports <https://w3id.org/odi/volunteering/1.0.0>');
+    expect(ttl).toMatch(new RegExp(`owl:imports <[^>]*/def/fed/${slug}/1\\.0\\.0/closure>`));
+    expect(ttl).toContain('dcterms:hasPart <https://w3id.org/odi/volunteering/1.0.0>');
     expect(ttl).toMatch(/spdx:checksumValue "[0-9a-f]{64}"/);
     expect((await request.get(`/def/fed/${slug}/1.0.0/shapes`)).status()).toBe(200);
+    await expect(list.getByRole('link', { name: 'frozen closure' })).toHaveAttribute('href', `/def/fed/${slug}/1.0.0/closure`);
+    const closure = await request.get(`/def/fed/${slug}/1.0.0/closure`);
+    expect(closure.status()).toBe(200);
+    expect(await closure.text()).not.toContain('owl:imports');
 
     // Someone else sees the releases but can't publish one.
     await signIn(page, { name: `Release reader ${uniq()}`, role: 'contributor' });

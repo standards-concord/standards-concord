@@ -27,7 +27,9 @@ describe('federation releases', () => {
     expect(suggestFederationVersion(prev, [pin('a', '1.0.0')])).toMatchObject({ version: '2.0.0', level: 'major', reasons: ['removed b'] });
   });
 
-  it('publishes the manifest as one OWL ontology that imports each member version and pins every hash', async () => {
+  // Review r1: the manifest owl:imported each member's version IRI, which doesn't freeze what a member
+  // imports without naming a version. It now imports only the frozen closure, and lists the pins.
+  it('publishes the manifest as one OWL ontology that imports only the frozen closure and pins every hash', async () => {
     const g = manifestGraph({
       iri: 'https://concord.example/def/fed/uk',
       version: '1.0.0',
@@ -39,10 +41,14 @@ describe('federation releases', () => {
         { role: 'import', title: 'Base', ontologyIRI: 'https://ex.org/base', version: '1.0.0', versionIRI: 'https://ex.org/base/1.0.0', hash: 'sha256:' + 'b'.repeat(64) },
       ],
       shapes: { iri: 'https://concord.example/def/fed/uk/1.0.0/shapes', hash: 'sha256:' + 'c'.repeat(64) },
+      closure: { iri: 'https://concord.example/def/fed/uk/1.0.0/closure', hash: 'sha256:' + 'd'.repeat(64) },
     });
     const ttl = await g.toTurtle();
     expect(g.ontologyIRI).toBe('https://concord.example/def/fed/uk');
-    expect(g.metadata().imports).toEqual(['https://ex.org/gov/2.0.0']);
+    expect(g.metadata().imports).toEqual(['https://concord.example/def/fed/uk/1.0.0/closure']);
+    expect(ttl).toContain('dcterms:hasPart <https://ex.org/gov/2.0.0>');
+    expect(ttl).toContain('dcterms:requires <https://ex.org/base/1.0.0>');
+    expect(ttl).toContain('d'.repeat(64));
     expect(ttl).toContain('owl:priorVersion <https://concord.example/def/fed/uk/0.9.0>');
     expect(ttl).toContain('a'.repeat(64));
     expect(ttl).toContain('b'.repeat(64));

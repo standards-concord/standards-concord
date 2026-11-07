@@ -565,20 +565,22 @@ export async function sendFormat(req: Request, res: Response, o: SendFormatOptio
 
 export function publicRouter(): Router {
   const r = Router();
-  // Federation releases (manifest and derived shapes), before the ontology route so /def/fed/... isn't read as an ontology called "fed".
+  // Federation releases (manifest, derived shapes and frozen closure), before the ontology route so /def/fed/... isn't read as an ontology called "fed".
   r.get(`${PUBLIC_BASE}/fed/:slug{/:version}{/:part}`, async (req, res, next) => {
     try {
       const { findFederation } = await import('../services/federations.js');
       const { findFederationRelease } = await import('../services/federationReleases.js');
       const f = await findFederation(String(req.params.slug));
       const part = req.params.part;
-      if (part !== undefined && part !== 'shapes') throw new HttpError(404, 'Not found');
+      if (part !== undefined && part !== 'shapes' && part !== 'closure') throw new HttpError(404, 'Not found');
       const release = await findFederationRelease(f, req.params.version);
       if (!release) throw new HttpError(404, req.params.version ? `${f.title} has no release ${req.params.version}` : `${f.title} has no release yet`);
       res.type('text/turtle; charset=utf-8');
       res.set('Cache-Control', req.params.version ? 'public, max-age=86400, immutable' : 'public, max-age=300');
-      res.set('Content-Disposition', `inline; filename="${f.slug}-${release.version}${part ? '-shapes' : ''}.ttl"`);
-      res.send(part ? release.shapes : release.manifest);
+      const body = part === 'shapes' ? release.shapes : part === 'closure' ? release.closure : release.manifest;
+      if (body === undefined) throw new HttpError(404, `${f.title} ${release.version} has no frozen closure`);
+      res.set('Content-Disposition', `inline; filename="${f.slug}-${release.version}${part ? `-${part}` : ''}.ttl"`);
+      res.send(body);
     } catch (err) {
       next(err);
     }

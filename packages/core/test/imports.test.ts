@@ -78,4 +78,25 @@ describe('checking an ontology with its imports', () => {
     expect(u.store.countQuads(null, 'http://www.w3.org/2002/07/owl#imports', null, null)).toBe(0);
     expect(u.isDeclared('https://ex.org/base#Organisation')).toBe(true);
   });
+
+  // Review r1: the root kept its blank node labels while imports got "imp<i>_" prefixes, so a root node
+  // labelled _:imp0_x and the first import's _:x became one node, merging unrelated restrictions.
+  it('keeps every input’s blank nodes apart, whatever labels they use', async () => {
+    const H = '@prefix owl: <http://www.w3.org/2002/07/owl#> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .';
+    const root = await OntologyGraph.fromTurtle(`${H} <https://ex.org/a> a owl:Ontology . <https://ex.org/a#C> a owl:Class ; rdfs:subClassOf _:imp0_x . _:imp0_x a owl:Restriction ; owl:onProperty <https://ex.org/a#p> ; owl:someValuesFrom owl:Thing .`);
+    const imp = await OntologyGraph.fromTurtle(`${H} <https://ex.org/b> a owl:Ontology . <https://ex.org/b#D> a owl:Class ; rdfs:subClassOf _:x . _:x a owl:Restriction ; owl:onProperty <https://ex.org/b#q> ; owl:allValuesFrom owl:Nothing .`);
+    // n3 relabels parsed blank nodes, so name them exactly as the review described.
+    const relabel = (g: OntologyGraph, from: (v: string) => boolean, to: string) => {
+      const s = new (g.store.constructor as any)();
+      for (const q of g.store.getQuads(null, null, null, null)) {
+        const f = (t: any) => (t.termType === 'BlankNode' && from(t.value) ? { termType: 'BlankNode', value: to, equals: (o: any) => o?.termType === 'BlankNode' && o.value === to } : t);
+        s.addQuad(f(q.subject), q.predicate, f(q.object));
+      }
+      return new OntologyGraph(s, {});
+    };
+    const u = unionGraph(relabel(root, () => true, 'imp0_x'), [{ graph: relabel(imp, () => true, 'x') }]);
+    const restrictions = u.store.getSubjects('http://www.w3.org/1999/02/22-rdf-syntax-ns#type', 'http://www.w3.org/2002/07/owl#Restriction', null);
+    expect(restrictions).toHaveLength(2);
+    for (const r of restrictions) expect(u.store.countQuads(r, 'http://www.w3.org/2002/07/owl#onProperty', null, null)).toBe(1);
+  });
 });

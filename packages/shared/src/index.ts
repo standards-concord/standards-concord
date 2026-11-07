@@ -273,14 +273,17 @@ export interface FederationRelease {
   notes: string;
   pins: FederationPin[];
   shapesHash: string;
+  /** The frozen closure's RDFC-1.0 hash: every pinned graph merged, exactly as checked. */
+  closureHash?: string;
   /** The manifest's own RDFC-1.0 hash. */
   hash: string;
   previousVersion?: string;
   publishedAt: string;
   publishedBy: string;
-  /** The manifest (Turtle) and derived shapes (Turtle), exactly as published. */
+  /** The manifest, derived shapes and frozen closure (Turtle), exactly as published. */
   manifest: string;
   shapes: string;
+  closure?: string;
 }
 
 /** Whether a federation can be released now, what is in the way, and the version it should take. */
@@ -300,6 +303,8 @@ export interface FederationComparison {
   counts: Record<'same' | 'equivalent' | 'tightened' | 'loosened' | 'conflict' | 'only-a' | 'only-b', number>;
   shared: number;
   agreeing: number;
+  /** The reasoner couldn't run on one side, so entailed superclasses are missing (not cached; try again). */
+  unfinished?: boolean;
 }
 
 export interface FederationDetail extends Federation {
@@ -1729,7 +1734,7 @@ export interface SessionInfo {
  *  GET  /api/federations/:fed/check                  -> FederationCheck
  *  GET  /api/federations/:fed/compare/:other         -> FederationComparison   (:fed compared with :other, term by term)
  *  GET  /api/federations/:fed/release-plan           -> FederationReleasePlan
- *  GET  /api/federations/:fed/releases               -> FederationRelease[] (without manifest and shapes)
+ *  GET  /api/federations/:fed/releases               -> FederationRelease[] (without manifest, shapes and closure)
  *  POST /api/federations/:fed/releases {version?, notes?} -> FederationRelease   (owners)
  *  GET  /def/fed/:slug[/:version[/shapes]]           -> text/turtle: the release manifest, or its derived SHACL (public)
  *  GET  /api/ontologies/:id/federations              -> (Federation & {committed})[]

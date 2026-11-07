@@ -56,4 +56,18 @@ p:Person a owl:Class . p:Organisation a owl:Class ; owl:disjointWith p:Person . 
     expect(r.joint.unsatisfiable).toEqual([{ iri: 'https://ex.org/broken#Both', member: 'broken', alone: true }]);
     expect(r.conflicts).toEqual([]);
   });
+
+  // Review r1: graphs were kept first-come per ontology version, so when member A imported B's draft and
+  // B (a proposed change to its draft) came later, the proposal was dropped and never checked.
+  it('checks a member’s own graph even when another member imports the same version first', async () => {
+    const importer = await member('a', `@prefix p: <https://ex.org/people#> . <https://ex.org/a> a owl:Ontology . <https://ex.org/a#X> a owl:Class .`);
+    const oldPeople = await OntologyGraph.fromTurtle(`${H} <https://ex.org/people> a owl:Ontology . <https://ex.org/people#Person> a owl:Class .`);
+    importer.closure = { imported: [{ iri: 'https://ex.org/people', graph: oldPeople, title: 'PEOPLE', version: 'draft', ontologyId: 'people', revision: 'old', via: 'https://ex.org/a' }], unresolved: [], direct: ['https://ex.org/people'] };
+    const proposed = await member('people', `@prefix p: <https://ex.org/people#> . <https://ex.org/people> a owl:Ontology .
+p:Person a owl:Class . p:Organisation a owl:Class ; owl:disjointWith p:Person . p:Both a owl:Class ; rdfs:subClassOf p:Person, p:Organisation .`);
+    proposed.version = 'draft';
+    const r = await checkFederation('urn:test:fed', [importer, proposed], owlReasoner);
+    expect(r.passed).toBe(false);
+    expect(r.joint.unsatisfiable.map((u) => u.iri)).toEqual(['https://ex.org/people#Both']);
+  });
 });
