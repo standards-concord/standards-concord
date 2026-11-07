@@ -200,7 +200,7 @@ export const solid = {
    * exactly what was kept (or, if nothing was there, only creates). Throws if the
    * pod can't say, so the caller writes nothing.
    */
-  async keepExisting(userId: string, relPath: string): Promise<WriteCondition> {
+  async keepExisting(userId: string, relPath: string, opts: { ours?: (bytes: Buffer) => boolean } = {}): Promise<WriteCondition & { existing?: Buffer }> {
     refuseWhenReadOnly(); // a pod or a private file, written before any database write
     const rec = await get<PodRecord>('kv', `pod:${userId}`);
     const asideName = (n: number) => relPath.replace(/(\.[^./]+)?$/, (ext) => `.previous-${Date.now()}-${n}${ext}`);
@@ -214,6 +214,8 @@ export const solid = {
       if (!etag) throw new Error(`GET ${url} gave no ETag, so it can't be replaced safely`);
       const type = res.headers.get('content-type') ?? 'application/octet-stream';
       const bytes = await res.arrayBuffer();
+      // Concord's own document (`ours`) isn't kept aside: the caller decides from it, and replaces exactly it.
+      if (opts.ours?.(Buffer.from(bytes))) return { ifMatch: etag, existing: Buffer.from(bytes) };
       for (let n = 0; ; n++) {
         if (n >= 5) throw new Error(`could not find a free name to keep ${url}`);
         try {
@@ -229,6 +231,7 @@ export const solid = {
     const store = privateStore();
     const bytes = await store.read(userId, relPath);
     if (!bytes) return { ifNoneMatch: '*' };
+    if (opts.ours?.(bytes)) return { ifMatch: localTag(bytes), existing: bytes };
     for (let n = 0; ; n++) {
       if (n >= 5) throw new Error(`could not find a free name to keep ${relPath}`);
       if (await store.createCopy(userId, asideName(n), bytes, relPath)) return { ifMatch: localTag(bytes) };

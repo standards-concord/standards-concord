@@ -242,8 +242,15 @@ async function mirrorNow(user: User): Promise<void> {
       // The first time, a document already at the record's path (one this server didn't write) is kept, byte for
       // byte, beside it, and the record only replaces exactly that version (or only creates, if nothing was there).
       // If the pod can't say, or the document changes in between, nothing is written and it's tried again later.
-      await solid.writeExisting(user.id, RECORD, body, 'application/ld+json', await solid.keepExisting(user.id, RECORD));
-      has = h.rev;
+      // A record another instance already copied there (it names its revision) isn't kept aside, and is only
+      // replaced by a newer revision: this instance may have read its history before that copy was made.
+      const when = await solid.keepExisting(user.id, RECORD, { ours: (b) => revisionOf(b) > 0 });
+      const there = when.existing ? revisionOf(when.existing) : 0;
+      if (there >= h.rev) has = there;
+      else {
+        await solid.writeExisting(user.id, RECORD, body, 'application/ld+json', { ifMatch: when.ifMatch, ifNoneMatch: when.ifNoneMatch });
+        has = h.rev;
+      }
     } else {
       for (let n = 0; n < MIRROR_TRIES && has === undefined; n++) {
         const now = await solid.readTagged(user.id, RECORD);

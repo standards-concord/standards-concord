@@ -281,6 +281,25 @@ describe('the pod mirror queue', () => {
     expect(me.podBehind).toBeUndefined();
   });
 
+  // Review r2 of step 5: the first copy still went through keepExisting alone. A server that read the history
+  // before another server made the first copy (a newer revision) then kept that copy aside and replaced it with its
+  // older revision, and the newer one was recorded as copied, so it was never repaired.
+  it('never puts its first copy over a newer one that another server made meanwhile', async () => {
+    const u = await tester('mirror-first-race');
+    const keep = solid.keepExisting.bind(solid);
+    vi.spyOn(solid, 'keepExisting').mockImplementationOnce(async (id, rel, opts) => {
+      // Between this server reading the history and looking at the pod, another server copies revision 7.
+      await solid.write(id, rel, JSON.stringify({ revision: 7, versions: [{ version: '0.9.0' }, { version: '0.8.0' }] }), 'application/ld+json');
+      return keep(id, rel, opts);
+    });
+    const me = await recordVersion(u, { version: '0.8.0' });
+    expect((await copy(u.id)).revision).toBe(7);
+    expect(me.podBehind).toBeUndefined();
+    // Concord's own record isn't kept aside as if it were someone else's document.
+    const dir = path.join(config.dataDir, 'private', u.id, 'alpha');
+    expect(fs.readdirSync(dir).filter((f) => f.includes('.previous-'))).toEqual([]);
+  });
+
   it('writes its revision again over an older one that a stalled server put back meanwhile', async () => {
     const u = await tester('mirror-older');
     await recordVersion(u, { version: '0.8.0' });
