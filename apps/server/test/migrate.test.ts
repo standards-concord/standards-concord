@@ -112,6 +112,60 @@ describe('moving a database to the database-backed ontology store', () => {
     await expect(verifyImport(source, config.dataDir)).resolves.toMatchObject({ id: IMPORT_MARKER });
   });
 
+  // Follow-up to step 5e: on the VM every account has a pod on the VM's own Solid server, and Concord keeps its private
+  // data there, not in the data directory. The import used to take only the data directory's files, so at cutover
+  // that data (use cases' private parts, transcripts, testing records) would have been left behind.
+  it('takes what Concord kept in the pods it made, from the Solid server’s data directory, and refuses without it', async () => {
+    const user = `mig-pod-${Date.now()}`;
+    const podRow: StoredRow = {
+      collection: 'kv',
+      id: `pod:${user}`,
+      data: JSON.stringify({ id: `pod:${user}`, podUrl: `https://pods.example.org/alice-${user.slice(-6)}/`, webId: 'https://pods.example.org/alice/profile/card#me', clientId: 'c', clientSecret: 's' }),
+      createdAt: new Date().toISOString(),
+    };
+    await source.putRows([podRow]);
+    const pods = fs.mkdtempSync(path.join(tmpdir(), 'concord-pods-'));
+    const kept = path.join(pods, `alice-${user.slice(-6)}`, 'concord');
+    const onDisk = path.join(config.dataDir, 'private', user);
+    try {
+      await copyDatabase(source);
+      // As the Community Solid Server's file backend keeps them: a name that doesn't give the type gets `$.<ext>`.
+      fs.mkdirSync(path.join(kept, 'interviews'), { recursive: true });
+      fs.mkdirSync(path.join(kept, 'alpha'), { recursive: true });
+      fs.writeFileSync(path.join(kept, 'interviews', 'i1.ttl'), '<urn:i> <urn:said> "in the pod" .\n');
+      fs.writeFileSync(path.join(kept, 'interviews', 'notes$.txt'), 'plain words');
+      fs.writeFileSync(path.join(kept, 'alpha', 'testing.jsonld'), '{"revision":3}');
+      // Access control and metadata aren't data.
+      for (const aux of ['.acl', '.meta', 'alpha/testing.jsonld.meta', 'interviews/.acl', 'interviews/i1.ttl.acl']) fs.writeFileSync(path.join(kept, aux), 'aux');
+      // A file kept on disk for the same path (a pod write that once failed) loses to the pod's, which was read first.
+      fs.mkdirSync(path.join(onDisk, 'interviews'), { recursive: true });
+      fs.writeFileSync(path.join(onDisk, 'interviews', 'i1.ttl'), 'older, on disk');
+
+      await expect(importPrivateFiles(config.dataDir)).rejects.toThrow(/1 account\(s\) have pods on the VM's Solid server: give its data directory \(--pods\)/);
+      await expect(verifyImport(source, config.dataDir)).rejects.toThrow(/--pods/);
+      expect((await importPrivateFiles(config.dataDir, pods)).files).toBe(3);
+      const row = async (rel: string) => Buffer.from(((await get<{ data: string }>('privateFiles', `${user}/${rel}`))?.data ?? ''), 'base64').toString('utf8');
+      expect(await row('interviews/i1.ttl')).toBe('<urn:i> <urn:said> "in the pod" .\n');
+      expect(await row('interviews/notes')).toBe('plain words');
+      expect(await row('alpha/testing.jsonld')).toBe('{"revision":3}');
+      await expect(verifyImport(source, config.dataDir, pods)).resolves.toMatchObject({ id: IMPORT_MARKER });
+
+      // A pod file that changed since is caught, and so is a pod the directory doesn't have.
+      fs.writeFileSync(path.join(kept, 'alpha', 'testing.jsonld'), '{"revision":4}');
+      await expect(verifyImport(source, config.dataDir, pods)).rejects.toThrow(`private file ${user}/alpha/testing.jsonld wasn't imported as it is on disk`);
+      const elsewhere = fs.mkdtempSync(path.join(tmpdir(), 'concord-pods-'));
+      await expect(importPrivateFiles(config.dataDir, elsewhere)).rejects.toThrow(`pod:${user}: its pod https://pods.example.org/alice-${user.slice(-6)}/ isn't in`);
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    } finally {
+      fs.rmSync(pods, { recursive: true, force: true });
+      fs.rmSync(onDisk, { recursive: true, force: true });
+      await source.remove('kv', podRow.id);
+      await (await rawStore()).remove('kv', podRow.id);
+      await importPrivateFiles(config.dataDir);
+    }
+    await expect(verifyImport(source, config.dataDir)).resolves.toMatchObject({ id: IMPORT_MARKER });
+  });
+
   it('refuses an import with a missing object, naming it and what needs it', async () => {
     const tree = (await readCommit(firstRelease)).tree;
     const saved = await get<object>('gitObjects', tree);
