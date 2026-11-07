@@ -13,6 +13,7 @@ import { validationRouter } from './public/validate.js';
 import { apiRouter } from './routes/api.js';
 import { mountGithubAppWebhook } from './routes/githubApp.js';
 import { forkResolver } from './routes/forkResolver.js';
+import { dailyCron, scheduleAfterRequests } from './services/scheduler.js';
 import { solid } from './services/solid.js';
 import { getUser } from './services/users.js';
 import { StoreBusyError } from './store/index.js';
@@ -31,6 +32,8 @@ export function createApp(): express.Express {
       res.setHeader('Retry-After', '300');
       res.status(503).json({ error: new ReadOnlyError().message });
     });
+  // Scheduled work on Vercel: due work is looked for after requests (services/scheduler.ts).
+  if (config.schedule === 'requests' && !config.readOnly) app.use(scheduleAfterRequests);
   app.use(sessionMiddleware);
 
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
@@ -56,6 +59,8 @@ export function createApp(): express.Express {
   app.use(oauthRoutes);
   app.all('/mcp', express.json({ limit: '5mb' }), mcpHandler);
   mountGithubAppWebhook(app);
+  // The daily Vercel Cron call: everything scheduled, due or not.
+  app.get('/api/cron/daily', dailyCron);
   app.use('/api', apiRouter());
   // Development forks, dereferenceable so applications can import them (/def/<ontology>/forks/<fork>).
   app.use(forkResolver());

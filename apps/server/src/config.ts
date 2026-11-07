@@ -50,6 +50,13 @@ export const config = {
    */
   readOnly: bool(process.env.CONCORD_READ_ONLY, false),
   /**
+   * How scheduled work is started (services/scheduler.ts): 'timer', a long-running server's own minute timer, or
+   * 'requests', after requests plus a daily cron call (Vercel, which has no long-running process).
+   */
+  schedule: (process.env.CONCORD_SCHEDULE ?? (process.env.VERCEL ? 'requests' : 'timer')) as 'timer' | 'requests',
+  /** Vercel Cron's bearer secret, for GET /api/cron/daily. Unset: the endpoint refuses every call. */
+  cronSecret: process.env.CRON_SECRET || undefined,
+  /**
    * Refuse to publish fork edits when the full OWL reasoner (sparq) gives no verdict (it timed
    * out, crashed, or can't decide the ontology), instead of falling back to the structural check.
    * On in production; off by default elsewhere.

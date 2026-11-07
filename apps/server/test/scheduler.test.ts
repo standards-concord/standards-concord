@@ -1,0 +1,149 @@
+import request from 'supertest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { config } from '../src/config.js';
+import { closeDb, openDb, remove } from '../src/db.js';
+import { kickScheduled, LEASE_MS, resetKick, runDue, scheduledIdle, useJobs, type ScheduledJob } from '../src/services/scheduler.js';
+
+/**
+ * Scheduled work without per-minute timers (issue #112): due work runs after requests, from a daily cron call, or
+ * from a long-running server's timer, one runner at a time across instances.
+ *
+ * With TEST_DATABASE_URL the lease is taken on a real Postgres pool, so racing runners use separate connections,
+ * as two function instances would.
+ */
+
+const pgUrl = process.env.TEST_DATABASE_URL;
+beforeAll(async () => {
+  if (pgUrl) await openDb({ kind: 'postgres', url: pgUrl, max: 4 });
+});
+afterAll(async () => {
+  if (pgUrl) await closeDb();
+});
+
+const counting = (name: string, every: number, run: () => Promise<unknown> = async () => undefined) => {
+  const job = { name, every, runs: 0, run: async () => (job.runs++, await run()) };
+  return job satisfies ScheduledJob;
+};
+let restore: (() => void) | undefined;
+afterEach(async () => {
+  await scheduledIdle();
+  restore?.();
+  restore = undefined;
+  resetKick();
+  await remove('kv', 'scheduler');
+});
+
+describe('scheduled work', () => {
+  it('runs a job when it is due, not again until it is next due, and every job when forced', async () => {
+    const minute = counting('minute', 60_000);
+    const daily = counting('daily', 86_400_000);
+    restore = useJobs([minute, daily]);
+    let t = 1_900_000_000_000;
+    const now = () => t;
+    expect(await runDue({ now })).toEqual({ ran: ['minute', 'daily'], failed: [] });
+    t += 30_000;
+    expect(await runDue({ now })).toEqual({ ran: [], failed: [] });
+    t += 30_000;
+    expect(await runDue({ now })).toEqual({ ran: ['minute'], failed: [] });
+    expect(await runDue({ now, force: true })).toEqual({ ran: ['minute', 'daily'], failed: [] });
+    expect([minute.runs, daily.runs]).toEqual([3, 2]);
+  });
+
+  it('lets one runner at a time run the work, however many instances look at once', async () => {
+    let release!: () => void;
+    const slow = counting('slow', 60_000, () => new Promise<void>((r) => (release = r)));
+    restore = useJobs([slow]);
+    const first = runDue();
+    await expect.poll(() => slow.runs).toBe(1);
+    const others = await Promise.all([runDue(), runDue({ force: true }), runDue()]);
+    expect(others.every((r) => r.ran.length === 0)).toBe(true);
+    expect(others.some((r) => r.busy)).toBe(true);
+    release();
+    expect((await first).ran).toEqual(['slow']);
+    expect(slow.runs).toBe(1);
+  });
+
+  it('takes over from a runner that died holding the lease, once the lease has run out', async () => {
+    const job = counting('job', 60_000);
+    let t = 1_900_000_000_000;
+    const now = () => t;
+    // A runner that never finished: its lease is left behind.
+    const hung = counting('job', 60_000, () => new Promise(() => undefined));
+    restore = useJobs([hung]);
+    void runDue({ now });
+    await expect.poll(() => hung.runs).toBe(1);
+    restore = useJobs([job]);
+    t += 60_000;
+    expect(await runDue({ now })).toMatchObject({ ran: [], busy: true });
+    t += LEASE_MS;
+    expect(await runDue({ now })).toEqual({ ran: ['job'], failed: [] });
+  });
+
+  it('keeps going when a job fails, and tries it again when it is next due', async () => {
+    let fail = true;
+    const flaky = counting('flaky', 60_000, async () => {
+      if (fail) throw new Error('GitHub is down');
+    });
+    const steady = counting('steady', 60_000);
+    restore = useJobs([flaky, steady]);
+    let t = 1_900_000_000_000;
+    const now = () => t;
+    expect(await runDue({ now })).toEqual({ ran: ['flaky', 'steady'], failed: [{ name: 'flaky', error: 'GitHub is down' }] });
+    fail = false;
+    t += 60_000;
+    expect(await runDue({ now })).toEqual({ ran: ['flaky', 'steady'], failed: [] });
+  });
+
+  it('looks for due work after a request, at most every half minute per instance', async () => {
+    const job = counting('job', 0);
+    restore = useJobs([job]);
+    kickScheduled(1_000_000);
+    kickScheduled(1_010_000);
+    await scheduledIdle();
+    expect(job.runs).toBe(1);
+    kickScheduled(1_031_000);
+    await scheduledIdle();
+    expect(job.runs).toBe(2);
+  });
+
+  it('runs due work after requests when Concord schedules that way (Vercel), and not otherwise', async () => {
+    const job = counting('job', 60_000);
+    restore = useJobs([job]);
+    const { createApp } = await import('../src/app.js');
+    // A long-running server has its own timer: requests start nothing.
+    expect((await request(createApp()).get('/healthz')).status).toBe(200);
+    await scheduledIdle();
+    expect(job.runs).toBe(0);
+    (config as { schedule: string }).schedule = 'requests';
+    try {
+      expect((await request(createApp()).get('/healthz')).status).toBe(200);
+      await scheduledIdle();
+      expect(job.runs).toBe(1);
+    } finally {
+      (config as { schedule: string }).schedule = 'timer';
+    }
+  });
+
+  it('runs every job from the daily cron call, only with the cron secret', async () => {
+    const minute = counting('minute', 60_000);
+    const daily = counting('daily', 86_400_000);
+    restore = useJobs([minute, daily]);
+    const { createApp } = await import('../src/app.js');
+    const app = createApp();
+    // No secret configured: nobody may call it.
+    expect((await request(app).get('/api/cron/daily')).status).toBe(401);
+    (config as { cronSecret?: string }).cronSecret = 'cron-secret-for-tests';
+    try {
+      expect((await request(app).get('/api/cron/daily')).status).toBe(401);
+      expect((await request(app).get('/api/cron/daily').set('Authorization', 'Bearer wrong-secret-for-tests')).status).toBe(401);
+      expect([minute.runs, daily.runs]).toEqual([0, 0]);
+      await runDue(); // both just ran
+      const res = await request(app).get('/api/cron/daily').set('Authorization', 'Bearer cron-secret-for-tests');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ ran: ['minute', 'daily'], failed: [] });
+      expect([minute.runs, daily.runs]).toEqual([2, 2]);
+    } finally {
+      (config as { cronSecret?: string }).cronSecret = undefined;
+    }
+  });
+});
