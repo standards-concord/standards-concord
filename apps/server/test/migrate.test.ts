@@ -8,7 +8,7 @@ import { OntologyGraph } from '@concord/core';
 import type { OntologyProject } from '@concord/shared';
 import { config } from '../src/config.js';
 import { closeDb, get, openDb, put, rawStore, readOnlyStore, ReadOnlyError, remove } from '../src/db.js';
-import { copyDatabase, exportHistories, IMPORT_MARKER, importHistories, importVerified, verifyImport } from '../src/migrate/index.js';
+import { copyDatabase, exportHistories, exportPrivateFiles, IMPORT_MARKER, importHistories, importPrivateFiles, importVerified, verifyImport } from '../src/migrate/index.js';
 import { mirrorToPod } from '../src/services/alpha.js';
 import { setRef } from '../src/services/gitdb.js';
 import { solid } from '../src/services/solid.js';
@@ -78,6 +78,37 @@ describe('moving a database to the database-backed ontology store', () => {
   it('can run again: documents are replaced, objects added once, and it still verifies', async () => {
     await copyDatabase(source);
     await importHistories(config.dataDir);
+    await expect(verifyImport(source, config.dataDir)).resolves.toMatchObject({ id: IMPORT_MARKER });
+  });
+
+  // On Vercel there is no data directory: the private files the VM kept for accounts with no pod (step 5) move into
+  // the database with everything else, and back again for a rollback.
+  it('moves the private files kept on disk into the database, checks them, and writes them back', async () => {
+    const user = `mig-user-${Date.now()}`;
+    const dir = path.join(config.dataDir, 'private', user);
+    fs.mkdirSync(path.join(dir, 'concord', 'use-cases'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'concord', 'use-cases', 'a.ttl'), '<urn:a> <urn:b> "private" .\n');
+    fs.writeFileSync(path.join(dir, 'binary'), Buffer.from([0, 255, 1, 254]));
+    fs.writeFileSync(path.join(dir, '.binary.concord-tmp'), 'half written'); // a crash's leftover, not data
+    const back = fs.mkdtempSync(path.join(tmpdir(), 'concord-private-'));
+    try {
+      expect((await importPrivateFiles(config.dataDir)).files).toBe(2);
+      expect(await get('privateFiles', `${user}/concord/use-cases/a.ttl`)).toMatchObject({ data: Buffer.from('<urn:a> <urn:b> "private" .\n').toString('base64') });
+      await expect(verifyImport(source, config.dataDir)).resolves.toMatchObject({ id: IMPORT_MARKER });
+
+      // A file that changed on disk since (or a row that differs) is caught.
+      fs.writeFileSync(path.join(dir, 'binary'), 'changed');
+      await expect(verifyImport(source, config.dataDir)).rejects.toThrow(`private file ${user}/binary wasn't imported as it is on disk`);
+      fs.writeFileSync(path.join(dir, 'binary'), Buffer.from([0, 255, 1, 254]));
+
+      await exportPrivateFiles(back);
+      expect(fs.readFileSync(path.join(back, 'private', user, 'binary'))).toEqual(Buffer.from([0, 255, 1, 254]));
+      expect(fs.statSync(path.join(back, 'private', user, 'concord', 'use-cases', 'a.ttl')).mode & 0o777).toBe(0o600);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(back, { recursive: true, force: true });
+      await importPrivateFiles(config.dataDir); // and the rows go with them
+    }
     await expect(verifyImport(source, config.dataDir)).resolves.toMatchObject({ id: IMPORT_MARKER });
   });
 
