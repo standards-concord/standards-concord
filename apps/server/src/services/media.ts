@@ -180,6 +180,9 @@ export const MAX_TEMP_DOWNLOAD = 4 * 1024 * 1024;
 /** The most the cache may hold on a temporary disk: older files are removed first to stay under it. */
 export const MAX_TEMP_TOTAL = 32 * 1024 * 1024;
 
+/** Downloads under way into the temporary disk, each holding MAX_TEMP_DOWNLOAD of the total until it ends. */
+let reserved = 0;
+
 /** Removes the cache's oldest files until it holds at most `budget` bytes (files being downloaded now are kept). */
 function trimCache(budget: number) {
   const root = cacheRoot();
@@ -234,8 +237,14 @@ export async function mediaFile(name: string): Promise<string | undefined> {
       if (!res.ok || !res.body) throw new Error(`Downloading ${name}: HTTP ${res.status}`);
       const tooLarge = () => new Error(`Downloading ${name}: too large to keep here`);
       if (small && Number(res.headers.get('content-length') ?? 0) > MAX_TEMP_DOWNLOAD) throw tooLarge();
-      // The declared length can be missing or wrong: count what arrives, and make room first.
-      if (small) trimCache(MAX_TEMP_TOTAL - MAX_TEMP_DOWNLOAD);
+      // The declared length can be missing or wrong: count what arrives, and make room first. Each download under
+      // way holds room for its largest size, so downloads at once can't take the cache over its total together.
+      if (small) {
+        const room = MAX_TEMP_TOTAL - MAX_TEMP_DOWNLOAD * (reserved + 1);
+        if (room < 0) throw new Error(`Downloading ${name}: too many downloads at once; try again shortly`);
+        trimCache(room);
+        reserved++;
+      }
       const tmp = `${target}.part`;
       try {
         await pipeline(
@@ -253,6 +262,8 @@ export async function mediaFile(name: string): Promise<string | undefined> {
       } catch (err) {
         fs.rmSync(tmp, { force: true });
         throw err;
+      } finally {
+        if (small) reserved--;
       }
       fs.renameSync(tmp, target);
       const ok = regularFileIn(folder, name, cacheRoot());

@@ -275,6 +275,41 @@ describe('on Vercel', () => {
     fs.rmSync(old, { recursive: true, force: true });
   });
 
+  // Review r2 of step 5: downloads under way weren't counted, and each made room for one file only, so two at once
+  // on top of a nearly full cache went over the total. Each now holds room for itself until it ends.
+  it('keeps downloads under way within the total too', async () => {
+    process.env.CONCORD_MEDIA_REDIRECT = 'true';
+    const root = await cacheDir();
+    const old = path.join(root, 'old-release-2');
+    fs.mkdirSync(old, { recursive: true });
+    for (let i = 0; i < 7; i++) {
+      const f = path.join(old, `f${i}.vtt`);
+      fs.writeFileSync(f, Buffer.alloc(4 * 1024 * 1024));
+      fs.utimesSync(f, new Date(1000 + i * 1000), new Date(1000 + i * 1000));
+    }
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const almostFull = () =>
+      new ReadableStream({
+        async start(c) {
+          c.enqueue(new Uint8Array(4 * 1024 * 1024 - 10));
+          await gate;
+          c.close();
+        },
+      });
+    vi.stubGlobal('fetch', async (url: string) =>
+      url.startsWith('https://api.github.com/') ? new Response(JSON.stringify([release(9206, 'v-two', 92006, 'https://dl.example/two')]), { status: 200 }) : new Response(almostFull(), { status: 200 }),
+    );
+    const media = await fresh();
+    const both = Promise.all([media.mediaFile('concord-walkthrough.vtt'), media.mediaFile('concord-feedback.vtt')]);
+    await new Promise((r) => setTimeout(r, 50));
+    open();
+    await both;
+    const total = fs.readdirSync(root, { recursive: true }).map((f) => fs.statSync(path.join(root, String(f)))).filter((st) => st.isFile()).reduce((n, st) => n + st.size, 0);
+    expect(total).toBeLessThanOrEqual(media.MAX_TEMP_TOTAL);
+    fs.rmSync(old, { recursive: true, force: true });
+  });
+
   it('serves videos itself on the VM', async () => {
     process.env.CONCORD_MEDIA_REDIRECT = 'false';
     stubGitHub(release(9203, 'v-vm', 92003, 'https://dl.example/v'), {});
