@@ -393,8 +393,8 @@ export async function importLogin(stored: StoredLogin): Promise<SolidLogin> {
 /** Where shared logins are kept (auth.ts registers it): each instance loads the latest before refreshing. */
 export interface SharedLogins {
   load(id: string): Promise<SolidLogin | undefined>;
-  /** Saves the login's new tokens (its keys don't change). */
-  save(id: string, login: SolidLogin): Promise<void>;
+  /** Saves the login's new tokens (its keys don't change). False when it was ended meanwhile, and nothing was saved. */
+  save(id: string, login: SolidLogin): Promise<boolean | void>;
 }
 let sharedLogins: SharedLogins | undefined;
 export const shareLogins = (s: SharedLogins) => void (sharedLogins = s);
@@ -588,8 +588,8 @@ async function renew(login: SolidLogin): Promise<boolean> {
     }
     Object.assign(login, { refreshToken: latest.refreshToken });
     const ok = await renewHere(login);
-    if (ok) await store.save(id, login);
-    return ok;
+    // A login ended while it was being refreshed (signed out, or replaced by a newer sign-in) isn't refreshed.
+    return ok && (await store.save(id, login)) !== false;
   });
 }
 
@@ -624,8 +624,9 @@ export type PodRequest = (method: 'GET' | 'HEAD' | 'PUT', url: string, init?: { 
  * not) and signs its proof, so time spent queueing can't leave it stale. A 401
  * gets one refresh and retry; any other answer comes back as the response.
  */
-export async function podRequester(login: SolidLogin, opts: { pods?: readonly string[] } = {}): Promise<PodRequest | undefined> {
+export async function podRequester(login: SolidLogin, opts: { pods?: readonly string[]; stillValid?: () => Promise<void> } = {}): Promise<PodRequest | undefined> {
   if (!(await fresh(login))) return undefined;
+  const stillValid = opts.stillValid;
   // People's own pods (step 5e): only inside the pods named, on any public host. Otherwise the operator's pod server.
   const check = opts.pods ? inPods(opts.pods) : podUrl;
   const held = opts.pods ? guarded(POD_MAX_BYTES, check, 'held') : podFetchHeld;
@@ -634,6 +635,9 @@ export async function podRequester(login: SolidLogin, opts: { pods?: readonly st
     return podPool().run(async () => {
       const send = async () => {
         if (!(await fresh(login))) throw new SolidLoginError('The Solid login has ended');
+        // Checked last, after any wait for a connection and any refresh: a login ended meanwhile (a sign-out, step
+        // 5e) sends nothing more, even with a token that hasn't expired.
+        await stillValid?.();
         const token = login.accessToken;
         const DPoP = oauth.DPoP(login.client, login.keys);
         const opts = { DPoP, [oauth.customFetch]: held as never, ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}) };
