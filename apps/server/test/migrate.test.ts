@@ -1,0 +1,153 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import request from 'supertest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { OntologyGraph } from '@concord/core';
+import type { OntologyProject } from '@concord/shared';
+import { config } from '../src/config.js';
+import { closeDb, get, openDb, put, rawStore, readOnlyStore, ReadOnlyError, remove } from '../src/db.js';
+import { copyDatabase, exportHistories, IMPORT_MARKER, importHistories, importVerified, verifyImport } from '../src/migrate/index.js';
+import { readCommit } from '../src/services/gitdb.js';
+import { gitStore } from '../src/services/ontologyStore.js';
+import { dbStore } from '../src/services/ontologyStoreDb.js';
+import { openStore, type DocStore } from '../src/store/index.js';
+
+/**
+ * The cutover tool (src/migrate): a VM's database (SQLite) and repositories, made by the git store, copied into
+ * Postgres (PGlite here) for the database store, checked, and exported back. The source is built in this file's own
+ * data directory by the git store itself; then the database this file uses is swapped for an empty Postgres.
+ */
+
+const ttl = (label: string) => `<urn:x:thing> <http://www.w3.org/2000/01/rdf-schema#label> "${label}" .\n`;
+const graph = (label: string) => OntologyGraph.fromTurtle(ttl(label));
+const p = { id: `mig-${Date.now()}`, slug: `mig-${Date.now()}`, title: 'Migrated vocabulary' } as OntologyProject;
+let source: DocStore;
+let synced: string;
+let firstRelease: string;
+
+beforeAll(async () => {
+  await openDb();
+  // A history as the VM has it: drafts, releases, a fork synced with upstream, and the records naming them.
+  await gitStore.init(p, ttl('v0'), '# Readme\n');
+  await put('ontologies', p);
+  await gitStore.commitWorking(p, await graph('v1'), 'First edit', { name: 'Ana', email: 'ana@example.org' });
+  await gitStore.writeRelease(p, '1.0.0', await graph('v1'), { 'index.html': '<h1>1.0.0</h1>' }, 'First release', { name: 'Steward' });
+  firstRelease = await gitStore.head(p);
+  const fork = await gitStore.commitFork(p, 'f', await graph('fork'), 'Fork it', { name: 'Dev' }, { parent: firstRelease, create: true }, async () => undefined);
+  await gitStore.commitWorking(p, await graph('v2'), 'Second edit', { name: 'Ben' });
+  synced = await gitStore.commitFork(p, 'f', await graph('fork 2'), 'Sync with upstream', { name: 'Dev' }, { parent: fork, extraParents: [await gitStore.head(p)] }, async () => undefined);
+  await put('forks', { id: `${p.id}-f`, slug: 'f', ontologyId: p.id, head: synced, baseCommit: firstRelease }, p.id);
+  await put('releases', { id: `${p.id}-r1`, ontologyId: p.id, version: '1.0.0', status: 'published', commit: firstRelease }, p.id);
+  await put('changeRequests', { id: `${p.id}-cr`, ontologyId: p.id, baseCommit: firstRelease, mergedCommit: await gitStore.head(p) }, p.id);
+  // Swap this file's database for an empty Postgres; the SQLite file becomes the source.
+  await closeDb();
+  source = await openStore({ kind: 'sqlite', file: path.join(config.dataDir, 'concord.sqlite') });
+  await openDb({ kind: 'pglite' });
+});
+afterAll(async () => {
+  await source?.close();
+  await closeDb();
+});
+
+describe('moving a database to the database-backed ontology store', () => {
+  it('copies every document exactly, imports every history, and verifies it against the source', async () => {
+    const copied = await copyDatabase(source);
+    expect(copied.rows).toBe((await source.rows()).length);
+    const imported = await importHistories(config.dataDir);
+    expect(imported.notes.filter((n) => n.startsWith(p.slug))).toEqual([]);
+    const marker = await verifyImport(source, config.dataDir);
+    expect(marker).toMatchObject({ id: IMPORT_MARKER, ontologies: (await source.rows()).filter((r) => r.collection === 'ontologies').length });
+    expect(await importVerified()).toBe(true);
+    // The database store now answers as the git store does from the repository.
+    expect(await dbStore.head(p)).toBe(await gitStore.head(p));
+    expect((await dbStore.log(p)).map((c) => c.subject)).toEqual((await gitStore.log(p)).map((c) => c.subject));
+    expect(await dbStore.forkLog(p, synced)).toEqual(await gitStore.forkLog(p, synced));
+    expect(await dbStore.versions(p)).toEqual(await gitStore.versions(p));
+    expect(await dbStore.readWorkingText(p)).toBe(await gitStore.readWorkingText(p));
+    expect(await dbStore.readReleaseFile(p, '1.0.0', 'index.html')).toBe('<h1>1.0.0</h1>');
+    expect(await dbStore.hasForkBranch(p, 'f')).toBe(true);
+    expect((await readCommit(synced)).parents).toHaveLength(2);
+  });
+
+  it('can run again: documents are replaced, objects added once, and it still verifies', async () => {
+    await copyDatabase(source);
+    await importHistories(config.dataDir);
+    await expect(verifyImport(source, config.dataDir)).resolves.toMatchObject({ id: IMPORT_MARKER });
+  });
+
+  it('refuses an import with a missing object, naming it and what needs it', async () => {
+    const tree = (await readCommit(firstRelease)).tree;
+    const saved = await get<object>('gitObjects', tree);
+    await remove('gitObjects', tree);
+    try {
+      await expect(verifyImport(source, config.dataDir)).rejects.toThrow(new RegExp(`${p.slug}: object ${tree} is missing .*release 1\\.0\\.0`));
+    } finally {
+      await put('gitObjects', { ...saved!, id: tree });
+    }
+  });
+
+  it('refuses a copy whose documents differ from the source', async () => {
+    const r = (await get<{ id: string; title: string }>('ontologies', p.id))!;
+    await put('ontologies', { ...r, title: 'Changed after the copy' });
+    try {
+      await expect(verifyImport(source, config.dataDir)).rejects.toThrow(`ontologies ${p.id} doesn't match its source`);
+    } finally {
+      await copyDatabase(source);
+    }
+  });
+
+  it('exports the histories back into git repositories the git store can use', async () => {
+    const out = fs.mkdtempSync(path.join(tmpdir(), 'concord-export-'));
+    try {
+      await exportHistories(out);
+      const git = (...args: string[]) => execFileSync('git', ['--git-dir', path.join(out, 'ontologies', p.slug, '.git'), ...args]).toString().trim();
+      expect(git('rev-parse', 'refs/concord/draft')).toBe(await dbStore.head(p));
+      expect(git('rev-parse', 'refs/heads/main')).toBe(await dbStore.head(p));
+      expect(git('rev-parse', 'refs/heads/forks/f')).toBe(synced);
+      const original = execFileSync('git', ['-C', path.join(config.dataDir, 'ontologies', p.slug), 'log', '--format=%H', 'HEAD']).toString();
+      expect(git('log', '--format=%H', 'main')).toBe(original.trim());
+    } finally {
+      fs.rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  it('serves an imported database only once its import is verified; an empty one is marked as having nothing to import', async () => {
+    await remove('kv', IMPORT_MARKER);
+    expect(await importVerified()).toBe(false);
+    await verifyImport(source, config.dataDir);
+    expect(await importVerified()).toBe(true);
+    // A new, empty database (a fresh install) has nothing to import.
+    await closeDb();
+    await openDb({ kind: 'pglite' });
+    expect(await importVerified()).toBe(true);
+    expect(await get('kv', IMPORT_MARKER)).toMatchObject({ ontologies: 0, notes: ['nothing to import'] });
+  });
+});
+
+describe('read-only while moving (CONCORD_READ_ONLY)', () => {
+  it('refuses every write to the database but still reads', async () => {
+    const store = readOnlyStore(await rawStore());
+    await expect(store.put('kv', { id: 'read-only-test' })).rejects.toBeInstanceOf(ReadOnlyError);
+    await expect(store.remove('kv', IMPORT_MARKER)).rejects.toBeInstanceOf(ReadOnlyError);
+    await expect(store.putRows([])).rejects.toBeInstanceOf(ReadOnlyError);
+    expect(await store.get('kv', IMPORT_MARKER)).toBeDefined();
+    expect(await store.transaction(async () => await store.get('kv', IMPORT_MARKER))).toBeDefined();
+  });
+
+  it('turns away requests that change something, with a time to try again, and answers the rest', async () => {
+    (config as { readOnly: boolean }).readOnly = true;
+    try {
+      const { createApp } = await import('../src/app.js');
+      const app = createApp();
+      const res = await request(app).post('/api/ontologies').send({ title: 'During the move' });
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('300');
+      expect(res.body.error).toMatch(/read-only for a few minutes/);
+      expect((await request(app).get('/healthz')).status).toBe(200);
+    } finally {
+      (config as { readOnly: boolean }).readOnly = false;
+    }
+  });
+});

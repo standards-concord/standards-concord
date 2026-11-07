@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Collection } from '../db.js';
-import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, Pending, StoreBusyError, TransactionAbortedError, type TxState } from './types.js';
+import { BUSY_TIMEOUT_MS, checkField, type DocStore, liveTransaction, Pending, StoreBusyError, type StoredRow, TransactionAbortedError, type TxState } from './types.js';
 
 /** What the store needs from a connection: pg's `Pool`/`PoolClient` and PGlite (and its transactions) all fit. */
 export interface Queryable {
@@ -219,8 +219,26 @@ export class PostgresStore implements DocStore {
     });
   }
 
-  async clearAll(): Promise<void> {
-    await this.write((q) => q.query('DELETE FROM docs'));
+  async clearAll(except: Collection[] = []): Promise<void> {
+    await this.write((q) => q.query('DELETE FROM docs WHERE NOT (collection = ANY($1::text[]))', [except]));
+  }
+
+  async rows(): Promise<StoredRow[]> {
+    const { rows } = await this.reader().query<{ collection: Collection; id: string; parent: string | null; data: string; created_at: string }>(
+      'SELECT collection, id, parent, data::text AS data, created_at FROM docs ORDER BY created_at, seq',
+    );
+    return rows.map((r) => ({ collection: r.collection, id: r.id, parent: r.parent, data: r.data, createdAt: r.created_at }));
+  }
+
+  async putRows(rows: StoredRow[]): Promise<void> {
+    await this.write(async (q) => {
+      for (const r of rows)
+        await q.query(
+          `INSERT INTO docs (collection, id, parent, data, created_at) VALUES ($1, $2, $3, $4::json, $5)
+           ON CONFLICT (collection, id) DO UPDATE SET parent = EXCLUDED.parent, data = EXCLUDED.data, created_at = EXCLUDED.created_at`,
+          [r.collection, r.id, r.parent, r.data, r.createdAt],
+        );
+    });
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {

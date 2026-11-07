@@ -45,6 +45,11 @@ export const config = {
   sessionSecret: process.env.SESSION_SECRET ?? 'dev-only-secret-change-me',
   demoMode: bool(process.env.DEMO_MODE, true),
   /**
+   * CONCORD_READ_ONLY: serve reads only, for the minutes of a move to another database (docs/cutover.md). Requests
+   * that change something get 503, every write to the database is refused, and no scheduled work runs.
+   */
+  readOnly: bool(process.env.CONCORD_READ_ONLY, false),
+  /**
    * Refuse to publish fork edits when the full OWL reasoner (sparq) gives no verdict (it timed
    * out, crashed, or can't decide the ontology), instead of falling back to the structural check.
    * On in production; off by default elsewhere.
