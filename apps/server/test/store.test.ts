@@ -600,21 +600,32 @@ describe.each(backends)('document store on $name', (backend) => {
         const kill = () =>
           withAdmin((c) =>
             c.query(
-              "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND application_name = '' AND state IS NOT NULL",
+              // The timeout makes it wait until each backend has gone, so the transaction's next statement can't beat it.
+              "SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND application_name = '' AND state IS NOT NULL",
             ),
           );
         await store.put('kv', { id: 'before' }); // Leaves an idle connection in the pool.
+        // The transaction waits, mid-way, until the connections are gone. It used to sleep 100 ms
+        // while the test slept 30 ms and then killed: on a busy machine (a full parallel CI run) the
+        // kill could land before the transaction began or after it had committed, so it "committed".
+        const inside = gate();
+        const killed = gate();
         const inTx = store.transaction(async () => {
           await store.put('kv', { id: 'doomed' });
-          await sleep(100);
+          inside.open();
+          await killed.opened;
           await store.put('kv', { id: 'doomed-2' });
         });
         const outcome = inTx.then(
           () => 'committed',
           () => 'failed',
         ); // Handled before the kill, so its rejection is never unhandled (re-review 3: a full run exited 1).
-        await sleep(30);
-        await kill();
+        await inside.opened;
+        try {
+          await kill();
+        } finally {
+          killed.open();
+        }
         expect(await outcome).toBe('failed');
         await sleep(50);
         await store.put('kv', { id: 'after' });
