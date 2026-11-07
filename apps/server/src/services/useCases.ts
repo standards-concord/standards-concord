@@ -25,6 +25,7 @@ import { config } from '../config.js';
 import { detached, get, HttpError, inTransaction, list, mustGet, put, transaction } from '../db.js';
 import { everyAsync, filterAsync, someAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
+import { withLease } from '../lease.js';
 import { ontologyDigest, useCaseDigest } from '../llm/context.js';
 import { ANONYMISER, INTERVIEWER, SYNTHESISER } from '../llm/prompts.js';
 import { llm } from '../llm/provider.js';
@@ -92,6 +93,8 @@ interface Holding {
   inner: Promise<unknown>;
 }
 const holdings = new AsyncLocalStorage<Map<string, Holding>>();
+/** How long another instance waits for the consent lock, and how soon a holder that stopped running lets it go. */
+export const CONSENT_LEASE_MS = 2 * 60_000;
 /**
  * Runs `fn` exclusively for an ontology. Everything that commits material
  * derived from use cases (a release, a merge, a drafted change request) and
@@ -103,6 +106,10 @@ const holdings = new AsyncLocalStorage<Map<string, Holding>>();
  * doesn't wait for itself: its nested calls run one at a time, in order, and
  * the holding ends only when they have all finished. Once a holding has ended,
  * anything still carrying its context queues like everyone else.
+ *
+ * Across server instances it is a database lease, renewed while the holder runs. The commits that matter most
+ * also check consent again inside their own transaction (a merge into the working draft), so even a holder whose
+ * lease lapsed can't commit from a use case that was withdrawn meanwhile.
  */
 export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T): Promise<T> {
   const context = holdings.getStore();
@@ -133,7 +140,10 @@ export function withConsentLock<T>(ontologyId: string, fn: () => Promise<T> | T)
   // Lock order is consent lock, then transaction: waiting here inside a transaction would hold the store's
   // writer lock while the holder of this lock waits to write.
   if (inTransaction()) return Promise.reject(new Error('withConsentLock called inside a transaction: take the consent lock first'));
-  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(runHeld);
+  // Queued here behind this instance's holders, then held across instances (each Vercel function instance has
+  // a queue of its own) with a lease in the database, kept while the holder runs.
+  const acrossInstances = () => withLease(`consent:${ontologyId}`, CONSENT_LEASE_MS, runHeld, { renew: true });
+  const run = (consentLocks.get(ontologyId) ?? Promise.resolve()).catch(() => undefined).then(acrossInstances);
   const tail = run.catch(() => undefined);
   consentLocks.set(ontologyId, tail);
   void tail.then(() => {

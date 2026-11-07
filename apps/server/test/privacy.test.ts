@@ -1025,6 +1025,53 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     expect((await outsider.get(`/api/change-requests/${cr.id}`)).body.withheld).toBe(true);
   });
 
+  // On Vercel the consent lock was one process's: a withdrawal on another instance could land between a merge's
+  // consent check and its commit, and the merge published from a use case its author had just taken back. The
+  // lock is now a lease across instances, and the merge checks consent again inside the transaction that commits.
+  it('a merge never commits from a use case withdrawn on another server after the merge checked it', async () => {
+    const { id } = await publicCase('Lapsed Lease Author', 'Lapsed lease case');
+    await login('editor', 'Lapsed Lease Editor');
+    const editor = await login('editor', 'Lapsed Lease Editor 2');
+    const cr = await derived(id, { title: 'Model Lapsed lease case', status: 'approved', approvedAs: { level: 'major', confirmation: true, voted: true }, ops: [addClass('Lapsed lease thing')] });
+    const { approvePublication, publicationPreview } = await import('../src/services/changeRequests.js');
+    await approvePublication((await get<ChangeRequest>('changeRequests', cr.id))!, await userNamed('Lapsed Lease Editor'), (await publicationPreview((await get<ChangeRequest>('changeRequests', cr.id))!)).fingerprint);
+    // Another server withdraws it without this one's lock, after every check before the commit.
+    const realCommit = ontologyStore.commitWorking.bind(ontologyStore);
+    let withdrawnAtCommit = false;
+    const spy = vi.spyOn(ontologyStore, 'commitWorking').mockImplementation(async (...args: Parameters<typeof ontologyStore.commitWorking>) => {
+      withdrawnAtCommit = true;
+      const u = (await get<UseCase>('useCases', id))!;
+      await put('useCases', { ...u, withdrawnAt: clock.iso(), visibility: 'private', status: 'archived' }, u.ontologyId);
+      return realCommit(...args);
+    });
+    try {
+      expect((await editor.post(`/api/change-requests/${cr.id}/merge`)).status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+    const after = (await get<ChangeRequest>('changeRequests', cr.id))!;
+    expect(withdrawnAtCommit).toBe(true);
+    expect(after.status).toBe('needs-work');
+    expect(after.mergedCommit).toBeUndefined();
+    expect((await request(app).get(`/api/ontologies/${demoId}/source`)).text).not.toMatch(/Lapsed lease thing/);
+  });
+
+  it('the consent lock is held across servers: a withdrawal waits for another server’s merge', async () => {
+    const ontologyId = `consent-${Date.now()}`;
+    await put('kv', { id: `lease:consent:${ontologyId}`, token: 'another-server', until: Date.now() + 60_000 });
+    let ran = false;
+    const waiting = withConsentLock(ontologyId, async () => void (ran = true));
+    await new Promise((ok) => setTimeout(ok, 150));
+    expect(ran).toBe(false);
+    await transaction(async () => {
+      const { remove } = await import('../src/db.js');
+      await remove('kv', `lease:consent:${ontologyId}`);
+    });
+    await waiting;
+    expect(ran).toBe(true);
+    expect(await get('kv', `lease:consent:${ontologyId}`)).toBeUndefined();
+  });
+
   it('a request drafted from or citing a withdrawn use case is withheld on every read: API, list, activity, MCP, releases, use case pages (finding 3)', async () => {
     const { id, agent: author } = await publicCase('Withheld Author', 'Dock "Meridian" plan');
     const steward = await login('steward', 'Withheld Steward');
@@ -1128,6 +1175,33 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     expect(report.competencyQuestions.map((q) => q.question)).toContain(question);
     expect(JSON.stringify(await validationForViewer(report, await userNamed('Inflight Outsider')))).not.toContain(question);
     for (const url of [`/api/ontologies/${demoId}/validation`, `/api/ontologies/${demoId}/validation?ref=1.0.0`]) expect((await outsider.get(url)).text).not.toContain(question);
+  });
+
+  // The consent lock across servers is a lease: if it lapsed, a withdrawal on another server could land after the
+  // release's notes were made and before its commit. The publishing transaction checks again.
+  it('a release is not published with notes from a use case withdrawn on another server after they were made', async () => {
+    const { publishRelease } = await import('../src/services/releases.js');
+    const { id } = await publicCase('Lapsed Notes Author', 'Harbour pilot ledger');
+    await login('steward', 'Lapsed Notes Steward');
+    const steward = await userNamed('Lapsed Notes Steward');
+    const cr = await derived(id, { title: 'Support Harbour pilot ledger', status: 'merged', ops: [] });
+    const r: Release = { ...structuredClone((await list<Release>(demoId, 'releases' as never))[0]), id: 'rel_lapsed_notes', version: '9.9.8', level: 'minor', status: 'draft', statusSince: clock.iso(), createdAt: clock.iso(), notes: '- #1 Support Harbour pilot ledger', changeRequestIds: [cr.id], commit: undefined, publishedAt: undefined, githubUrl: undefined };
+    await put('releases', r, demoId);
+    const realWrite = ontologyStore.writeRelease.bind(ontologyStore);
+    let reached = false;
+    const write = vi.spyOn(ontologyStore, 'writeRelease').mockImplementation(async (...args: Parameters<typeof ontologyStore.writeRelease>) => {
+      reached = true;
+      const u = (await get<UseCase>('useCases', id))!;
+      await put('useCases', { ...u, withdrawnAt: clock.iso(), visibility: 'private', status: 'archived' }, u.ontologyId);
+      return realWrite(...args);
+    });
+    try {
+      await expect(publishRelease((await get<Release>('releases', r.id))!, steward)).rejects.toMatchObject({ status: 409 });
+    } finally {
+      write.mockRestore();
+    }
+    expect(reached).toBe(true);
+    expect((await get<Release>('releases', r.id))!.status).not.toBe('published');
   });
 
   it('a release published while a use case behind one of its changes is withdrawn commits public notes only (finding 2)', async () => {

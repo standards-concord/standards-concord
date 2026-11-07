@@ -173,6 +173,8 @@ const isStale = async (d: RequirementsDocument) => {
   const byId = new Map((await allUseCases(d.ontologyId)).map((u) => [u.id, u]));
   return someAsync([...new Set([...(d.sourceIds ?? []), ...d.useCases.map((u) => u.id)])], async (id) => { const u = byId.get(id); return !u || !await isPublishable(u); });
 };
+/** Whether everything a document draws on is still public (for a check inside the transaction that publishes it). */
+export const stillPublishable = async (d: RequirementsDocument) => !(await isStale(d));
 const dependsOn = (d: RequirementsDocument, id: string) => (d.sourceIds ?? []).includes(id) || d.useCases.some((x) => x.id === id);
 
 /** For the public spec pages: the published document for a version, if there is one. */

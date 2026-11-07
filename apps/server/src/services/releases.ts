@@ -22,7 +22,7 @@ import { evaluate } from './governance.js';
 import { getProject, members, requireRole, rolesFor, updateProject } from './ontologies.js';
 import { enqueueGitHubPublish, runGitHubPublish, runGitHubPublishes } from './githubOutbox.js';
 import { ontologyStore } from './ontologyStore.js';
-import { draftForRelease, markPublished, prepareForRelease, renderMarkdown } from './requirements.js';
+import { draftForRelease, markPublished, prepareForRelease, renderMarkdown, stillPublishable } from './requirements.js';
 import { crForViewer, crWithheld, withConsentLock } from './useCases.js';
 import { someAsync } from '../asyncList.js';
 import { syncUseCasesForCR } from './traceability.js';
@@ -322,6 +322,10 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
     // This check, in the transaction that publishes, is the approval recorded on the release.
     const now = await publishable(latest);
     if (!now.ok) throw new HttpError(409, `No longer ready to publish: ${now.why}`);
+    // Consent once more, where no withdrawal can land in between (it commits in a transaction too): the consent
+    // lock is a lease across instances, and one that lapsed must not publish from a withdrawn use case.
+    if ((await releaseForViewer({ ...latest, notes: publishedNotes }, undefined)).notes !== publicNotes || (doc && !(await stillPublishable(doc))))
+      throw new HttpError(409, 'A use case stopped being public while the release was being published, so it was not published. Try again.');
     // Made from a working draft still waiting for approval: it waits too. The draft is the one this
     // release was made from (advanceTo checks), so whether it's held now is whether this release is.
     await holdReleaseIfDraftHeld(project, r.version);
