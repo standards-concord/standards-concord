@@ -392,7 +392,7 @@ export function MeetingsTab() {
   const { id, ontology } = useOntology();
   const { session, now } = useSession();
   const nav = useNavigate();
-  const list = useAsync(() => api.meetings(id), [id]);
+  const list = useAsync(() => api.meetings(id), [id], { keep: `meetings|${id}` });
   const botInfo = useAsync(() => api.meetBot(), []);
   const bot = botInfo.data ?? session?.meetBot;
   const canFacilitate = useCanFacilitate()();

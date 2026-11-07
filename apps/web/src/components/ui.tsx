@@ -358,7 +358,8 @@ export function CopyButton({ text, label, size = 'sm', variant = 'secondary' }: 
 
 /**
  * A block of code with a copy button. Pass `language` to syntax-highlight it with the
- * same colours as the code views (static spans, no editor).
+ * same colours as the code views (static spans, no editor), and `copyText` when what
+ * should be copied differs from what is shown.
  */
 export function CodeBlock({
   code,
@@ -366,17 +367,19 @@ export function CodeBlock({
   maxHeight = 520,
   language,
   ariaLabel,
+  copyText,
 }: {
   code: string;
   className?: string;
   maxHeight?: number;
   language?: CodeLanguage;
   ariaLabel?: string;
+  copyText?: string;
 }) {
   return (
     <div className={cx('relative rounded-lg border border-line bg-surface-2', className)}>
       <div className="absolute top-2 right-2">
-        <CopyButton text={code} />
+        <CopyButton text={copyText ?? code} />
       </div>
       <pre
         className="overflow-auto p-4 pr-14 font-mono text-[0.8rem] leading-relaxed"

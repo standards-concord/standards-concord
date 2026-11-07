@@ -48,7 +48,7 @@ export function ConnectAgentTab() {
 export function AgentReportsTab() {
   const { id, ontology } = useOntology();
   const { now } = useSession();
-  const reports = useAsync(() => api.agentReports(id), [id]);
+  const reports = useAsync(() => api.agentReports(id), [id], { keep: `agentReports|${id}` });
   const [params] = useSearchParams();
   // Old links to the setup view of this page.
   if (params.get('view') === 'connect') return <Navigate to={`/o/${id}/connect`} replace />;
