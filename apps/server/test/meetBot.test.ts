@@ -352,11 +352,13 @@ describe('invite-by-email', () => {
     const kept: Promise<unknown>[] = [];
     setKeepAlive((p) => kept.push(p));
     try {
-      stubMode.botDelayMs = 200;
+      const held = holdBookingReply();
       await meetBotTick(at('2026-11-10T14:50:00Z'));
+      await held.arrived;
       const [m] = await calendarMeetings();
       expect((await getMeeting(m.id)).bot?.botId).toBeUndefined();
       expect(kept.length).toBeGreaterThan(0);
+      held.release();
       await Promise.all(kept);
       expect((await getMeeting(m.id)).bot?.botId).toBeTruthy();
     } finally {
