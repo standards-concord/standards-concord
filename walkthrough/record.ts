@@ -322,10 +322,11 @@ async function main() {
 
     // Warm up: compile pages in the dev server and fill caches so nothing loads on camera.
     log('Warming up…');
-    for (const p of ['/', `/o/${ontology.id}`, `/o/${ontology.id}/browse`, `/o/${ontology.id}/source`, `/o/${ontology.id}/query`, `/o/${ontology.id}/changes`, `/o/${ontology.id}/governance`]) await page.goto(`${hub}${p}`, { waitUntil: 'networkidle' }).catch(() => {});
+    for (const p of ['/', `/o/${ontology.id}`, `/o/${ontology.id}/browse`, `/o/${ontology.id}/source`, `/o/${ontology.id}/query`, `/o/${ontology.id}/changes`, `/o/${ontology.id}/governance`]) await page.goto(`${hub}${p}`, { waitUntil: argv.check ? 'load' : 'networkidle' }).catch(() => {});
     await page.goto(stat.url, { waitUntil: 'networkidle' }).catch(() => {});
 
-    const d = new Director(page, !!argv.strict);
+    // A check run (no video) skips what only paces the video for a viewer (lib/director.ts).
+    const d = new Director(page, !!argv.strict, !!argv.check);
     const ctx: Ctx = {
       d,
       // The tour's coding agent is Claude Code on the web; the features video runs real
