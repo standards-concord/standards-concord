@@ -39,13 +39,27 @@ const fail = (t: string) => ({ content: [{ type: 'text' as const, text: t }], is
 
 const link = (path: string) => `${config.webUrl}${path}`;
 
+/** Concord's plane on its blue tile, served by the web app (apps/web/public). */
+export const MCP_ICONS = [
+  { src: '/icon-512.png', mimeType: 'image/png', sizes: ['512x512'] },
+  { src: '/icon-192.png', mimeType: 'image/png', sizes: ['192x192'] },
+  { src: '/favicon.svg', mimeType: 'image/svg+xml', sizes: ['any'] },
+];
+
 async function resolve(ref: string): Promise<OntologyProject | undefined> {
   return await findProject(ref) ?? (await list<OntologyProject>('ontologies')).find((o) => o.prefix === ref || o.ontologyIRI === ref || o.title.toLowerCase() === ref.toLowerCase());
 }
 
 function buildServer(user: User, agentName: string) {
   const server = new McpServer(
-    { name: 'concord', version: '0.1.0' },
+    {
+      name: 'concord',
+      title: 'Concord',
+      version: '0.1.0',
+      websiteUrl: link('/connect'),
+      // What Claude and other clients show for the connector (drawn by scripts/make-icons.mjs).
+      icons: MCP_ICONS.map((i) => ({ ...i, src: link(i.src) })),
+    },
     {
       instructions:
         'Concord hosts the Open Data Institute ontologies (strict OWL 2). Use list_ontologies and search_terms before inventing your own terms. When the ontology lacks something you need, or a term does not fit your data, call report_gap: you get an answer straight away (use these existing terms / define a local extension / a change request was opened), and the community decides on any change. ' +

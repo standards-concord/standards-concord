@@ -26,12 +26,10 @@ test.describe('looks', () => {
 
   test('the ODI look carries the ODI logo; the other looks carry no ODI branding', async ({ page }) => {
     await signIn(page, { name: 'Brand tester' });
-    const icon = () => page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="icon"]')!.href);
     await page.goto('/?look=odi');
     await settle(page);
     const header = page.locator('.app-header');
     await expect(header.getByRole('img', { name: 'Open Data Institute' })).toBeVisible();
-    expect(await icon()).toContain('M160');
     // Square corners and no drop shadows, as the ODI brand asks.
     const card = await page.evaluate(() => {
       const probe = document.createElement('div');
@@ -48,7 +46,6 @@ test.describe('looks', () => {
       await page.goto(`/?look=${id}`);
       await settle(page);
       await expect(header.getByRole('img', { name: 'Open Data Institute' }), id).toBeHidden();
-      expect(await icon(), id).not.toContain('M160');
     }
   });
 
@@ -56,7 +53,7 @@ test.describe('looks', () => {
     await signIn(page, { name: 'Mark tester' });
     const home = page.getByRole('link', { name: 'Concord: home' });
     const mark = home.locator('svg[data-logo="concord"]');
-    const icon = () => page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="icon"]')!.href);
+    const icon = () => page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="icon"][type="image/svg+xml"]')!.href);
     for (const id of LOOKS) {
       await page.goto(`/?look=${id}`);
       await settle(page);
@@ -85,18 +82,14 @@ test.describe('looks', () => {
         return same;
       }, [drawn.tile, drawn.accent] as const), `${id}: the tile takes the look's accent`).toBe(true);
       if (id === 'odi') {
-        // The ODI look keeps the ODI logo and its tab icon, with Concord's mark after the logo.
+        // The ODI look keeps the ODI logo, with Concord's mark after it.
         const odi = await home.getByRole('img', { name: 'Open Data Institute' }).boundingBox();
         const ours = await mark.boundingBox();
         expect(odi!.x + odi!.width, 'ODI logo comes first').toBeLessThan(ours!.x);
-        expect(await icon()).toContain('M160');
-      } else {
-        // The plain plane (no slipstream, which is noise at 16px), not the old two-circle mark.
-        const href = decodeURIComponent(await icon());
-        expect(href, id).toContain('rotate(45 32 32)');
-        expect(href, id).toContain("fill-opacity='.62'");
-        expect(href, id).not.toContain('circle');
       }
+      // Every look, the ODI one included, has Concord's plain plane (no slipstream, which is
+      // noise at 16px) as its tab icon; app-icon.spec.ts checks the file itself.
+      expect(new URL(await icon()).pathname, id).toBe('/favicon.svg');
     }
   });
 
