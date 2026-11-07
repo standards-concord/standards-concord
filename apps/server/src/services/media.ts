@@ -182,6 +182,8 @@ export const MAX_TEMP_TOTAL = 32 * 1024 * 1024;
 
 /** Downloads under way into the temporary disk, each holding MAX_TEMP_DOWNLOAD of the total until it ends. */
 let reserved = 0;
+/** For tests: the room downloads under way hold now, in downloads. */
+export const tempReserved = () => reserved;
 
 /** Removes the cache's oldest files until it holds at most `budget` bytes (files being downloaded now are kept). */
 function trimCache(budget: number) {
@@ -226,6 +228,9 @@ export async function mediaFile(name: string): Promise<string | undefined> {
   const url = asset.url;
   let job = downloads.get(target);
   if (!job) {
+    // The room is given back in the same step that stops counting the download as under way (trimCache skips the
+    // files of downloads under way): otherwise a download admitted in between wouldn't count this one's file.
+    let held = false;
     job = (async () => {
       // A link (or file) where the asset's folder belongs is removed, never written through.
       const st = fs.lstatSync(folder, { throwIfNoEntry: false });
@@ -244,6 +249,7 @@ export async function mediaFile(name: string): Promise<string | undefined> {
         if (room < 0) throw new Error(`Downloading ${name}: too many downloads at once; try again shortly`);
         trimCache(room);
         reserved++;
+        held = true;
       }
       const tmp = `${target}.part`;
       try {
@@ -262,14 +268,15 @@ export async function mediaFile(name: string): Promise<string | undefined> {
       } catch (err) {
         fs.rmSync(tmp, { force: true });
         throw err;
-      } finally {
-        if (small) reserved--;
       }
       fs.renameSync(tmp, target);
       const ok = regularFileIn(folder, name, cacheRoot());
       if (!ok) throw new Error(`Downloading ${name}: the cached copy isn't a plain file`);
       return ok;
-    })().finally(() => downloads.delete(target));
+    })().finally(() => {
+      downloads.delete(target);
+      if (held) reserved--;
+    });
     downloads.set(target, job);
   }
   return job;

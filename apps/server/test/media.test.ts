@@ -310,6 +310,27 @@ describe('on Vercel', () => {
     fs.rmSync(old, { recursive: true, force: true });
   });
 
+  // Review r3 of step 5: a finished download gave its room back before it stopped being counted as under way, so
+  // a download admitted in between neither counted its room nor could trim its file, and the total went over.
+  it('holds a download’s room until it is no longer counted as under way', async () => {
+    process.env.CONCORD_MEDIA_REDIRECT = 'true';
+    stubGitHub(release(9207, 'v-held', 92007, 'https://dl.example/held'), { 'https://dl.example/held': 'WEBVTT\n' });
+    const media = await fresh();
+    const rename = fs.renameSync.bind(fs);
+    const seen: number[] = [];
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      seen.push(media.tempReserved());
+      return rename(from, to);
+    });
+    try {
+      await media.mediaFile('concord-walkthrough.vtt');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(seen).toEqual([1]);
+    expect(media.tempReserved()).toBe(0);
+  });
+
   it('serves videos itself on the VM', async () => {
     process.env.CONCORD_MEDIA_REDIRECT = 'false';
     stubGitHub(release(9203, 'v-vm', 92003, 'https://dl.example/v'), {});
