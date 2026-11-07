@@ -55,14 +55,15 @@ beforeAll(async () => {
 });
 
 describe('meetings are for the working group', () => {
-  it('signed-out visitors and contributors get no meetings, transcripts or streams (finding 2)', async () => {
+  it('signed-out visitors and contributors get no meetings, transcripts or live updates (finding 2)', async () => {
     const id = await meetingId();
     // Signed out: meetings are behind sign-in altogether.
     expect((await request(app).get(`/api/ontologies/${demoId}/meetings`)).status).toBe(401);
     expect((await request(app).get(`/api/meetings/${id}`)).status).toBe(401);
-    expect((await request(app).get(`/api/meetings/${id}/stream`)).status).toBe(401);
+    expect((await request(app).get(`/api/meetings/${id}/updates`)).status).toBe(401);
     const contributor = await login('contributor');
     expect((await contributor.get(`/api/meetings/${id}`)).status).toBe(404);
+    expect((await contributor.get(`/api/meetings/${id}/updates?from=0`)).status).toBe(404);
     expect((await contributor.get(`/api/ontologies/${demoId}/meetings`)).body).toEqual([]);
   });
 

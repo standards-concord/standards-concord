@@ -108,6 +108,6 @@ Vercel runs several function instances at once, each with its own memory, so not
 The ontology is also available in the browser: the Query tab loads it into sparq and runs SPARQL and SHACL checks locally, and the health panel can rerun the OWL 2 DL reasoner (sparq's `checkOwlDl`) in the browser. The server runs the same reasoner, with no Java, because the result gates change requests and must not come from the reviewer's own machine. The rest needs a server that stays up:
 
 - **Agents** connect to `/mcp` from their own machines, signing in with OAuth, and their gap reports open change requests that everyone sees.
-- **Live meetings** need a webhook that Recall.ai calls as people speak, and a stream that pushes the co-facilitator's prompts to everyone watching.
+- **Live meetings** need a webhook that Recall.ai calls as people speak; the meeting page asks every couple of seconds for new lines and the co-facilitator's prompts.
 - **The governance clock** has to run when nobody has the site open, so review periods end and votes close on time.
 - **Private data** goes into Solid pods on the bundled Community Solid Server, and each ontology's history lives in git.

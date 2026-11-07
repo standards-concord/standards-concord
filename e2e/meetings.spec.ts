@@ -223,6 +223,37 @@ test.describe('Meet co-lead bot', () => {
     await expectNoCrash(page);
   });
 
+  // Live updates came over a stream that only heard what happened on the server it was connected to, so on
+  // Vercel (several instances) lines that reached another instance never showed. The page now asks for what's new
+  // every couple of seconds, with the lines it has as the cursor, so nothing is missed or shown twice.
+  test('a live call’s transcript fills in as people speak, each line once, also after a reload', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    const r = await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E polled call', delayMs: 700 } });
+    expect(r.ok()).toBeTruthy();
+    const m = (await r.json()) as { id: string };
+    await page.goto(`/o/${demo.id}/meetings/${m.id}`);
+    await expect(page.getByText('Live', { exact: true })).toBeVisible();
+    const first = page.getByText('Thanks for joining. Today', { exact: false });
+    await expect(first).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.getByText('Is a shift different from what we call a session', { exact: false })).toBeVisible({ timeout: 15_000 });
+    await page.reload();
+    await expect(page.getByText('In our CRM we store shifts as recurring sessions', { exact: false })).toBeVisible({ timeout: 15_000 });
+    await expect(first).toHaveCount(1);
+    await page.getByRole('button', { name: 'End call and analyse' }).click();
+    await expect(page.getByRole('heading', { name: 'Summary' })).toBeVisible({ timeout: 30_000 });
+    await expectNoCrash(page);
+  });
+
+  test('a contributor can’t follow a live call’s updates', async ({ page, request }) => {
+    const demo = await demoOntology(request);
+    const r = await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E members only', delayMs: 0 } });
+    const m = (await r.json()) as { id: string };
+    await signIn(page, { name: 'E2E onlooker', role: 'contributor' });
+    expect((await page.request.get(`/api/meetings/${m.id}/updates?from=0`)).status()).toBe(404);
+    // Back as a facilitator, for this file's clean-up.
+    await signIn(page, { name: 'E2E facilitator', role: 'steward' });
+  });
+
   test('a finished meeting opens on its summary, with the transcript, prompts and extracted items one click away', async ({ page, request }) => {
     const demo = await demoOntology(request);
     const r = await page.request.post(`/api/ontologies/${demo.id}/meetings/simulate`, { data: { title: 'E2E finished call', delayMs: 0 } });

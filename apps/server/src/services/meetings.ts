@@ -877,7 +877,7 @@ export async function simulateCall(project: OntologyProject, user: User, title: 
 }
 
 async function carryOn(id: string, delay: number) {
-  for (let more = true; more; more = await advanceSimulation(id)) await new Promise((r) => setTimeout(r, delay));
+  for (let more = true; more; more = await advanceSimulation(id)) await new Promise((r) => setTimeout(r, delay).unref?.());
 }
 
 /** Whether a simulated call still has lines to come. */

@@ -13,6 +13,7 @@ import { getProject, members, updateProject } from '../src/services/ontologies.j
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { publishRelease, releaseApproval, releaseGovernance } from '../src/services/releases.js';
+import { getMeeting, saveMeeting } from '../src/services/meetings.js';
 import type { Release, Vote } from '@concord/shared';
 
 const app = createApp();
@@ -366,6 +367,33 @@ describe('requirements', () => {
     expect(got.body.transcript.length).toBeGreaterThan(10);
     expect(got.body.facilitatorPrompts.length).toBeGreaterThan(0);
     expect(got.body.status).toBe('analysed');
+  });
+
+  // Live updates came over a long-lived stream that only heard what happened on its own server, so on Vercel a
+  // viewer missed lines that reached another instance, and a simulated call stopped when its instance did. The
+  // page now polls for what's new, with the lines it has as the cursor, and polling carries a simulated call on.
+  it('sends a live call’s new lines from where the page is, and carries a simulated call on', async () => {
+    const tester = await login('steward', 'Steward Poll');
+    const m = await tester.post(`/api/ontologies/${demoId}/meetings/simulate`).send({ title: 'Polled call', delayMs: 600_000 });
+    expect(m.status).toBe(201);
+    // As if the server that started it had stopped after three lines' time.
+    const stored = await getMeeting(m.body.id);
+    await saveMeeting({ ...stored, simulation: { ...stored.simulation!, startedAt: Date.now() - 3 * 600_000 - 1000 } });
+    let lines = 0;
+    for (let i = 0; i < 100 && lines < 3; i++) {
+      const u = await tester.get(`/api/meetings/${m.body.id}/updates?from=0`);
+      expect(u.status).toBe(200);
+      expect(u.body.meeting.transcript).toEqual([]);
+      lines = u.body.lines.length;
+      if (lines < 3) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(lines).toBe(3);
+    const since = await tester.get(`/api/meetings/${m.body.id}/updates?from=2`);
+    expect(since.body).toMatchObject({ from: 2, meeting: { status: 'live' } });
+    expect(since.body.lines).toHaveLength(1);
+    // A cursor past the end gets everything again.
+    expect((await tester.get(`/api/meetings/${m.body.id}/updates?from=99`)).body).toMatchObject({ from: 0, lines: expect.arrayContaining([expect.anything()]) });
+    expect((await tester.post(`/api/meetings/${m.body.id}/end`)).status).toBe(200);
   });
 });
 

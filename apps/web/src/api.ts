@@ -334,6 +334,8 @@ export const api = {
   meetBot: () => get<MeetBotInfo>('/api/meet-bot'),
   syncMeetBot: () => post<MeetBotInfo>('/api/meet-bot/sync'),
   meeting: (id: string) => get<Meeting>(`/api/meetings/${e(id)}`),
+  /** A live call's news since the page's `from` transcript lines: the meeting without its transcript, and the lines from `from` on. */
+  meetingUpdates: (id: string, from: number) => get<{ meeting: Meeting; from: number; lines: TranscriptLine[] }>(`/api/meetings/${e(id)}/updates?from=${from}`),
   updateMeeting: (id: string, changes: { postPromptsToChat?: boolean; skip?: boolean; approve?: boolean }) => patch<Meeting>(`/api/meetings/${e(id)}`, changes),
   postPrompt: (id: string, index: number) => post<Meeting>(`/api/meetings/${e(id)}/prompts/${index}/post`),
   endMeeting: (id: string) => post<Meeting>(`/api/meetings/${e(id)}/end`),
@@ -467,55 +469,6 @@ export const api = {
   alphaVisit: (body: { version: string; commit?: string; role?: string }) => post<AlphaMe>('/api/alpha/visit', body),
   transcribe: (audio: Blob) => request<{ text: string }>('POST', '/api/transcribe', audio, { headers: { 'Content-Type': audio.type || 'audio/webm' } }),
 };
-
-/* ---------------------------------------------------------------- SSE */
-
-export type MeetingStreamEvent =
-  | { type: 'line'; line: TranscriptLine }
-  | { type: 'prompt'; prompt: Meeting['facilitatorPrompts'][number] }
-  | { type: 'status'; status: Meeting['status']; meeting?: Meeting }
-  | { type: 'meeting'; meeting: Meeting };
-
-/**
- * Subscribe to a live meeting. Accepts either `{type:'line', line:{...}}` or a
- * flattened `{type:'line', speaker, text, t}` payload (and likewise for
- * prompts), so the server can choose either shape. Returns an unsubscribe fn.
- */
-export function streamMeeting(meetingId: string, onEvent: (ev: MeetingStreamEvent) => void, onError?: () => void): () => void {
-  if (typeof EventSource === 'undefined') return () => {};
-  const es = new EventSource(`/api/meetings/${e(meetingId)}/stream`, { withCredentials: true });
-  const handle = (raw: string, fallbackType?: string) => {
-    let data: Record<string, unknown>;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      return;
-    }
-    const type = (data.type as string) ?? fallbackType;
-    if (type === 'line') {
-      const line = (data.line as TranscriptLine) ?? { speaker: String(data.speaker ?? ''), text: String(data.text ?? ''), t: data.t as number | undefined };
-      onEvent({ type: 'line', line });
-    } else if (type === 'prompt') {
-      const prompt = (data.prompt as Meeting['facilitatorPrompts'][number]) ?? {
-        at: String(data.at ?? new Date().toISOString()),
-        t: data.t as number | undefined,
-        text: String(data.text ?? ''),
-        posted: Boolean(data.posted),
-      };
-      onEvent({ type: 'prompt', prompt });
-    } else if (type === 'status') {
-      onEvent({ type: 'status', status: data.status as Meeting['status'], meeting: data.meeting as Meeting | undefined });
-    } else if (type === 'meeting' && data.meeting) {
-      onEvent({ type: 'meeting', meeting: data.meeting as Meeting });
-    }
-  };
-  es.onmessage = (m) => handle(m.data);
-  for (const t of ['line', 'prompt', 'status', 'meeting']) es.addEventListener(t, (m) => handle((m as MessageEvent).data, t));
-  es.onerror = () => {
-    if (es.readyState === EventSource.CLOSED) onError?.();
-  };
-  return () => es.close();
-}
 
 export function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message;

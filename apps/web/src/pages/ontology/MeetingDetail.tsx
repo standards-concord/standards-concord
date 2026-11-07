@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router';
 import type { Meeting, MeetingAnalysis, UseCase } from '@concord/shared';
 import { useCaseLabel } from '@concord/shared';
 import { ArrowLeft, Bot, CircleHelp, ClipboardList, Gavel, Lightbulb, MessageSquare, MessageSquareWarning, PhoneOff, Repeat, Send, ScanSearch } from 'lucide-react';
-import { api, streamMeeting } from '../../api';
+import { api } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { formatDate, relativeTime, titleCase } from '../../lib/format';
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorCard, InlineError, Loading, Segmented, Spinner, Toggle } from '../../components/ui';
@@ -31,6 +31,9 @@ function fmtT(t?: number) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** How often a live call's page asks for new lines and prompts. */
+const LIVE_POLL_MS = 2000;
+
 export function MeetingDetailPage() {
   const { meetingId = '' } = useParams();
   const { id } = useOntology();
@@ -43,23 +46,27 @@ export function MeetingDetailPage() {
   const waitingBot = !!m.data?.bot && ['scheduled', 'joining', 'in-call'].includes(m.data.bot.status) && !live && !scheduled;
   const processing = m.data?.status === 'processing';
 
-  // Live updates over SSE while the meeting is live.
+  // Live updates while the call is on: the page asks for what's new every couple of seconds. The transcript
+  // only grows, so the lines the page has are the cursor; asking again (or twice at once) never duplicates a line.
+  const transcriptLength = useRef(0);
+  transcriptLength.current = m.data?.transcript.length ?? 0;
   useEffect(() => {
     if (!live) return;
-    return streamMeeting(
-      meetingId,
-      (ev) => {
-        if (ev.type === 'line') m.setData((p) => (p ? { ...p, transcript: [...p.transcript, ev.line] } : (p as unknown as Meeting)));
-        else if (ev.type === 'prompt') m.setData((p) => (p ? { ...p, facilitatorPrompts: [...p.facilitatorPrompts, ev.prompt] } : (p as unknown as Meeting)));
-        else if (ev.type === 'meeting') m.setData(ev.meeting);
-        else if (ev.type === 'status') {
-          if (ev.meeting) m.setData(ev.meeting);
-          else m.setData((p) => (p ? { ...p, status: ev.status } : (p as unknown as Meeting)));
-          if (ev.status !== 'live') void m.reload();
-        }
-      },
-      () => void m.reload(),
-    );
+    let asking = false;
+    const t = setInterval(async () => {
+      if (asking) return;
+      asking = true;
+      try {
+        const u = await api.meetingUpdates(meetingId, transcriptLength.current);
+        m.setData((p) => ({ ...u.meeting, transcript: [...(p?.transcript ?? []).slice(0, u.from), ...u.lines] }));
+        if (u.meeting.status !== 'live') void m.reload();
+      } catch {
+        // Tried again on the next tick.
+      } finally {
+        asking = false;
+      }
+    }, LIVE_POLL_MS);
+    return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, meetingId]);
 

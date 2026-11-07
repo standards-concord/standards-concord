@@ -7,7 +7,7 @@ import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
 import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, sessionHandle, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { detached, transaction, get, HttpError, list, put } from '../db.js';
+import { transaction, get, HttpError, list, put } from '../db.js';
 import { filterAsync } from '../asyncList.js';
 import { newId } from '../ids.js';
 import { llm } from '../llm/provider.js';
@@ -573,42 +573,17 @@ export function apiRouter(): Router {
     const shown = await filterAsync(out.useCases, (u) => useCases.canSee(u, user));
     res.json({ useCases: await Promise.all(shown.map((u) => useCases.present(u, user))) });
   });
-  r.get('/meetings/:id/stream', async (req, res) => {
-    const user = requireUser(req);
+  // Live updates while a call is on, polled by the meeting page (every couple of seconds). The meeting record
+  // is the log: its transcript only grows, so `from` (the lines the page has) is the cursor, and whichever
+  // server instance answers reads the same record. A long-lived stream would hold one Vercel function per
+  // viewer for the whole call, and only hear what happened on its own instance.
+  r.get('/meetings/:id/updates', async (req, res) => {
     const m = await visible(req);
-    const show = (x: Meeting) => meetings.meetingView(x, user);
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    const send = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
-    send('meeting', { type: 'meeting', meeting: m });
-    // An EventEmitter listener: nothing awaits it, so its database reads can't be allowed to reject. It runs in
-    // the context of whoever emitted, possibly inside their transaction, so it reads detached from it: what it
-    // sends is committed, and it isn't refused once that transaction has ended. Events go out one at a time, in
-    // the order they were emitted, even when one needs a read and the next doesn't.
-    let queue: Promise<void> = Promise.resolve();
-    const inOrder = (step: () => Promise<void> | void) => {
-      queue = queue.then(step).catch(() => {});
-    };
-    const onEvent = (e: { type: string } & Record<string, unknown>) => {
-      if (e.type === 'status')
-        inOrder(() =>
-          detached(async () => await show(await meetings.getMeeting(m.id))).then(
-            (meeting) => void send('status', { type: 'status', status: e.status, meeting }),
-            () => void send('status', { type: 'status', status: e.status }),
-          ),
-        );
-      else if (e.type === 'meeting')
-        inOrder(async () => {
-          const x = await detached(() => show(e.meeting as Meeting));
-          if (x) send('meeting', { type: 'meeting', meeting: x });
-        });
-      else inOrder(() => void send(e.type, e));
-    };
-    meetings.meetingEvents.on(m.id, onEvent);
-    const ping = setInterval(() => res.write(': ping\n\n'), 20000);
-    req.on('close', () => {
-      clearInterval(ping);
-      meetings.meetingEvents.off(m.id, onEvent);
-    });
+    if (meetings.simulationRunning(m)) void keepAlive(meetings.advanceSimulation(m.id)).catch((err) => console.warn(`[meeting-sim] ${(err as Error).message}`));
+    const asked = Math.floor(Number(req.query.from));
+    // A cursor past the end (or none) gets the whole transcript.
+    const from = Number.isFinite(asked) && asked >= 0 && asked <= m.transcript.length ? asked : 0;
+    res.json({ meeting: { ...m, transcript: [] }, from, lines: m.transcript.slice(from) });
   });
   r.post('/webhooks/recall', async (req, res) => {
     await meetings.recallWebhook(String(req.query.meeting), String(req.query.secret), req.body);
