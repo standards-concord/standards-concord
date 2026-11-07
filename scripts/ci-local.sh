@@ -14,8 +14,8 @@
 # ci-local-logs/<commit>/summary.md, which a Claude thread (whose GitHub proxy doesn't allow
 # posting statuses) posts on the pull request as a comment instead.
 #
-# Speed: the jobs run side by side (--parallel, default two per CPU: browser tests mostly
-# wait), and the browser suite is split into --shards pieces (default 6) of similar length by
+# Speed: the jobs run side by side (--parallel, default one and a half per CPU: browser tests
+# mostly wait; more than that starves the unit tests' timing checks), and the browser suite is split into --shards pieces (default 6) of similar length by
 # e2e/timings.json (scripts/e2e-shards.mjs), each with its own API server, web server, data
 # directory and ports, so no two pieces share state. The web app is built once up front. As
 # in CI, the dev server gets a smoke test and the production build the whole suite.
@@ -29,7 +29,8 @@ root=$(pwd)
 
 report=false
 update_timings=false
-parallel=$(( $(nproc 2>/dev/null || echo 4) * 2 ))
+cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)
+parallel=$(( cpus + cpus / 2 ))
 shards=6
 jobs=()
 while [ $# -gt 0 ]; do
@@ -106,7 +107,9 @@ piece_test-unit() {
   export TEST_DATABASE_URL="${TEST_DATABASE_URL:-$pg_base/ci_unit}"
   ./toolkit/setup.sh >/dev/null || return 1
   pnpm -r typecheck || return 1
-  pnpm -r test || return 1
+  # One package at a time: each test runner already uses every CPU, and four at once (next to
+  # the database run of the server tests) left the timing checks too little CPU to pass.
+  pnpm -r --workspace-concurrency=1 test || return 1
   node scripts/public-url.mjs --check || return 1
   # The schemas are fetched online. NODE_USE_ENV_PROXY lets Node's fetch use HTTPS_PROXY where a
   # sandbox only reaches the internet through one (a no-op elsewhere). As in CI, a schema that
@@ -152,15 +155,17 @@ piece_e2e-dev() { e2e_env 0; E2E_MODE=dev pnpm test:e2e:smoke --output test-resu
 piece_e2e-solid() { pnpm test:e2e:solid; }
 piece_walkthrough() {
   WALKTHROUGH_BROWSER_TESTS=1 pnpm --filter @concord/walkthrough test || return 1
+  renice -n 10 -p $BASHPID >/dev/null 2>&1 # its unit tests have time limits; the check below just waits
   pnpm walkthrough --check --strict
 }
 
-# Longest first, so the slowest pieces start straight away.
+# The unit tests first (they use the most CPU, and nothing else gets ahead of them), then the
+# longest pieces, so the slowest start straight away.
 pieces=()
 want() { printf '%s\n' "${jobs[@]}" | grep -qx "$1"; }
+want test && pieces+=(test:unit test:store)
 want walkthrough && pieces+=(walkthrough:all)
 for i in $(seq 1 "$shards"); do want e2e-preview && pieces+=("e2e-preview:$i"); done
-want test && pieces+=(test:unit test:store)
 want e2e-dev && pieces+=(e2e-dev:smoke)
 want e2e-solid && pieces+=(e2e-solid:all)
 
@@ -169,7 +174,7 @@ run_piece() { # job:part
   # The unit tests include timing checks ("answers within 5 s", "doesn't block the main
   # thread"), so they keep normal priority; the browser pieces, which mostly wait anyway,
   # run at low priority and soak up whatever CPU is left.
-  [ "$job" = test ] || renice -n 10 -p $BASHPID >/dev/null 2>&1
+  [ "$job" = test ] || [ "$job" = walkthrough ] || renice -n 10 -p $BASHPID >/dev/null 2>&1
   case "$job" in
     test) "piece_test-$part" ;;
     e2e-preview) piece_e2e-preview "$part" ;;
@@ -216,7 +221,7 @@ done
 while [ "$running" -gt 0 ]; do finish_one; done
 total=$(( $(date +%s) - started ))
 cpu_total=$(( ($(cpu_usec) - cpu_started) / 1000000 ))
-[ "$cpu_total" -gt 0 ] && echo "CPU used: ${cpu_total}s over ${total}s on $(nproc) CPUs ($(( cpu_total * 100 / (total * $(nproc)) ))% busy)"
+[ "$cpu_total" -gt 0 ] && echo "CPU used: ${cpu_total}s over ${total}s on $cpus CPUs ($(( cpu_total * 100 / (total * cpus) ))% busy)"
 if $update_timings && ls "$logdir"/preview-*.json >/dev/null 2>&1; then node scripts/e2e-shards.mjs --update "$logdir"/preview-*.json; fi
 
 printf '### Local CI run\n\nCommit `%s`, run by `%s` with `scripts/ci-local.sh`, %s, in %dm%02ds.\n\n| Job | Result |\n| --- | --- |\n' \

@@ -24,16 +24,30 @@ function trackNetwork(page: Page) {
   if (network.has(page)) return;
   const t = { inflight: new Set<Request>(), last: Date.now() };
   network.set(page, t);
+  // The main frame's document request since the last time it committed a document.
+  let pendingDocument: Request | undefined;
   page.on('request', (r) => {
     if (r.resourceType() === 'eventsource') return;
     t.inflight.add(r);
     t.last = Date.now();
+    if (r.isNavigationRequest() && r.frame() === page.mainFrame()) pendingDocument = r;
   });
   const done = (r: Request) => {
     if (t.inflight.delete(r)) t.last = Date.now();
   };
   page.on('requestfinished', done);
   page.on('requestfailed', done);
+  // When a new document loads, a request the old one still had in flight (a font, say) is dropped,
+  // and Playwright sometimes reports neither its end nor its failure. It used to stay "in flight"
+  // for good, so every later settle() on the page waited out its full 10 s, and a test that visits
+  // ten pages ran past its time limit. A new document can only start requests once it commits,
+  // so whatever is in flight then, apart from the document itself, was the old document's. (A
+  // client-side route change has no document request, so it drops nothing.)
+  page.on('framenavigated', (f) => {
+    if (f !== page.mainFrame() || !pendingDocument) return;
+    for (const r of t.inflight) if (r !== pendingDocument) t.inflight.delete(r);
+    pendingDocument = undefined;
+  });
 }
 
 export const test = base.extend<{ consoleGuard: ConsoleGuard }>({
