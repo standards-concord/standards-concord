@@ -113,7 +113,8 @@ test.describe('app checks', () => {
     await page.getByRole('button', { name: 'Connect app' }).click();
     const token = (await page.getByTestId('app-token').innerText()).trim();
     expect(token).toMatch(/^cna_/);
-    await expect(page.getByText('standards-concord/standards-concord/actions/app-check@main')).toBeVisible();
+    // From the action's public home, so repositories anywhere can use it.
+    await expect(page.getByText('standards-concord/app-check@v1')).toBeVisible();
     // The workflow is syntax-highlighted as YAML: keys, strings and comments get their own colours.
     const workflow = page.getByRole('region', { name: 'Workflow file' });
     await expect(workflow).toHaveAttribute('data-language', 'yaml');
