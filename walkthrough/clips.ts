@@ -106,7 +106,7 @@ export const clipActions: Record<string, Action> = {
     await c.d.label('');
     await signInAs(c, 'Priya Shah');
     await c.d.chapter({ eyebrow: 'Concord · Feature clip', title: c.scene?.title ?? 'Concord', sub: c.ontology.title }, 1700);
-    await sleep(500);
+    await c.d.pause(500);
     const url = tab === 'vote' ? vote?.url : o(c, tab ? `/${tab}` : '');
     if (!url) return c.d.warn('Nothing to open for this clip');
     await c.d.goto(url, { keepCard: true });
@@ -118,7 +118,7 @@ export const clipActions: Record<string, Action> = {
     if (!(await c.d.click(c.d.page.getByRole('button', { name: 'Upload a file' }), 'Upload a file', { settle: false }))) return;
     await (await chooser).setFiles({ name: 'northvale-shifts.ttl', mimeType: 'text/turtle', buffer: Buffer.from(SAMPLE) });
     await c.d.claimVisible(c.d.page.getByTestId('validate-editor').getByText('Saturday food bank shift'), 'the uploaded file is in the editor');
-    await sleep(500);
+    await c.d.pause(500);
     // The newest published release, not the working draft.
     const version = c.d.page.getByLabel('Version to validate against');
     const latest = await version.locator('option', { hasText: '(latest release)' }).first().getAttribute('value').catch(() => null);
@@ -149,7 +149,7 @@ export const clipActions: Record<string, Action> = {
       /* claimed below */
     }
     c.d.claim(isTheReport(report), 'the JSON download is the report, with the minimum age violation');
-    await sleep(400);
+    await c.d.pause(400);
     const turtle = await download(c, c.d.page.getByRole('button', { name: 'SHACL report (Turtle)' }), 'the SHACL report download');
     c.d.claim(isTheTurtleReport(turtle), 'the Turtle download is a SHACL validation report of the same problem');
     await c.d.highlight(c.d.page.getByRole('button', { name: 'SHACL report (Turtle)' }), 'the SHACL report download');
@@ -176,7 +176,7 @@ export const clipActions: Record<string, Action> = {
     await c.d.settle();
     await c.d.label(SCRIPTED_INTERVIEWER);
     await c.d.highlight(c.d.page.getByRole('log').or(c.d.page.getByText(/^Hi! I'm helping gather requirements/)).first(), 'the first question');
-    await sleep(1200);
+    await c.d.pause(1200);
     await c.d.pointAt(c.d.page.getByRole('button', { name: 'Start voice input' }), 'the mic');
   },
   async 'c-answer'(c) {
@@ -187,6 +187,7 @@ export const clipActions: Record<string, Action> = {
     await c.d.claimVisible(c.d.page.getByText(/^Got it\./), 'the interviewer asks the next question', 20_000);
     // Back to the top first, so the layout switch isn't under the sticky header.
     await c.d.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
+    // A real wait (not pacing): smooth scrolling takes this long to arrive.
     await sleep(600);
     if (!(await c.d.click(c.d.page.getByRole('button', { name: 'Side by side' }), 'Side by side', { settle: false }))) return;
     const doc = c.d.page.getByRole('region', { name: 'Use case document' }).or(c.d.page.locator('section[aria-label="Use case document"]')).first();
@@ -309,9 +310,9 @@ export const clipActions: Record<string, Action> = {
     if (!(await c.d.click(lazy, 'the lazy consensus template', { settle: false }))) return;
     await c.d.claimVisible(c.d.page.getByText('Preview of unsaved changes'), 'the summary previews the template');
     await c.d.claimVisible(c.d.page.getByText(/Silence is consent/).first(), 'lazy consensus means silence is consent');
-    await sleep(300);
+    await c.d.pause(300);
     await c.d.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
-    await sleep(700);
+    await sleep(700); // a real wait: smooth scrolling takes this long to arrive
     await ringAround(c, 'Preview of unsaved changes');
   },
   async 'c-policy-rules'(c) {
@@ -323,7 +324,7 @@ export const clipActions: Record<string, Action> = {
   async 'c-policy-banner'(c) {
     await c.d.clearHighlight();
     await c.d.page.evaluate(() => window.scrollTo({ top: 0, behavior: 'smooth' }));
-    await sleep(700);
+    await sleep(700); // a real wait: smooth scrolling takes this long to arrive
     await c.d.highlight(c.d.page.getByText(/^Editing the policy\. Nothing changes for anyone until you save/), 'the editing banner');
   },
   async 'c-discard'(c) {

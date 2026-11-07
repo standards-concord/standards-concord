@@ -32,6 +32,8 @@ const FILES = [
     set: (j, origin) => {
       j.remotes[0].url = `${origin}/mcp`;
       j.websiteUrl = `${origin}/connect`;
+      // The connector's icons are served by the web app at the same address.
+      for (const icon of j.icons ?? []) icon.src = `${origin}${new URL(icon.src).pathname}`;
       // Registry versions are immutable, so a new address needs a new version.
       j.version = bump(j.version);
     },
@@ -82,6 +84,12 @@ if (!arg) {
   const [url] = urls;
   if (!/^https:\/\/[^/]+\/mcp$/.test(url)) {
     console.error(`The public MCP URL must be https://<host>/mcp, got ${url}`);
+    process.exit(1);
+  }
+  const origin = new URL(url).origin;
+  const strays = (read('server.json').icons ?? []).filter((i) => new URL(i.src).origin !== origin);
+  if (strays.length) {
+    console.error(`server.json's icons must be served from ${origin}: ${strays.map((i) => i.src).join(', ')}`);
     process.exit(1);
   }
   console.log(`OK: ${url}`);
