@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
-import { openDb } from '../src/db.js';
+import { get, openDb, put } from '../src/db.js';
 import { solid } from '../src/services/solid.js';
 import { clientCredentialsLogin, finishLogin, guardedFetch, guardedRequests, podReader, podRequester, resolveIssuer, startLogin } from '../src/solidOidc.js';
 
@@ -221,6 +222,30 @@ describe('Solid-OIDC against a scripted provider', () => {
     expect(done.login.accessToken).toBe('at-1');
     // Discovery, the profile, registration, token, JWKS and the profile again: all guarded (checked after each test).
     expect(seen.map((r) => new URL(r.split(' ')[1]!).pathname)).toEqual(expect.arrayContaining(['/.well-known/openid-configuration', '/register', '/token', '/jwks', '/alice/profile/card']));
+  });
+
+  it('keeps a sign-in in progress in the database, so any server can finish it, and only once', async () => {
+    // Step 5 (Vercel): the sign-in in progress was in this process's memory, so a callback reaching another
+    // function instance failed with "it expired or was started in another browser".
+    const { as } = await resolveIssuer(webId());
+    const { loginId, url } = await startLogin(as, '/somewhere');
+    const row = `solid-login:${createHash('sha256').update(loginId).digest('hex')}`;
+    expect(await get('kv', row)).toMatchObject({ returnTo: '/somewhere', solidLoginExpires: expect.any(Number) });
+    const auth = new URL(url);
+    expectedNonce = auth.searchParams.get('nonce')!;
+    const callback = `${config.publicUrl}/auth/solid/callback?code=abc&state=${auth.searchParams.get('state')}`;
+    expect((await finishLogin(loginId, callback)).webId).toBe(webId());
+    expect(await get('kv', row)).toBeUndefined();
+    await expect(finishLogin(loginId, callback)).rejects.toThrow(/expired or was started in another browser/);
+  });
+
+  it('refuses a sign-in that has expired', async () => {
+    const { as } = await resolveIssuer(webId());
+    const { loginId, url } = await startLogin(as, '/somewhere');
+    const row = `solid-login:${createHash('sha256').update(loginId).digest('hex')}`;
+    await put('kv', { ...(await get<object>('kv', row))!, id: row, solidLoginExpires: Date.now() - 1 });
+    const callback = `${config.publicUrl}/auth/solid/callback?code=abc&state=${new URL(url).searchParams.get('state')}`;
+    await expect(finishLogin(loginId, callback)).rejects.toThrow(/expired/);
   });
 
   it('finishes with the provider metadata it started with, never fetching it again', async () => {
