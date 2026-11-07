@@ -1,10 +1,9 @@
 import type { Request, Response } from 'express';
 import { APP_RELEASES, APP_VERSION, compareVersions, findRelease, parseVersion, TESTER_ROLE_KEYS, type AlphaMe, type AlphaTesterInfo, type FeedbackSubmission, type TesterRoleKey, type TestedVersion, type User } from '@concord/shared';
 import { config } from '../config.js';
-import { withLease } from '../lease.js';
 import { get, HttpError, put, transaction } from '../db.js';
 import { createSession, destroySession, destroyUserSessions, sessionUser } from './users.js';
-import { solid } from './solid.js';
+import { PreconditionFailed, solid } from './solid.js';
 
 /**
  * Alpha testers and the app versions they have tested.
@@ -83,12 +82,15 @@ interface RecordDoc {
   '@context': unknown;
   '@id': string;
   '@type': string;
+  /** The record's revision here (HistoryDoc.rev), so a writer can tell whether the copy is already newer. */
+  revision?: number;
   versions: TestedVersion[];
 }
 
 const CONTEXT = {
   '@vocab': 'https://schema.org/',
   concord: 'https://w3id.org/concord/alpha#',
+  revision: { '@id': 'concord:revision', '@type': 'http://www.w3.org/2001/XMLSchema#integer' },
   versions: { '@id': 'concord:testedVersion', '@container': '@set' },
   version: 'softwareVersion',
   commit: 'concord:commit',
@@ -196,47 +198,76 @@ const podKind = (u: User): 'solid' | 'local' => (config.solid.serverUrl && u.pod
 const podUrlOf = (u: User, rel: string) => (podKind(u) === 'solid' && u.podUrl ? `${u.podUrl}concord/${rel}` : `${config.publicUrl}/people/${u.id}/private/${rel}`);
 
 /**
- * Bring the tester's pod copy up to date (one write at a time per tester, always
- * from the latest history). Failures are logged and retried on a later change or
- * visit; the history itself is already safe on this server.
+ * Bring the tester's pod copy up to date (one write at a time per tester on this instance, always from the latest
+ * history). Failures are logged and retried on a later change or visit; the history itself is already safe here.
  *
- * One instance at a time, too (a lease per tester): two instances writing at once could land an older revision
- * after a newer one while recording the newer as mirrored. An instance that finds another mirroring leaves it to
- * that one; a revision that one missed is copied on the next change or visit.
+ * Instances writing at once are ordered by the copy itself: every write after the first replaces exactly the
+ * version it read (If-Match), and the copy says which revision it holds. A writer whose condition fails reads the
+ * copy again: if it already holds this revision or a newer one, there is nothing to do; otherwise it tries again
+ * on what is there now. So the copy never goes back to an older revision, and `mirroredRev` only records a revision
+ * the copy has.
  */
 const mirrors = new Map<string, Promise<void>>();
 export function mirrorToPod(user: User): Promise<void> {
   // Read-only (the cutover): nothing is copied, and the next visit after it catches up.
   if (config.readOnly) return Promise.resolve();
-  return runSerially(mirrors, user.id, async () => {
-    await withLease(`alpha-mirror:${user.id}`, 60_000, () => mirrorNow(user), { wait: false }).catch((err) =>
-      console.warn(`[alpha] pod copy of ${user.id}'s testing record is behind: ${(err as Error).message}`),
-    );
-  });
+  return runSerially(mirrors, user.id, () => mirrorNow(user));
 }
+
+/** Tries at replacing the copy before leaving it to the next change or visit. */
+const MIRROR_TRIES = 4;
+const revisionOf = (bytes: Buffer): number => {
+  try {
+    const r = (JSON.parse(bytes.toString('utf8')) as Partial<RecordDoc>).revision;
+    return typeof r === 'number' && Number.isFinite(r) ? r : 0;
+  } catch {
+    return 0;
+  }
+};
 
 async function mirrorNow(user: User): Promise<void> {
   try {
     const h = await history(user.id);
     if (h.mirroredRev === h.rev && !h.feedbackToCopy?.length) return;
-    // The first time, a document already at the record's path (one this server didn't write) is kept, byte for
-    // byte, beside it, and the record only replaces exactly that version (or only creates, if nothing was there).
-    // If the pod can't say, or the document changes in between, nothing is written and it's tried again later.
-    const when = h.keptExisting ? {} : await solid.keepExisting(user.id, RECORD);
     const copied: string[] = [];
     for (const id of h.feedbackToCopy ?? []) {
       const fb = await get<FeedbackSubmission>('feedback', id);
       if (fb) await solid.writeExisting(user.id, `feedback/${id}.json`, JSON.stringify(fb, null, 2), 'application/json');
       copied.push(id);
     }
-    const doc: RecordDoc = { '@context': CONTEXT, '@id': '', '@type': 'concord:AlphaTestingRecord', versions: h.versions };
-    // Straight to the pod or not at all: a fallback copy on this server would just be another stale mirror.
-    await solid.writeExisting(user.id, RECORD, JSON.stringify(doc, null, 2), 'application/ld+json', when);
+    const doc: RecordDoc = { '@context': CONTEXT, '@id': '', '@type': 'concord:AlphaTestingRecord', revision: h.rev, versions: h.versions };
+    const body = JSON.stringify(doc, null, 2);
+    let has: number | undefined;
+    if (!h.keptExisting) {
+      // The first time, a document already at the record's path (one this server didn't write) is kept, byte for
+      // byte, beside it, and the record only replaces exactly that version (or only creates, if nothing was there).
+      // If the pod can't say, or the document changes in between, nothing is written and it's tried again later.
+      await solid.writeExisting(user.id, RECORD, body, 'application/ld+json', await solid.keepExisting(user.id, RECORD));
+      has = h.rev;
+    } else {
+      for (let n = 0; n < MIRROR_TRIES && has === undefined; n++) {
+        const now = await solid.readTagged(user.id, RECORD);
+        const there = now.bytes ? revisionOf(now.bytes) : 0;
+        if (now.bytes && there >= h.rev) {
+          has = there; // another writer got there first, with this revision or a newer one
+          break;
+        }
+        try {
+          // Straight to the pod or not at all: a fallback copy on this server would just be another stale mirror.
+          await solid.writeExisting(user.id, RECORD, body, 'application/ld+json', now.tag ? { ifMatch: now.tag } : { ifNoneMatch: '*' });
+          has = h.rev;
+        } catch (err) {
+          if (!(err instanceof PreconditionFailed)) throw err;
+        }
+      }
+      if (has === undefined) throw new Error(`the copy kept changing while it was being written (${MIRROR_TRIES} tries)`);
+    }
+    const written = has;
     // Re-read and saved in one transaction: a visit saved while the pod was being written must not be lost.
     await transaction(async () => {
       const now = await history(user.id);
       now.keptExisting = true;
-      now.mirroredRev = Math.max(now.mirroredRev, h.rev);
+      now.mirroredRev = Math.max(now.mirroredRev, Math.min(written, now.rev));
       now.feedbackToCopy = now.feedbackToCopy?.filter((id) => !copied.includes(id));
       await put('kv', now);
     });

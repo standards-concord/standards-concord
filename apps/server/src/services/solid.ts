@@ -235,6 +235,23 @@ export const solid = {
     }
   },
 
+  /** What is at a private path now, and the tag that replaces exactly that (the pod's ETag; locally a hash). */
+  async readTagged(userId: string, relPath: string): Promise<{ bytes?: Buffer; tag?: string }> {
+    const rec = await get<PodRecord>('kv', `pod:${userId}`);
+    if (this.enabled && rec) {
+      const req = await ownerRequest({ ...rec, id: userId });
+      const url = `${rec.podUrl}concord/${relPath}`;
+      const res = await req('GET', url);
+      if (res.status === 404 || res.status === 410) return {};
+      if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+      const etag = res.headers.get('etag');
+      if (!etag) throw new Error(`GET ${url} gave no ETag, so it can't be replaced safely`);
+      return { bytes: Buffer.from(await res.arrayBuffer()), tag: etag };
+    }
+    const bytes = await privateStore().read(userId, relPath);
+    return bytes ? { bytes, tag: localTag(bytes) } : {};
+  },
+
   /**
    * Like `write`, but when the user has a pod the write must reach it: no quiet
    * fallback to this server, which later reads of the pod wouldn't see. Throws

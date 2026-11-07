@@ -255,19 +255,41 @@ describe('moving a record', () => {
 });
 
 describe('the pod mirror queue', () => {
-  // On Vercel each function instance had a queue of its own, so two instances could mirror one tester at once and
-  // land an older revision after a newer one while recording the newer as copied. Now one instance at a time
-  // (a lease per tester in the database); the others leave it to that one.
-  it('leaves the copy to another server that is already writing it, and catches up on the next visit', async () => {
-    const u = await tester('mirror-elsewhere');
-    await put('kv', { id: `lease:alpha-mirror:${u.id}`, token: 'another-server', until: Date.now() + 60_000 });
-    const write = vi.spyOn(solid, 'writeExisting');
-    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBe(true);
-    expect(write).not.toHaveBeenCalled();
-    await remove('kv', `lease:alpha-mirror:${u.id}`); // the other server finished (without this revision)
-    expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
-    expect(JSON.parse((await solid.read(u.id, 'alpha/testing.jsonld'))!).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.1', '0.8.0']);
-    expect(await get('kv', `lease:alpha-mirror:${u.id}`)).toBeUndefined();
+  // On Vercel each function instance has a queue of its own, so two instances can copy one tester's record at
+  // once. A lease (review r1 of step 5) didn't fence the write: a holder that overran it could put an older
+  // revision over a newer one and still record the newer as copied. Now each write replaces exactly the version it
+  // read, and the copy names its revision.
+  const copy = async (id: string) => JSON.parse((await solid.read(id, 'alpha/testing.jsonld'))!) as { revision: number; versions: { version: string }[] };
+  const otherServerWrites = (revision: number, versions: string[]) => {
+    const real = solid.readTagged.bind(solid);
+    return vi.spyOn(solid, 'readTagged').mockImplementationOnce(async (id, rel) => {
+      const seen = await real(id, rel);
+      // Between this server's read and its write, another server replaces the copy.
+      await solid.writeExisting(id, rel, JSON.stringify({ revision, versions: versions.map((version) => ({ version })) }), 'application/ld+json', { ifMatch: seen.tag! });
+      return seen;
+    });
+  };
+  afterEach(() => vi.restoreAllMocks());
+
+  it('never puts an older revision over a newer one that another server wrote meanwhile', async () => {
+    const u = await tester('mirror-newer');
+    await recordVersion(u, { version: '0.8.0' });
+    expect((await copy(u.id)).revision).toBe(1);
+    otherServerWrites(50, ['0.9.0', '0.8.1', '0.8.0']);
+    const me = await recordVersion(u, { version: '0.8.1' });
+    expect((await copy(u.id)).revision).toBe(50);
+    expect(me.podBehind).toBeUndefined();
+  });
+
+  it('writes its revision again over an older one that a stalled server put back meanwhile', async () => {
+    const u = await tester('mirror-older');
+    await recordVersion(u, { version: '0.8.0' });
+    otherServerWrites(1, ['0.8.0']);
+    const me = await recordVersion(u, { version: '0.8.1' });
+    const doc = await copy(u.id);
+    expect(doc.revision).toBe(2);
+    expect(doc.versions.map((v) => v.version)).toEqual(['0.8.1', '0.8.0']);
+    expect(me.podBehind).toBeUndefined();
   });
 
   // A failed job used to break the queue for good, and its cleanup crashed the process with an unhandled rejection.
