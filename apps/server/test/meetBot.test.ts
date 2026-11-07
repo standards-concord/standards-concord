@@ -18,6 +18,7 @@ import { canFacilitate, getMeeting, recallWebhook, recordSeriesApproval, saveMee
 import { chatText } from '../src/services/recall.js';
 import { releasingCount as retiringCount, SLOW_LOOKUP_AFTER_MS } from '../src/services/botLifecycle.js';
 import { seedDemo } from '../src/services/simulation.js';
+import { setKeepAlive } from '../src/keepAlive.js';
 import { calendar, oneOff, weeklySeries } from './fixtures/invites.js';
 
 const app = createApp();
@@ -339,6 +340,55 @@ describe('invite-by-email', () => {
     m = await getMeeting(m.id);
     expect(m.status).toBe('analysed');
     expect(m.bot?.status).toBe('done');
+    expect(calls.some((c) => c.url === `/bot/${m.bot!.botId}/leave_call/`)).toBe(true);
+  });
+
+  // Review r1 of step 4: the scheduled tick returns before its requests to Recall.ai finish (each call's lane runs
+  // beside it), so on Vercel the function could be frozen with a booking half sent. The lanes are handed to
+  // keepAlive (waitUntil there) as they start.
+  it('hands the Recall.ai work a tick leaves running to keepAlive, so it finishes after the tick returns', async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    const kept: Promise<unknown>[] = [];
+    setKeepAlive((p) => kept.push(p));
+    try {
+      stubMode.botDelayMs = 200;
+      await meetBotTick(at('2026-11-10T14:50:00Z'));
+      const [m] = await calendarMeetings();
+      expect((await getMeeting(m.id)).bot?.botId).toBeUndefined();
+      expect(kept.length).toBeGreaterThan(0);
+      await Promise.all(kept);
+      expect((await getMeeting(m.id)).bot?.botId).toBeTruthy();
+    } finally {
+      setKeepAlive(() => undefined);
+      await meetBotIdle();
+    }
+  });
+
+  // Review r1 of step 4: when the last transcript line arrived was kept in the memory of the instance that took
+  // the webhook, so another instance's tick saw none and ended a call still in full flow once its slot was over.
+  it('keeps a call going past its slot while lines still arrive, whichever instance took them', async () => {
+    writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
+    await sync(at('2026-11-10T14:00:00Z'));
+    await dispatchDue(at('2026-11-10T14:50:00Z'));
+    await dispatchDue(at('2026-11-10T15:00:30Z'));
+    let [m] = await calendarMeetings();
+    const secret = (await list<{ id: string; secret: string }>('kv')).find((k) => k.id === `meeting-secret:${m.id}`)!.secret;
+    const before = Date.now();
+    await recallWebhook(m.id, secret, { event: 'transcript.data', data: { data: { participant: { name: 'Aisha Rahman' }, words: [{ text: 'Still going.', start_timestamp: { relative: 5 } }] } } });
+    m = await getMeeting(m.id);
+    // Kept on the record, where every instance reads it.
+    expect(m.lastLineAt).toBeGreaterThanOrEqual(before);
+    // Another instance's clock, twenty minutes past the slot, sees a line from two minutes ago on the record.
+    const t = at('2026-11-10T16:20:00Z');
+    await saveMeeting({ ...m, lastLineAt: t.getTime() - 2 * 60_000 });
+    calls.length = 0;
+    await dispatchDue(t);
+    expect((await getMeeting(m.id)).status).toBe('live');
+    expect(calls.some((c) => c.url.includes('leave_call'))).toBe(false);
+    // Quiet for ten minutes more: now it ends.
+    await dispatchDue(at('2026-11-10T16:31:00Z'));
+    await meetBotIdle();
     expect(calls.some((c) => c.url === `/bot/${m.bot!.botId}/leave_call/`)).toBe(true);
   });
 

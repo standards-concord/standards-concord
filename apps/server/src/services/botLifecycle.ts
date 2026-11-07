@@ -4,6 +4,7 @@ import { transaction, get, list, put } from '../db.js';
 import { newId, newToken } from '../ids.js';
 import { dropMeeting, emit, finishCall, meetingLock, saveMeeting } from './meetings.js';
 import { BookingError, IDEMPOTENCY_KEY_MS, recall } from './recall.js';
+import { keepAlive } from '../keepAlive.js';
 
 /**
  * Each meeting's Recall.ai bot is one record (`meeting.bot`) with one state machine:
@@ -277,6 +278,7 @@ const extra = new Set<Promise<unknown>>();
 
 /** Work started but not waited for (analysis after a bot left, say). */
 export function background<T>(p: Promise<T>) {
+  keepAlive(p);
   extra.add(p);
   void p.finally(() => extra.delete(p)).catch(() => undefined);
   return p;
@@ -313,13 +315,14 @@ export function driveStrays(id: string, skip?: Set<string>): Promise<void> {
       triedBefore.delete(id);
       return driveStrays(id, tried);
     });
-    strayQueued.set(id, next);
+    strayQueued.set(id, keepAlive(next));
     return next;
   }
   const run = cancelStrays(id, undefined, skip)
     .catch((err) => console.warn(`[meet-bot] ${id}: ${(err as Error).message}`))
     .finally(() => lanes.delete(id));
-  lanes.set(id, run);
+  // Kept running after the response or scheduled run that started it (Vercel's waitUntil): a lane is a request to Recall.ai.
+  lanes.set(id, keepAlive(run));
   return run;
 }
 
@@ -338,13 +341,14 @@ export function drive(id: string, now?: number): Promise<void> {
       queued.delete(id);
       return drive(id, now);
     });
-    queued.set(id, next);
+    queued.set(id, keepAlive(next));
     return next;
   }
   const run = work(id, now)
     .catch((err) => console.warn(`[meet-bot] ${id}: ${(err as Error).message}`))
     .finally(() => lanes.delete(id));
-  lanes.set(id, run);
+  // Kept running after the response or scheduled run that started it (Vercel's waitUntil): a lane is a request to Recall.ai.
+  lanes.set(id, keepAlive(run));
   return run;
 }
 

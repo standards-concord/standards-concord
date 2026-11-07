@@ -2,6 +2,8 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type express from 'express';
 import { config } from '../config.js';
 import { get, put, transaction } from '../db.js';
+import { keepAlive } from '../keepAlive.js';
+export { setKeepAlive } from '../keepAlive.js';
 
 /**
  * Concord's scheduled work, without a timer of its own on Vercel (docs/deploy.md, issue #112). Each job says how
@@ -64,7 +66,10 @@ interface SchedulerState {
   lastRun: Record<string, number>;
 }
 const STATE = 'scheduler';
-/** Longer than a run can take on Vercel (a function's time limit), so a lease outlives its runner only if it died. */
+/**
+ * How long a run's lease lasts without renewal. A live run renews it every LEASE_MS / 3, so it runs out only when
+ * its runner has died or stalled for that long (an instance frozen, a server gone): only then can another run start.
+ */
 export const LEASE_MS = 5 * MINUTE;
 
 export interface RunResult {
@@ -72,13 +77,20 @@ export interface RunResult {
   failed: { name: string; error: string }[];
   /** Another runner held the lease, so nothing ran. */
   busy?: boolean;
+  /** This run's lease ran out while its jobs were running, so another run may have started beside it (logged). */
+  lostLease?: boolean;
 }
 
 /**
  * Runs every job that is due (all of them with `force`), unless another runner is at it. Resolves once they have
  * finished; a job that fails is logged, recorded in the result, and tried again when it is next due.
+ *
+ * The lease is renewed while the jobs run. It is not a fence: a runner that stalls past LEASE_MS (renewals
+ * failing, or the instance frozen) and then resumes carries on beside the run that took over, until its jobs
+ * end. That window is an accepted limit; each job is safe to run twice at once, since it does its own
+ * check-then-act in transactions or under its own leases (the governance tick, bot lanes, the calendar).
  */
-export async function runDue(opts: { force?: boolean; now?: () => number } = {}): Promise<RunResult> {
+export async function runDue(opts: { force?: boolean; now?: () => number; renewEvery?: number } = {}): Promise<RunResult> {
   // Read-only (the cutover): no scheduled work at all, since jobs call out (Recall.ai, GitHub, pods) before they
   // write to the database, which would refuse.
   if (config.readOnly) return { ran: [], failed: [] };
@@ -98,31 +110,51 @@ export async function runDue(opts: { force?: boolean; now?: () => number } = {})
     return d;
   });
   if (!due) return { ran: [], failed: [], busy: true };
+  let lostLease = false;
+  const renew = async () => {
+    try {
+      await transaction(async () => {
+        const s = await get<SchedulerState>('kv', STATE);
+        if (s?.lease?.token !== token) {
+          if (!lostLease) console.warn(`[schedule] this run's lease ran out and was taken over; ${due.map((j) => j.name).join(', ')} carry on beside the new run`);
+          lostLease = true;
+          return;
+        }
+        await put<SchedulerState>('kv', { ...s, lease: { token, until: now() + LEASE_MS } });
+      });
+    } catch (err) {
+      console.warn(`[schedule] couldn't renew the lease: ${(err as Error).message}`);
+    }
+  };
+  let renewing = Promise.resolve();
+  const timer = setInterval(() => (renewing = renewing.then(renew)), opts.renewEvery ?? LEASE_MS / 3);
+  timer.unref?.();
   const failed: RunResult['failed'] = [];
-  await Promise.all(
-    due.map(async (j) => {
-      try {
-        await j.run();
-      } catch (err) {
-        const error = (err as Error).message;
-        failed.push({ name: j.name, error });
-        console.warn(`[schedule] ${j.name}: ${error}`);
-      }
-    }),
-  );
+  try {
+    await Promise.all(
+      due.map(async (j) => {
+        try {
+          await j.run();
+        } catch (err) {
+          const error = (err as Error).message;
+          failed.push({ name: j.name, error });
+          console.warn(`[schedule] ${j.name}: ${error}`);
+        }
+      }),
+    );
+  } finally {
+    clearInterval(timer);
+    await renewing;
+  }
   // Let the lease go, if it is still this run's.
   await transaction(async () => {
     const s = await get<SchedulerState>('kv', STATE);
     if (s?.lease?.token === token) await put<SchedulerState>('kv', { ...s, lease: undefined });
+    else lostLease = true;
   });
-  return { ran: due.map((j) => j.name), failed };
+  return { ran: due.map((j) => j.name), failed, ...(lostLease ? { lostLease } : {}) };
 }
 
-/** Work started after a response, kept running until it finishes (`waitUntil` on Vercel; nothing to do elsewhere). */
-let keepAlive: (work: Promise<unknown>) => void = () => undefined;
-export function setKeepAlive(fn: (work: Promise<unknown>) => void) {
-  keepAlive = fn;
-}
 const running = new Set<Promise<unknown>>();
 /** Resolves once work started after requests has finished (tests, shutdown). */
 export const scheduledIdle = async () => {

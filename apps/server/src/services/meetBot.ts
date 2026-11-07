@@ -525,7 +525,7 @@ function planOne(meetingId: string, now: Date) {
     } else if (m.status === 'live' && botActive(m)) {
       // A calendar call ends by itself once it's past its slot and quiet (or long overrun). The bot
       // is released here; taking it out happens in the call's lane, beside every other call's.
-      const quietFor = t - (lastLineTime(m.id) ?? 0);
+      const quietFor = t - (lastLineTime(m) ?? 0);
       if ((t > end + QUIET_MS && quietFor > QUIET_MS) || t > end + OVERRUN_MAX_MS) beginRelease(m, 'leave', 'done');
     }
     if (JSON.stringify(m) === before) return;

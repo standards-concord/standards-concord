@@ -383,10 +383,8 @@ export async function uploadTranscript(project: OntologyProject, user: User, tit
 /* ------------------------------------------------------------------------ */
 
 const lastPromptAt = new Map<string, number>();
-const lastLineAt = new Map<string, number>();
-
-/** When the last transcript line of a live call arrived (this process only). */
-export const lastLineTime = (meetingId: string) => lastLineAt.get(meetingId);
+/** When the last transcript line of a live call arrived, whichever server instance it reached. */
+export const lastLineTime = (m: Meeting) => m.lastLineAt;
 
 /** Called for every new transcript line from a live call (bot webhook or simulation). */
 export async function onLiveLine(
@@ -410,10 +408,10 @@ export async function onLiveLine(
     }
     opts.before?.(x);
     x.transcript.push(line);
+    x.lastLineAt = Date.now();
     return save(x);
   });
   if (!accepted) return false;
-  lastLineAt.set(m.id, Date.now());
   emit(m, { type: 'line', line });
   // A notice about chat posting that failed earlier is retried as the call goes on.
   if (m.chatNoticeError || (m.bot?.status === 'in-call' && m.source !== 'simulation' && !!m.postPromptsToChat !== !!m.chatModeAnnounced)) await announceChatMode(meetingId).catch(() => undefined);

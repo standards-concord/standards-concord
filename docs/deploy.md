@@ -81,7 +81,12 @@ Some of Concord's work runs on a schedule: the governance clock (closing review 
 - **On the server**, a timer looks every minute (`CONCORD_SCHEDULE=timer`).
 - **On Vercel**, there is no long-running process (`CONCORD_SCHEDULE=requests`). Each instance looks for due work after a request, at most every 30 seconds. So deadlines are met as soon as anyone visits, including on public pages, and a failed job is retried on the next request. A Vercel Cron call to `GET /api/cron/daily` once a day (the Hobby plan's limit) runs every job, due or not, to catch up after a quiet day.
 
-Only one run goes at a time across every instance. A run takes a lease in the database, which lapses after five minutes if its runner dies. Jobs must be safe to repeat and to run late.
+Only one run goes at a time across every instance. A run takes a lease in the database and renews it every 100 seconds while its jobs run, so the lease lapses only when its runner has died or stalled for five minutes; then another run may start. The lease is not a fence: a runner that stalls that long and then resumes finishes its jobs beside the new run (it logs that it lost the lease). That is an accepted limit, because each job does its own check-then-act in a transaction or under its own lease, and is safe to repeat and to run late. Work a job starts and doesn't wait for, such as a Meet bot's requests to Recall.ai, is kept running after the response that started it (Vercel's `waitUntil`).
+
+What waits for a visitor or the daily call on Vercel (accepted, issue #112):
+
+- **The Meet bot** books Recall.ai as soon as a call is approved, with the time to join, so the bot joins on time even if nobody visits Concord. A series that is already approved has its calls found up to two weeks ahead, so the daily call books them in time. A brand-new invite needs a facilitator to approve it on the Meetings page, and that visit picks it up. During a call, the transcript lines Recall.ai sends are requests too, so the quiet-call and overrun checks run as they arrive. Recall.ai takes the bot out by itself when everyone has left, or after six hours. After the call, its summary and any retries wait for the next visit or the daily call. Recall.ai's status webhook would end that wait; it is the follow-up in #112.
+- **Governance deadlines** (a review period ending, a vote closing) are applied just after the next visit's response, and in the daily call.
 
 ## Before the backend runs on more than one instance
 

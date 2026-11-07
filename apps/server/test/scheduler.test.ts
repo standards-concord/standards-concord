@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { config } from '../src/config.js';
-import { closeDb, openDb, remove } from '../src/db.js';
+import { closeDb, get, openDb, put, remove } from '../src/db.js';
 import { kickScheduled, LEASE_MS, resetKick, runDue, scheduledIdle, useJobs, type ScheduledJob } from '../src/services/scheduler.js';
 
 /**
@@ -77,20 +77,78 @@ describe('scheduled work', () => {
     expect(slow.runs).toBe(1);
   });
 
+  // Review r1 of step 4: the race above only started its rivals once the first run had begun. Here every runner
+  // starts at the same moment, before any of them has the lease.
+  it('lets exactly one of several runners starting at the same moment run the work', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = counting('slow', 60_000, () => gate);
+    restore = useJobs([slow]);
+    const all = Promise.all([runDue(), runDue(), runDue(), runDue(), runDue()]);
+    await expect.poll(() => slow.runs).toBe(1);
+    release();
+    const results = await all;
+    expect(results.filter((r) => r.ran.length).length).toBe(1);
+    expect(slow.runs).toBe(1);
+  });
+
   it('takes over from a runner that died holding the lease, once the lease has run out', async () => {
     const job = counting('job', 60_000);
+    restore = useJobs([job]);
     let t = 1_900_000_000_000;
     const now = () => t;
-    // A runner that never finished: its lease is left behind.
-    const hung = counting('job', 60_000, () => new Promise(() => undefined));
-    restore = useJobs([hung]);
-    void runDue({ now });
-    await expect.poll(() => hung.runs).toBe(1);
-    restore = useJobs([job]);
+    // A runner on an instance that has gone: its lease is left behind, never renewed.
+    await put('kv', { id: 'scheduler', lease: { token: 'gone', until: t + LEASE_MS }, lastRun: {} });
     t += 60_000;
     expect(await runDue({ now })).toMatchObject({ ran: [], busy: true });
     t += LEASE_MS;
     expect(await runDue({ now })).toEqual({ ran: ['job'], failed: [] });
+  });
+
+  // Review r1 of step 4: the lease wasn't renewed, so a run that was merely slow lost it after five minutes and a
+  // second run started beside it.
+  it('keeps the lease of a slow run that is still going, so no other run starts beside it', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = counting('slow', 60_000, () => gate);
+    restore = useJobs([slow]);
+    let t = 1_900_000_000_000;
+    const now = () => t;
+    const first = runDue({ now, renewEvery: 10 });
+    await expect.poll(() => slow.runs).toBe(1);
+    t += 2 * LEASE_MS;
+    // A renewal after the clock moved on carries the lease past it.
+    await expect.poll(async () => (await get<{ lease?: { until: number } }>('kv', 'scheduler'))?.lease?.until ?? 0).toBeGreaterThan(t);
+    expect(await runDue({ now })).toMatchObject({ ran: [], busy: true });
+    release();
+    expect(await first).toEqual({ ran: ['slow'], failed: [] });
+    expect(slow.runs).toBe(1);
+  });
+
+  // The accepted limit: a runner that stalls past the lease (no renewals) and then resumes finishes beside the run
+  // that took over. It says so, and leaves the new run's lease alone.
+  it('lets a run that stalled past its lease finish, reporting the lost lease and leaving the new lease alone', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const stalled = counting('stalled', 60_000, () => gate);
+    restore = useJobs([stalled]);
+    let t = 1_900_000_000_000;
+    const now = () => t;
+    const first = runDue({ now, renewEvery: 3_600_000 });
+    await expect.poll(() => stalled.runs).toBe(1);
+    t += LEASE_MS + 1;
+    let releaseNext!: () => void;
+    const nextGate = new Promise<void>((r) => (releaseNext = r));
+    const next = counting('stalled', 60_000, () => nextGate);
+    restore = useJobs([next]);
+    const second = runDue({ now, renewEvery: 3_600_000 });
+    await expect.poll(() => next.runs).toBe(1);
+    release();
+    expect(await first).toEqual({ ran: ['stalled'], failed: [], lostLease: true });
+    // The second run's lease is still in place.
+    expect(await runDue({ now, force: true })).toMatchObject({ ran: [], busy: true });
+    releaseNext();
+    expect(await second).toEqual({ ran: ['stalled'], failed: [] });
   });
 
   it('keeps going when a job fails, and tries it again when it is next due', async () => {

@@ -741,6 +741,8 @@ export interface Meeting {
   chatModeAnnounced?: boolean;
   /** The last notice about chat posting couldn't be sent; it is retried as the call goes on. */
   chatNoticeError?: string;
+  /** When the last transcript line arrived (server time, ms): kept on the record so every server instance sees it. */
+  lastLineAt?: number;
   transcript: TranscriptLine[];
   /** Suggestions the co-lead bot made during the call (gaps, follow-up questions). */
   facilitatorPrompts: FacilitatorPrompt[];
