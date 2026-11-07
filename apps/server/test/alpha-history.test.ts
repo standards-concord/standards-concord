@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
-import { get, openDb, put } from '../src/db.js';
+import { get, openDb, put, remove } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
 import { createSession, createUser, sessionUser, upsertFederatedUser } from '../src/services/users.js';
 import { MAX_FEEDBACK_PER_VERSION, MAX_VERSIONS, mergeTesterRecords, recordVersion, runSerially } from '../src/services/alpha.js';
@@ -255,6 +255,21 @@ describe('moving a record', () => {
 });
 
 describe('the pod mirror queue', () => {
+  // On Vercel each function instance had a queue of its own, so two instances could mirror one tester at once and
+  // land an older revision after a newer one while recording the newer as copied. Now one instance at a time
+  // (a lease per tester in the database); the others leave it to that one.
+  it('leaves the copy to another server that is already writing it, and catches up on the next visit', async () => {
+    const u = await tester('mirror-elsewhere');
+    await put('kv', { id: `lease:alpha-mirror:${u.id}`, token: 'another-server', until: Date.now() + 60_000 });
+    const write = vi.spyOn(solid, 'writeExisting');
+    expect((await recordVersion(u, { version: '0.8.0' })).podBehind).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+    await remove('kv', `lease:alpha-mirror:${u.id}`); // the other server finished (without this revision)
+    expect((await recordVersion(u, { version: '0.8.1' })).podBehind).toBeUndefined();
+    expect(JSON.parse((await solid.read(u.id, 'alpha/testing.jsonld'))!).versions.map((v: { version: string }) => v.version)).toEqual(['0.8.1', '0.8.0']);
+    expect(await get('kv', `lease:alpha-mirror:${u.id}`)).toBeUndefined();
+  });
+
   // A failed job used to break the queue for good, and its cleanup crashed the process with an unhandled rejection.
   it('keeps going after a job fails, without unhandled rejections', async () => {
     const unhandled = vi.fn();

@@ -7,7 +7,10 @@ import { get, put, remove, transaction } from './db.js';
  * holder that dies leaves a lease that lapses after `ttlMs`. Not a fence: work under it must still be safe if it
  * overruns the lease (here, refreshing a token one extra time).
  */
-export async function withLease<T>(id: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
+export async function withLease<T>(id: string, ttlMs: number, fn: () => Promise<T>): Promise<T>;
+/** With `wait: false`: undefined at once, without running `fn`, if another instance holds it. */
+export async function withLease<T>(id: string, ttlMs: number, fn: () => Promise<T>, opts: { wait: false }): Promise<T | undefined>;
+export async function withLease<T>(id: string, ttlMs: number, fn: () => Promise<T>, opts: { wait?: boolean } = {}): Promise<T | undefined> {
   const key = `lease:${id}`;
   const token = randomUUID();
   const deadline = Date.now() + ttlMs;
@@ -19,6 +22,7 @@ export async function withLease<T>(id: string, ttlMs: number, fn: () => Promise<
       return true;
     });
     if (took) break;
+    if (opts.wait === false) return undefined;
     if (Date.now() > deadline) throw new Error(`Timed out waiting for ${id}`);
     await new Promise((r) => setTimeout(r, wait));
   }
