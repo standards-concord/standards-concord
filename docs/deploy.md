@@ -60,6 +60,8 @@ Keys live in `/opt/concord/keys.env` on the server. `./deploy/azure/set-key.sh N
 | `RECALL_API_KEY` | The live Google Meet co-facilitator bot (Recall.ai). Its webhook comes in through Vercel. |
 | `MEET_BOT_EMAIL`, `MEET_BOT_ICS_URL` | Invite the bot by email: its Google account's address, and that calendar's secret iCal address. See [meet-bot.md](meet-bot.md). |
 | `OPENAI_API_KEY` with `STT_PROVIDER=openai` | Voice feedback in browsers without built-in speech recognition (Firefox). |
+| `CONCORD_ENCRYPTION_KEY` | 32 random bytes as 64 hex characters (`openssl rand -hex 32`). Seals secrets Concord keeps in its database: an administrator's Solid login, so any instance can read pods as them. Needed on Vercel; on the VM, without it, the login stays in the server's memory. |
+| `CONCORD_SHARED_LIMITS` | Count rate limits (OAuth, public validation, change checks) in the database, shared by every instance. On by default on Vercel. |
 | `CONCORD_SCHEDULE`, `CRON_SECRET` | How scheduled work starts (see [Scheduled work](#scheduled-work)): `timer` (the default on a server) or `requests` (the default on Vercel). `CRON_SECRET` is the secret Vercel Cron sends to `GET /api/cron/daily`. Without it, that endpoint refuses every call. |
 | `DEMO_MODE`, `ALLOW_PUBLIC_RESET` | Demo sign-in and the simulated working group (on by default); whether any tester can reset the shared demo (off). |
 | `GHCR_USER`, `GHCR_TOKEN` | Only if the image is made private again: a token with `read:packages`. |

@@ -1,0 +1,9 @@
+{
+  "name": "@concord/shared",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "@concord/core": "workspace:*" },
+  "devDependencies": { "typescript": "^7.0.2" },
+  "scripts": { "typecheck": "tsc --noEmit" }
+}

@@ -3,10 +3,11 @@ import * as arctic from 'arctic';
 import type { NextFunction, Request, Response, Router } from 'express';
 import type { User } from '@concord/shared';
 import { config } from './config.js';
-import { transaction, HttpError } from './db.js';
+import { get, HttpError, put, remove, removeWhereAtMost, transaction } from './db.js';
+import { seal, sealingAvailable, unseal } from './sealed.js';
 import type { AuthProvider } from '@concord/shared';
 import { allUsers, createSession, createUser, destroySession, findByProvider, linkFederatedIdentity, sessionOf, type FederatedIdentity } from './services/users.js';
-import { clientIdDocument, finishLogin, resolveIssuer, sessionKey, SolidLoginError, startLogin, type SolidLogin } from './solidOidc.js';
+import { clientIdDocument, exportLogin, finishLogin, importLogin, resolveIssuer, sessionKey, shareLogins, SolidLoginError, startLogin, type SolidLogin, type StoredLogin } from './solidOidc.js';
 import { clearTesterCookie, mergeTesterRecords, mirrorToPod, moveTesterRecord, testerFor, testerRecordMovedTo } from './services/alpha.js';
 
 export const SESSION_COOKIE = 'concord_session';
@@ -79,20 +80,61 @@ export const providers = () => ({ google: !!google(), github: !!github(), solid:
 
 /**
  * Administrators who signed in with Solid keep their login (a DPoP-bound token
- * and its key, in memory only) so Concord can read testers' pods as their WebID.
- * It belongs to the browser session that signed in, not the account: another
- * session of the same account can't use it. Everyone else's Solid tokens are
- * dropped straight after sign-in: we only needed to know who they are.
+ * and its key) so Concord can read testers' pods as their WebID. It belongs to
+ * the browser session that signed in, not the account: another session of the
+ * same account can't use it. Everyone else's Solid tokens are dropped straight
+ * after sign-in: we only needed to know who they are.
+ *
+ * With CONCORD_ENCRYPTION_KEY (sealed.ts) the login is also kept in the database, sealed, so any instance can
+ * use and refresh it (Vercel); without it, in this process's memory only (the VM).
  */
 const adminLogins = new Map<string, SolidLogin>();
 const MAX_ADMIN_LOGINS = 100;
-export const adminLoginFor = (req: Request) => {
+const ADMIN_LOGIN_DAYS = 7;
+const adminLoginRow = (key: string) => `admin-login:${key}`;
+interface AdminLoginRow {
+  id: string;
+  sealed: string;
+  adminLoginExpires: number;
+}
+const loadShared = async (key: string): Promise<SolidLogin | undefined> => {
+  const row = await get<AdminLoginRow>('kv', adminLoginRow(key));
+  const stored = row && row.adminLoginExpires > Date.now() ? unseal<StoredLogin>('admin-login', row.sealed) : undefined;
+  return stored && { ...(await importLogin(stored)), sharedId: key };
+};
+const saveShared = async (key: string, login: SolidLogin) =>
+  void (await put<AdminLoginRow>('kv', { id: adminLoginRow(key), sealed: seal('admin-login', await exportLogin({ ...login, sharedId: key })), adminLoginExpires: Date.now() + ADMIN_LOGIN_DAYS * 86_400_000 }));
+shareLogins({
+  load: loadShared,
+  // A refresh changes only the tokens (the keys were sealed at sign-in), and keeps the row's expiry.
+  save: async (key, login) => {
+    const row = await get<AdminLoginRow>('kv', adminLoginRow(key));
+    const stored = row && unseal<StoredLogin>('admin-login', row.sealed);
+    if (row && stored)
+      await put<AdminLoginRow>('kv', { ...row, sealed: seal('admin-login', { ...stored, accessToken: login.accessToken, refreshToken: login.refreshToken, expiresAt: login.expiresAt }) });
+  },
+});
+const remember = (key: string, login: SolidLogin) => {
+  if (adminLogins.size >= MAX_ADMIN_LOGINS) adminLogins.delete(adminLogins.keys().next().value!);
+  adminLogins.set(key, login);
+};
+export const adminLoginFor = async (req: Request): Promise<SolidLogin | undefined> => {
   const token = req.cookies?.[SESSION_COOKIE];
-  return typeof token === 'string' && token ? adminLogins.get(sessionKey(token)) : undefined;
+  if (typeof token !== 'string' || !token) return undefined;
+  const key = sessionKey(token);
+  const here = adminLogins.get(key);
+  if (here || !sealingAvailable()) return here;
+  // Signed in through another instance.
+  const shared = await loadShared(key);
+  if (shared) remember(key, shared);
+  return shared;
 };
 /** Forget the Solid login held for this session token (sign-out, or a new sign-in in the same browser). */
-export function endAdminLogin(sessionToken: unknown) {
-  if (typeof sessionToken === 'string' && sessionToken) adminLogins.delete(sessionKey(sessionToken));
+export async function endAdminLogin(sessionToken: unknown) {
+  if (typeof sessionToken !== 'string' || !sessionToken) return;
+  const key = sessionKey(sessionToken);
+  adminLogins.delete(key);
+  await remove('kv', adminLoginRow(key));
 }
 
 /**
@@ -126,7 +168,7 @@ function checkState(req: Request, res: Response) {
 
 /** Start a fresh session on sign-in, and end the one the browser had (no session fixation). */
 async function signInAs(req: Request, res: Response, userId: string, method: AuthProvider): Promise<string> { return transaction(async () => {
-  endAdminLogin(req.cookies?.[SESSION_COOKIE]);
+  await endAdminLogin(req.cookies?.[SESSION_COOKIE]);
   await destroySession(req.cookies?.[SESSION_COOKIE]);
   return await setSessionCookie(res, userId, method);
 }); }
@@ -272,8 +314,12 @@ export function mountAuth(router: Router) {
     const { user, sessionToken } = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
     // Keep an administrator's login for this browser session (to read testers' pods as them); drop everyone else's.
     if (isAdmin(user, 'solid')) {
-      if (adminLogins.size >= MAX_ADMIN_LOGINS) adminLogins.delete(adminLogins.keys().next().value!);
-      adminLogins.set(sessionKey(sessionToken), done.login);
+      const key = sessionKey(sessionToken);
+      if (sealingAvailable()) {
+        await removeWhereAtMost('kv', 'adminLoginExpires', Date.now());
+        await saveShared(key, done.login);
+        remember(key, { ...done.login, sharedId: key });
+      } else remember(key, done.login);
     }
     res.redirect(`${config.webUrl}${done.returnTo}`);
   });

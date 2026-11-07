@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { config } from '../src/config.js';
 import { get, openDb, put } from '../src/db.js';
 import { solid } from '../src/services/solid.js';
-import { clientCredentialsLogin, finishLogin, guardedFetch, guardedRequests, podReader, podRequester, resolveIssuer, startLogin } from '../src/solidOidc.js';
+import { clientCredentialsLogin, exportLogin, finishLogin, importLogin, shareLogins, type StoredLogin, guardedFetch, guardedRequests, podReader, podRequester, resolveIssuer, startLogin } from '../src/solidOidc.js';
 
 /**
  * The Solid-OIDC flow against a scripted OpenID provider on 127.0.0.1, which
@@ -339,6 +339,31 @@ describe('reading a pod as the signed-in WebID', () => {
     await expect(get(`${base}/pod/big.json`, 'application/json')).rejects.toThrow(/Timed out/);
     expect(Date.now() - t).toBeLessThan(8900);
   }, 20_000);
+
+  it('refreshes a login kept in the database once across instances, and each instance takes up the new token', async () => {
+    // Step 5 (Vercel): an administrator's login was in one process's memory, so another instance answered "your
+    // Solid sign-in has ended", and two instances refreshing it at once would spend a rotating refresh token twice.
+    process.env.CONCORD_ENCRYPTION_KEY = 'ab'.repeat(32);
+    try {
+      const { login } = await signIn();
+      const rows = new Map<string, StoredLogin>([['s1', await exportLogin(login)]]);
+      shareLogins({
+        load: async (id) => (rows.has(id) ? { ...(await importLogin(rows.get(id)!)), sharedId: id } : undefined),
+        save: async (id, l) => void rows.set(id, { ...rows.get(id)!, accessToken: l.accessToken, refreshToken: l.refreshToken, expiresAt: l.expiresAt }),
+      });
+      // The same login on two instances, both finding it expired.
+      const [a, b] = await Promise.all([1, 2].map(async () => ({ ...(await importLogin(rows.get('s1')!)), sharedId: 's1', expiresAt: 0 })));
+      const readers = await Promise.all([podReader(a), podReader(b)]);
+      expect(readers.every(Boolean)).toBe(true);
+      expect(refreshes).toBe(1);
+      expect(a.accessToken).toBe('at-r1');
+      expect(b.accessToken).toBe('at-r1');
+      expect(rows.get('s1')).toMatchObject({ accessToken: 'at-r1', refreshToken: 'rt-2' });
+      expect((await readers[1]!(`${base}/pod/big.json`, 'application/json')).status).toBe(200);
+    } finally {
+      delete process.env.CONCORD_ENCRYPTION_KEY;
+    }
+  });
 
   it('refreshes an expiring login once, however many requests need it at the same moment', async () => {
     const { login } = await signIn();

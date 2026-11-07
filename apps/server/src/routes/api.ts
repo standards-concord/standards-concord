@@ -195,7 +195,7 @@ export function apiRouter(): Router {
         chosen === 'steward' ? ['owner', 'steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) await setRoles(demo.id, user.id, [...new Set(roles)]);
     }
-    endAdminLogin(req.cookies?.[SESSION_COOKIE]);
+    await endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     const token = await setSessionCookie(res, user.id, 'demo');
     await rememberTester(req, res, testerBefore, user);
     res.json(await sessionInfo(user, token));
@@ -209,7 +209,7 @@ export function apiRouter(): Router {
     // if this browser's session is now another one (a newer sign-in, another account, or none), nothing ends.
     const meant = optStr(req.body?.session);
     if (meant !== undefined && meant !== sessionHandle(req.cookies?.[SESSION_COOKIE])) return void res.json({ ended: false });
-    endAdminLogin(req.cookies?.[SESSION_COOKIE]);
+    await endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     await clearTesterCookie(req, res);
     await destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({ ended: true });
@@ -1119,9 +1119,9 @@ export function apiRouter(): Router {
   // Testers' feedback read straight from their pods, as the admin's own WebID (only if they signed in with Solid).
   r.get('/feedback/pods', async (req, res) => {
     feedbackAdmin(req);
-    const login = adminLoginFor(req);
+    const login = await adminLoginFor(req);
     const read = login ? await podReader(login) : undefined;
-    // Their Solid login is kept in memory, for the browser session that signed in: a restart, another browser or an expired token ends it.
+    // Their Solid login is kept for the browser session that signed in (sealed in the database with CONCORD_ENCRYPTION_KEY, else in memory): sign-out, another browser or an expired token ends it.
     if (!login || !read) throw new HttpError(403, 'Your Solid sign-in has ended. Sign out and sign in with your WebID again to read the pods.');
     res.json(await readPodFeedback({ webId: login.webId, get: read }));
   });

@@ -4,6 +4,8 @@ import * as oauth from 'oauth4webapi';
 import { Parser, type Quad } from 'n3';
 import { config } from './config.js';
 import { insertOnce, removeWhereAtMost, reserveCounters, take } from './db.js';
+import { withLease } from './lease.js';
+import { sealingAvailable } from './sealed.js';
 import { ConnectionPool, FetchError, ipLiteral, isPublicAddress, safeRequest } from './safeFetch.js';
 import { refuseWhenReadOnly } from './db.js';
 
@@ -352,7 +354,32 @@ export interface SolidLogin {
   expiresAt: number;
   /** For a pod owner Concord acts for (client credentials), instead of a refresh token. */
   clientSecret?: string;
+  /** Kept in the database under this id (see `shareLogins`), so every instance refreshes it in turn. */
+  sharedId?: string;
 }
+
+/** A login as it is stored: its keys as JWKs. */
+export interface StoredLogin extends Omit<SolidLogin, 'keys'> {
+  jwk: { publicKey: JsonWebKey; privateKey: JsonWebKey };
+}
+export async function exportLogin(login: SolidLogin): Promise<StoredLogin> {
+  const { keys, ...rest } = login;
+  return { ...rest, jwk: { publicKey: await crypto.subtle.exportKey('jwk', keys.publicKey), privateKey: await crypto.subtle.exportKey('jwk', keys.privateKey) } };
+}
+export async function importLogin(stored: StoredLogin): Promise<SolidLogin> {
+  const { jwk, ...rest } = stored;
+  const alg = { name: 'ECDSA', namedCurve: 'P-256' };
+  return { ...rest, keys: { publicKey: await crypto.subtle.importKey('jwk', jwk.publicKey, alg, true, ['verify']), privateKey: await crypto.subtle.importKey('jwk', jwk.privateKey, alg, false, ['sign']) } };
+}
+
+/** Where shared logins are kept (auth.ts registers it): each instance loads the latest before refreshing. */
+export interface SharedLogins {
+  load(id: string): Promise<SolidLogin | undefined>;
+  /** Saves the login's new tokens (its keys don't change). */
+  save(id: string, login: SolidLogin): Promise<void>;
+}
+let sharedLogins: SharedLogins | undefined;
+export const shareLogins = (s: SharedLogins) => void (sharedLogins = s);
 
 export interface FinishedLogin {
   webId: string;
@@ -398,7 +425,8 @@ export async function finishLogin(loginId: string | undefined, callbackUrl: stri
   const opts = oauthOptions(tokenUrl);
   let claims: oauth.IDToken;
   let tokens: oauth.TokenEndpointResponse;
-  const keys = await oauth.generateKeyPair('ES256');
+  // Extractable only where a login can be kept, sealed, in the database for other instances (an administrator's).
+  const keys = await oauth.generateKeyPair('ES256', { extractable: sealingAvailable() });
   const DPoP = oauth.DPoP(client, keys);
   try {
     const params = oauth.validateAuthResponse(as, client, new URL(callbackUrl), p.state);
@@ -480,7 +508,29 @@ function fresh(login: SolidLogin, force = false): Promise<boolean> {
   return p;
 }
 
+/**
+ * A shared login is refreshed by one instance at a time (refresh tokens may rotate, so only one use counts): under
+ * a lease, it first takes up a token another instance already got, and otherwise refreshes and saves it.
+ */
 async function renew(login: SolidLogin): Promise<boolean> {
+  const id = login.sharedId;
+  if (!id || !sharedLogins) return await renewHere(login);
+  const store = sharedLogins;
+  return await withLease(`solid-refresh:${id}`, 30_000, async () => {
+    const latest = await store.load(id);
+    if (!latest) return false; // signed out meanwhile
+    if (latest.accessToken !== login.accessToken && Date.now() < latest.expiresAt - 30_000) {
+      Object.assign(login, { accessToken: latest.accessToken, refreshToken: latest.refreshToken, expiresAt: latest.expiresAt });
+      return true;
+    }
+    Object.assign(login, { refreshToken: latest.refreshToken });
+    const ok = await renewHere(login);
+    if (ok) await store.save(id, login);
+    return ok;
+  });
+}
+
+async function renewHere(login: SolidLogin): Promise<boolean> {
   try {
     if (login.clientSecret) {
       await grantClientCredentials(login);

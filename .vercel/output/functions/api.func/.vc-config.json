@@ -1,0 +1,11 @@
+{
+  "runtime": "nodejs22.x",
+  "handler": "apps/server/vercel-entry.mjs",
+  "launcherType": "Nodejs",
+  "shouldAddHelpers": false,
+  "supportsResponseStreaming": true,
+  "maxDuration": 300,
+  "regions": [
+    "lhr1"
+  ]
+}

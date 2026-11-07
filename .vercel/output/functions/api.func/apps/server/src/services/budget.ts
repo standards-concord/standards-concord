@@ -1,0 +1,46 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { config } from '../config.js';
+import { HttpError, reserveCounters } from '../db.js';
+
+/**
+ * A per-person budget for expensive work: validating a change (reasoner, lint,
+ * FAIR checks) and triaging it with the LLM. Every path that does this for a
+ * person (creating, editing, submitting, revising or re-triaging a change
+ * request, from the web app or MCP) runs inside `withTriageBudget`. Each person
+ * gets `max` runs per `windowMs` and one at a time; nested calls within one run
+ * don't count twice. Keyed by user id, so people behind the same proxy don't
+ * share a quota. Simulated personas (the demo's working group) are exempt.
+ * Process-local, plus (with `config.sharedLimits`, on Vercel) a fixed window in the database shared by every instance.
+ */
+export const triageBudget = { windowMs: 10 * 60 * 1000, max: 20 };
+
+const recent = new Map<string, number[]>();
+const inFlight = new Set<string>();
+const current = new AsyncLocalStorage<string>();
+
+export async function withTriageBudget<T>(user: { id: string; simulated?: boolean }, fn: () => Promise<T>): Promise<T> {
+  if (user.simulated || current.getStore() === user.id) return fn();
+  const now = Date.now();
+  const { windowMs, max } = triageBudget;
+  const times = (recent.get(user.id) ?? []).filter((t) => now - t < windowMs);
+  if (inFlight.has(user.id)) throw new HttpError(429, 'Your previous change is still being checked. Try again in a moment.');
+  if (times.length >= max) throw new HttpError(429, `You can have up to ${max} changes checked every ${Math.round(windowMs / 60000)} minutes. Try again shortly.`);
+  // Several instances (Vercel): each counts its own, and a shared window in the database caps them all together.
+  if (config.sharedLimits && !(await reserveCounters([{ id: `triage-budget:${user.id}:${Math.floor(now / windowMs)}`, max }], 'rate-limits')))
+    throw new HttpError(429, `You can have up to ${max} changes checked every ${Math.round(windowMs / 60000)} minutes. Try again shortly.`);
+  times.push(now);
+  recent.set(user.id, times);
+  inFlight.add(user.id);
+  try {
+    return await current.run(user.id, fn);
+  } finally {
+    inFlight.delete(user.id);
+  }
+}
+
+/** Whether `withTriageBudget` would run for this person right now (without using any of their budget). */
+export function triageBudgetAvailable(user: { id: string; simulated?: boolean }): boolean {
+  if (user.simulated || current.getStore() === user.id) return true;
+  const now = Date.now();
+  return !inFlight.has(user.id) && (recent.get(user.id) ?? []).filter((t) => now - t < triageBudget.windowMs).length < triageBudget.max;
+}
