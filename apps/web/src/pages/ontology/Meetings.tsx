@@ -323,7 +323,7 @@ function BookingState({ m }: { m: Meeting }) {
   if (isBooked(m)) return <Badge tone="ok">Bot booked</Badge>;
   if (m.bot?.uncertain) return <Badge tone="warn" title={m.bot.error}>Checking an unconfirmed booking</Badge>;
   if (m.bot?.error) return <Badge tone="danger" title={m.bot.error}>Booking failed; retrying</Badge>;
-  return <Badge tone="outline">Books 15 min before</Badge>;
+  return <Badge tone="outline">Booking the bot</Badge>;
 }
 
 function UpcomingCalls({ calls, onChange, bot }: { calls: Meeting[]; onChange: () => void; bot?: MeetBotInfo }) {
