@@ -3,7 +3,7 @@ import path from 'node:path';
 import { FORMAT_INFO, serialize, stampRelease, XSD } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
-import { clock, DAY_MS } from '../clock.js';
+import { clock, DAY_MS, saveClock, syncClock } from '../clock.js';
 import { config } from '../config.js';
 import { clearAll, HttpError, list, put } from '../db.js';
 import { restoreSpending, snapshotSpending } from '../llm/budget.js';
@@ -59,14 +59,9 @@ export async function seedDemo(): Promise<OntologyProject | undefined> {
     console.warn('[seed] volunteering fixture not found; skipping demo seed');
     return undefined;
   }
-  // Seed history in the recent past so review periods are partly elapsed.
-  const realOffset = clock.offsetMs;
-  clock.offsetMs = realOffset - 21 * DAY_MS;
-  try {
-    return await seedHistory();
-  } finally {
-    clock.offsetMs = realOffset;
-  }
+  // Seed history in the recent past so review periods are partly elapsed, on a clock of its own: requests
+  // meanwhile (and other instances) keep the shared one.
+  return await clock.withShift(-21 * DAY_MS, seedHistory);
 }
 
 async function seedHistory() {
@@ -480,7 +475,9 @@ export async function step(ontologyId: string, testerId?: string, maxActions = 3
 
 /** Fast-forward the governance clock (review periods, voting windows) and run the lifecycle sweep. */
 export async function advanceClock(days: number) {
+  await syncClock();
   clock.advance(days * DAY_MS);
+  await saveClock();
   return runTick();
 }
 
@@ -501,5 +498,6 @@ export async function resetAll() {
     await restoreSpending(spend);
   });
   clock.reset();
+  await saveClock();
   return seedDemo();
 }

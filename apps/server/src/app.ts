@@ -3,6 +3,7 @@ import path from 'node:path';
 import cookieParser from 'cookie-parser';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { mountAuth, sessionMiddleware } from './auth.js';
+import { syncClock } from './clock.js';
 import { config } from './config.js';
 import { HttpError, ReadOnlyError } from './db.js';
 import { mcpHandler } from './mcp.js';
@@ -34,6 +35,11 @@ export function createApp(): express.Express {
     });
   // Scheduled work on Vercel: due work is looked for after requests (services/scheduler.ts).
   if (config.schedule === 'requests' && !config.readOnly) app.use(scheduleAfterRequests);
+  // The demo's governance clock may have been moved by another instance: load it before the request.
+  if (config.demoMode)
+    app.use((_req, _res, next) => {
+      syncClock().then(() => next(), next);
+    });
   app.use(sessionMiddleware);
 
   app.get('/healthz', (_req, res) => res.json({ ok: true }));

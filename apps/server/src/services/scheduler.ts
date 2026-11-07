@@ -1,5 +1,6 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type express from 'express';
+import { syncClock } from '../clock.js';
 import { config } from '../config.js';
 import { get, put, transaction } from '../db.js';
 import { keepAlive } from '../keepAlive.js';
@@ -97,6 +98,8 @@ export async function runDue(opts: { force?: boolean; now?: () => number; renewE
   // write to the database, which would refuse.
   if (config.readOnly) return { ran: [], failed: [] };
   const now = opts.now ?? Date.now;
+  // The demo's governance clock, as another instance may have moved it.
+  if (config.demoMode) await syncClock();
   const list = await jobs();
   const isDue = (s: SchedulerState | undefined, j: ScheduledJob) => opts.force || now() - (s?.lastRun[j.name] ?? 0) >= j.every - 1000;
   // Cheaply first: most requests find nothing due.
