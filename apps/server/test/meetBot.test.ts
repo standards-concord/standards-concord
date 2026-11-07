@@ -29,16 +29,22 @@ let stub: http.Server;
 let nextBot = 0;
 /** How the stand-in misbehaves, per test. */
 const stubMode = { failCancel: false, chatDelayMs: 0, botDelayMs: 0, failChat: false, dropCreate: false, truncateCreate: false, failList: false, listHides: false, cancelDelayMs: 0, rejectCreate: false, conflictReplay: false, keysExpired: false, garbledCreate: false, leaveDelayMs: 0, failCreate: false, nullCreate: false, listDelayMs: 0, authFail: false, refuseIds: [] as string[], refuseDelayMs: 0, holdCreate: null as Promise<void> | null };
-/** Called when a booking request whose reply is held (holdDroppedReply) reaches the stub. */
+/** Called when a booking request whose reply is held (holdBookingReply) reaches the stub. */
 let createArrived: (() => void) | undefined;
 /**
- * Holds the next dropped booking reply until the test releases it, so a test can act while the
- * booking is sent and unanswered without relying on timers. `arrived` resolves once Recall.ai has the request.
+ * Holds the next booking reply (or, with dropCreate, the lost one) until the test releases it, so a test can
+ * act while the booking is sent and unanswered without relying on timers. `arrived` resolves once Recall.ai
+ * has the request (and has made the bot, so `bot-${nextBot}` names it).
  */
-function holdDroppedReply() {
-  let release!: () => void;
-  stubMode.holdCreate = new Promise<void>((r) => (release = r));
+function holdBookingReply() {
+  let open!: () => void;
+  stubMode.holdCreate = new Promise<void>((r) => (open = r));
   const arrived = new Promise<void>((r) => (createArrived = r));
+  // Only the one reply is held: later bookings are answered as usual.
+  const release = () => {
+    stubMode.holdCreate = null;
+    open();
+  };
   return { arrived, release };
 }
 /** Bots the stand-in has created, for listing and status. */
@@ -89,6 +95,10 @@ beforeAll(async () => {
           res.writeHead(201, { 'Content-Type': 'application/json', 'Content-Length': '200' });
           res.write('{"id":"bo');
           return void setTimeout(() => res.destroy(), 20);
+        }
+        if (stubMode.holdCreate) {
+          createArrived?.();
+          return void stubMode.holdCreate.then(() => reply(201, JSON.stringify({ id: bot.id })));
         }
         return reply(201, JSON.stringify({ id: bot.id }), stubMode.botDelayMs);
       }
@@ -719,13 +729,14 @@ describe('invite-by-email', () => {
   });
 
   it('“Join a call now” keeps transcript lines that arrive before Recall.ai answers', async () => {
+    // The line has to arrive while the booking is unanswered: the reply is held rather than timed (it used to be an 80 ms sleep).
     const s = await steward('Steward Raj');
-    stubMode.botDelayMs = 200;
-    const sending = s.post('/api/ontologies/volunteering/meetings/bot').send({ title: 'Join now race', meetingUrl: 'https://meet.google.com/abc-defg-hij' });
-    const req = sending.then((r) => r);
-    await new Promise((r) => setTimeout(r, 80));
+    const reply = holdBookingReply();
+    const req = s.post('/api/ontologies/volunteering/meetings/bot').send({ title: 'Join now race', meetingUrl: 'https://meet.google.com/abc-defg-hij' }).then((r) => r);
+    await reply.arrived;
     const m = (await list<Meeting>('meetings')).find((x) => x.title === 'Join now race')!;
     await line(m.id, 'Said before the booking came back.');
+    reply.release();
     const res = await req;
     expect(res.status).toBe(201);
     const after = await getMeeting(m.id);
@@ -896,7 +907,7 @@ describe('invite-by-email', () => {
     // CI load the line could go first and name an earlier test's bot, so the booking's bot was never heard from.
     const s = await steward('Steward Ada');
     stubMode.dropCreate = true;
-    const reply = holdDroppedReply();
+    const reply = holdBookingReply();
     const req = s
       .post('/api/ontologies/volunteering/meetings/bot')
       .send({ title: 'Lost reply race', meetingUrl: 'https://meet.google.com/abc-defg-hij' })
@@ -916,7 +927,7 @@ describe('invite-by-email', () => {
     // Same timing as above: the line has to arrive while the booking is sent and unanswered, so the reply is held, not timed.
     const s = await steward('Steward Bo');
     stubMode.dropCreate = true;
-    const reply = holdDroppedReply();
+    const reply = holdBookingReply();
     const req = s
       .post('/api/ontologies/volunteering/meetings/bot')
       .send({ title: 'Anonymous line race', meetingUrl: 'https://meet.google.com/abc-defg-hij' })
@@ -1071,16 +1082,17 @@ describe('invite-by-email', () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-10T14:00:00Z'));
     const [m] = await calendarMeetings();
-    stubMode.botDelayMs = 200;
+    // Read while the request is out: the reply is held rather than timed (it used to be an 80 ms sleep).
+    const reply = holdBookingReply();
     const booking = dispatchDue(at('2026-11-10T14:46:00Z'));
-    await new Promise((r) => setTimeout(r, 80));
+    await reply.arrived;
     // While the request is out, the attempt is already on record.
     const midway = await getMeeting(m.id);
     expect(midway.bot).toMatchObject({ uncertain: true, bookingId: expect.stringMatching(/^bk_/), bookedUrl: 'https://meet.google.com/xyz-abcd-efg' });
     expect(midway.bot?.botId).toBeUndefined();
+    reply.release();
     await booking;
     const booked = `bot-${nextBot}`;
-    stubMode.botDelayMs = 0;
     // The process died before saving the reply: the database still says what it said midway.
     await saveMeeting(midway);
     calls.length = 0;
@@ -1096,12 +1108,13 @@ describe('invite-by-email', () => {
     writeFeed(oneOff({ start: '2026-11-10T15:00:00Z', end: '2026-11-10T16:00:00Z' }));
     await sync(at('2026-11-10T14:00:00Z'));
     const [m] = await calendarMeetings();
-    stubMode.botDelayMs = 200;
+    // Read while the request is out (held, not timed).
+    const reply = holdBookingReply();
     const booking = dispatchDue(at('2026-11-10T14:46:00Z'));
-    await new Promise((r) => setTimeout(r, 80));
+    await reply.arrived;
     const midway = await getMeeting(m.id);
+    reply.release();
     await booking;
-    stubMode.botDelayMs = 0;
     const booked = `bot-${nextBot}`;
     await saveMeeting(midway);
     stubMode.listHides = true;
@@ -1251,15 +1264,18 @@ describe('invite-by-email', () => {
   });
 
   it('a booking reply that arrives after End call doesn’t undo it', async () => {
+    // Used to sleep 60 ms and hope the booking had reached Recall.ai, with its reply 250 ms away. Under full CI
+    // load the line could go first and name an earlier test's bot. The reply is now held until End call is done.
     const s = await steward('Steward Jo');
-    stubMode.botDelayMs = 250;
+    const reply = holdBookingReply();
     const req = s.post('/api/ontologies/volunteering/meetings/bot').send({ title: 'Ended before the reply', meetingUrl: 'https://meet.google.com/abc-defg-hij' }).then((r) => r);
-    await new Promise((r) => setTimeout(r, 60));
+    await reply.arrived;
     const m = (await list<Meeting>('meetings')).find((x) => x.title === 'Ended before the reply')!;
     const booked = `bot-${nextBot}`;
     await line(m.id, 'We’re done already.', booked);
     expect((await s.post(`/api/meetings/${m.id}/end`)).status).toBe(200);
     expect((await getMeeting(m.id)).bot?.status).toBe('done');
+    reply.release();
     await req;
     expect((await getMeeting(m.id)).bot).toMatchObject({ botId: booked, status: 'done' });
     await line(m.id, 'A late line.', booked);
