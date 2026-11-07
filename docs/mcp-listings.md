@@ -22,6 +22,7 @@ Where Concord's MCP server can be listed, what each listing needs, and who does 
 ## Official MCP Registry
 
 - Entry: [server.json](../server.json), name `io.github.standards-concord/concord`, remote-only (no `packages`), schema `2025-12-11`.
+- Icon: Concord's plane on its blue tile, drawn by `node scripts/make-icons.mjs` into `apps/web/public` (`icon-512.png`, `icon-192.png`, `favicon.svg`). The MCP server names the same files in its `initialize` reply (`serverInfo.icons`), which is what Claude shows for the connector; `server.json` lists them for the Registry. Registry versions are immutable, so a change to `server.json` needs a new `version`.
 - Publishing: [.github/workflows/mcp-registry.yml](../.github/workflows/mcp-registry.yml) runs `mcp-publisher login github-oidc` and `mcp-publisher publish` when `server.json` changes on `main` (or by hand from the Actions tab). GitHub's OIDC token proves the repo belongs to `standards-concord`, so no secret is needed.
 - Moving domain: `node scripts/public-url.mjs https://<new-origin>` bumps the version (registry versions are immutable) and updates the plugins too. To retire an old version: `mcp-publisher status --status deprecated --message "Moved to <new URL>" io.github.standards-concord/concord <old version>`.
 - Moving to the ODI's GitHub: an `org.theodi/...` or `io.github.theodi/...` name needs an org owner to publish; until then `io.github.standards-concord/concord` is fine.
@@ -39,7 +40,7 @@ Curated from the official registry. Once the official entry is live, email partn
 
 - Submit at https://claude.ai/directory/manage → Submit new → MCP connector (any paid Claude plan). Questions: mcp-review@anthropic.com. Terms: https://support.claude.com/en/articles/13145338, policy: https://support.claude.com/en/articles/13145358.
 - What Concord already meets: HTTPS remote server; OAuth with discovery from a 401 `WWW-Authenticate` header; `resource` equals the server URL exactly; PKCE S256; dynamic client registration and client ID metadata documents (Anthropic prefers CIMD, which Claude uses by default); Claude's callback `https://claude.ai/api/mcp/auth_callback` and Claude Code's loopback callbacks on any port work, because redirect URIs come from each client's registration; every tool has a title and a read-only or destructive hint (checked by a test).
-- Still needed from Jesse: a privacy policy URL (the ODI should own this), a support contact, an icon, a reviewer test account (demo sign-in works on the alpha, but a real Google or GitHub sign-in is better for review), and confirming it was tested as a custom connector (the *Add to Claude* button does this).
+- Icon for the listing: `https://standards-concord.vercel.app/icon-512.png`. Still needed from Jesse: a privacy policy URL (the ODI should own this), a support contact, a reviewer test account (demo sign-in works on the alpha, but a real Google or GitHub sign-in is better for review), and confirming it was tested as a custom connector (the *Add to Claude* button does this).
 - Listing text:
   - **Name:** Concord
   - **Short description:** Read, query and check data against the ODI's open data ontologies, and report what's missing.

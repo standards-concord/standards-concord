@@ -13,6 +13,14 @@ export const SCRIPTED = 'Scripted demonstration: real Concord tool calls; prepar
 
 const ANIMATED: Record<string, number> = { shell: 1, ask: 1, say: 1 };
 
+/** The same call with its animation off: typed text appears at once, and thinking takes no time. */
+export function fast(fn: string, args: unknown[]): unknown[] {
+  if (fn === 'think') return [0, ...args.slice(1)];
+  if (ANIMATED[fn]) return [args[0], { ...((args[1] as object) ?? {}), cps: 0 }, ...args.slice(2)];
+  if (fn === 'connector') return [args[0], args[1], { ...((args[2] as object) ?? {}), cps: 0 }];
+  return args;
+}
+
 export interface DiffRow {
   t: 'ctx' | 'add' | 'del';
   n?: number;
@@ -29,6 +37,8 @@ export class Terminal {
 
   private async call(fn: string, args: unknown[], remember = true) {
     if (remember) this.history.push({ fn, args });
+    // A check run draws everything at once: typing rhythm and thinking time are for the video.
+    if (this.d.fast) args = fast(fn, args);
     await this.d.page.evaluate(([f, a]) => (window as any).term[f as string](...(a as unknown[])), [fn, args] as const);
   }
 
