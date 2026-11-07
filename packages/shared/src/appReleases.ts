@@ -53,8 +53,8 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.41.1',
-    date: '2026-11-06',
+    version: '0.41.2',
+    date: '2026-11-07',
     title: 'Sections you have opened come back at once',
     pr: 102,
     changes: [
@@ -66,6 +66,23 @@ export const APP_RELEASES: AppRelease[] = [
         roles: [],
         to: '{o}/changes',
         ask: 'Does moving between sections feel instant now? Did you ever see out-of-date information that confused you?',
+      },
+    ],
+  },
+  {
+    version: '0.41.1',
+    date: '2026-11-06',
+    title: 'App checks work from any repository',
+    pr: 108,
+    changes: [
+      {
+        id: 'app-check-action-public',
+        type: 'fix',
+        title: 'The app check workflow uses a public action',
+        detail:
+          'The workflow on App checks now uses standards-concord/app-check@v1, the action’s own public home. Before, it pointed inside Concord’s repository, which only repositories in the standards-concord organisation can use while that repository is private. If you added the workflow before today, change its uses: line to standards-concord/app-check@v1.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/apps',
       },
     ],
   },
