@@ -12,6 +12,7 @@ import {
 import type { ChangeOp, ValidationReport } from '@concord/core/types';
 import { fairContext } from './fairResolution.js';
 import { hostedImportClosure } from './importClosure.js';
+import { breaks, federationImpact } from './federations.js';
 import type {
   AiAnalysis,
   ChangeRequest,
@@ -344,7 +345,12 @@ export async function preview(project: OntologyProject, ops: ChangeOp[], tests: 
   const classification = classifyChange(diff, before, after);
   // The request's own tests are marked as such, so readers can tell them from use cases' questions.
   const cqs = [...await competencyTests(project.id), ...(tests ?? []).map((t) => ({ ...t, source: OWN_TEST }))];
-  const validation = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI), imports: await hostedImportClosure(after) });
+  const checked = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI), imports: await hostedImportClosure(after) });
+  // Across federations: advisory, except that breaking one the ontology committed to (or not being able to check it) fails the change.
+  const federations = await federationImpact(project, after);
+  const validation: ValidationReport = federations.length
+    ? { ...checked, federations, passed: checked.passed && !federations.some((i) => i.committed && (breaks(i) || i.error !== undefined)) }
+    : checked;
   return { before, after, diff, classification, validation, warnings };
 }
 

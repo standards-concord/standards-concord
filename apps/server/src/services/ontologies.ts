@@ -119,7 +119,8 @@ export async function createProject(
 }
 
 async function uniqueSlug(base: string) {
-  const taken = new Set((await list<OntologyProject>('ontologies')).map((o) => o.slug));
+  // "fed" is taken by federation releases (/def/fed/...).
+  const taken = new Set(['fed', ...(await list<OntologyProject>('ontologies')).map((o) => o.slug)]);
   let s = base;
   for (let i = 2; taken.has(s); i++) s = `${base}-${i}`;
   return s;

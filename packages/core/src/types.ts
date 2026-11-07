@@ -391,6 +391,11 @@ export interface ValidationReport {
    * anything. `reasoner` is then the verdict on that union, counting only this ontology's own classes.
    */
   imports?: ImportCheck;
+  /**
+   * For a proposed change: what it does to each federation the ontology belongs to while following
+   * its working draft. Breaking a federation the ontology committed to makes `passed` false.
+   */
+  federations?: FederationImpact[];
 }
 
 /** An ontology loaded into an import closure. */
@@ -430,4 +435,51 @@ export interface ImportCheck {
   /** The union is consistent and none of this ontology's own classes is unsatisfiable. */
   passed: boolean;
   error?: string;
+}
+
+/** A federation's members checked alone and together (see federation.ts). */
+export interface FederationCheck {
+  /** Each member alone, with everything it imports. */
+  members: { ontologyId: string; title: string; version: string; imports: number; consistent: boolean; checked: 'complete' | 'consistency' | 'none'; unsatisfiable: IRI[]; passed: boolean }[];
+  /** Imports of a member that could not be loaded. */
+  unresolved: { iri: string; via: string; reason: 'not-hosted' | 'held' | 'limit'; member: string }[];
+  /** All members together: every impossible class, the member that declares it, and whether it is already impossible in a member alone (`alone`) or only in the combination. */
+  joint: { consistent: boolean; checked: 'complete' | 'consistency' | 'none'; unsatisfiable: { iri: IRI; member: string | null; alone: boolean }[]; error?: string };
+  /** Pairs of members that conflict when used together (member ids). */
+  conflicts: { a: string; b: string; inconsistent: boolean; unsatisfiable: IRI[] }[];
+  /** Statements a member makes about another member's terms. */
+  foreignAxioms: { member: string; subject: IRI; predicate: IRI; object: string; owner: string }[];
+  versionClashes: { ontologyId: string; title: string; versions: string[] }[];
+  /** All members can be used together: consistent, with no impossible class. */
+  passed: boolean;
+  checkedAt: string;
+}
+
+/** What a proposed change does to a federation its ontology belongs to (following its working draft). */
+export interface FederationImpact {
+  federationId: string;
+  slug: string;
+  title: string;
+  /** The ontology has committed to this federation, so breaking it fails the change. */
+  committed: boolean;
+  passedBefore: boolean;
+  passedAfter: boolean;
+  /** Classes the change makes impossible in the federation, that weren't before. */
+  newlyUnsatisfiable: string[];
+  /** The federation was consistent before the change and isn't after. */
+  becomesInconsistent: boolean;
+  /** The check couldn't run to the end. */
+  error?: string;
+}
+
+/** One pinned ontology version. */
+export interface FederationPin {
+  role: 'member' | 'import';
+  ontologyId?: string;
+  title: string;
+  ontologyIRI: string;
+  version: string;
+  versionIRI: string;
+  /** `sha256:<hex>` over the version's RDFC-1.0 canonical form. */
+  hash: string;
 }

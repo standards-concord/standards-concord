@@ -379,6 +379,45 @@ export function ImportResults({ check, label }: { check: ImportCheck; label: Lab
   );
 }
 
+type Impact = NonNullable<ValidationReport['federations']>[number];
+const broke = (i: Impact) => (i.passedBefore && !i.passedAfter) || i.newlyUnsatisfiable.length > 0 || i.becomesInconsistent;
+
+export const federationsSummary = (fs: Impact[]) => {
+  const broken = fs.filter(broke).length;
+  return broken ? `breaks ${broken} of ${fs.length}` : `${plural(fs.length, 'federation')}, none broken`;
+};
+
+/** What a proposed change does to each federation that follows its ontology's working draft. */
+export function FederationImpacts({ impacts, label }: { impacts: Impact[]; label: Labeler }) {
+  const name = (iri: string) => label(iri) || localName(iri);
+  return (
+    <div className="space-y-2 text-sm">
+      <ul className="space-y-1.5" aria-label="Federations this change affects">
+        {impacts.map((i) => (
+          <li key={i.federationId} className="flex items-start gap-2">
+            {i.error ? <Info className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden /> : broke(i) ? <CircleX className={cx('mt-0.5 size-4 shrink-0', i.committed ? 'text-danger' : 'text-warn')} aria-hidden /> : <CircleCheck className="mt-0.5 size-4 shrink-0 text-ok" aria-hidden />}
+            <span className="min-w-0">
+              <Link to={`/f/${i.slug}`} className="font-medium text-accent hover:underline">{i.title}</Link>{' '}
+              <span className="text-muted">({i.committed ? 'committed: breaking it fails this change' : 'advice only'})</span>
+              <span className="block">
+                {i.error
+                  ? `Couldn't be checked: ${i.error}.`
+                  : i.becomesInconsistent
+                    ? 'With this change, its ontologies contradict each other.'
+                    : i.newlyUnsatisfiable.length
+                      ? `With this change, ${i.newlyUnsatisfiable.map(name).join(', ')} can never have members there.`
+                      : !i.passedBefore && !i.passedAfter
+                        ? 'It already had problems; this change adds none.'
+                        : 'Still works with this change.'}
+              </span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /** Stable identity of a lint finding, so a new finding can be told apart from ones already seen. */
 const issueKey = (i: ValidationReport['lint'][number]) => [i.severity, i.code, i.iri ?? '', i.message].join('|');
 
@@ -430,6 +469,19 @@ export function ValidationDetails({
             keepMounted
           >
             <ImportResults check={report.imports} label={label} />
+          </Disclosure>
+        )}
+        {report.federations && report.federations.length > 0 && (
+          <Disclosure
+            className="px-4 py-3"
+            heading={headingLevel}
+            title="Across federations"
+            summary={federationsSummary(report.federations)}
+            defaultOpen={report.federations.some((i) => broke(i) || i.error)}
+            failures={report.federations.filter(broke).map((i) => i.federationId)}
+            keepMounted
+          >
+            <FederationImpacts impacts={report.federations} label={label} />
           </Disclosure>
         )}
         <Disclosure

@@ -7,6 +7,7 @@ import { Page, Shell } from './components/Shell';
 import { Button, ErrorCard, Loading } from './components/ui';
 import { LoginPage } from './pages/Login';
 import { HubPage } from './pages/Hub';
+import { FederationPage, FederationsPage } from './pages/Federations';
 import { AlphaPage } from './pages/Alpha';
 import { FeedbackPage } from './pages/Feedback';
 import { WelcomePage } from './pages/Welcome';
@@ -107,6 +108,8 @@ function Routed() {
           <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
           <Route path="/" element={<RequireUser><HubPage /></RequireUser>} />
           <Route path="/settings" element={<SettingsRoute />} />
+          <Route path="/f" element={<RequireUser><FederationsPage /></RequireUser>} />
+          <Route path="/f/:slug" element={<RequireUser><FederationPage /></RequireUser>} />
           <Route path="/admin/feedback" element={<RequireUser><AdminFeedbackPage /></RequireUser>} />
           <Route path="/o/:id" element={<RequireUser><OntologyLayout /></RequireUser>}>
             <Route index element={<OverviewTab />} />

@@ -51,6 +51,7 @@ export function ImportsSection({ ontologyId, ontologyIRI, report, canPropose }: 
           ))}
         </ul>
       )}
+      <FederationsLine ontologyId={ontologyId} />
       {open && <ImportDialog ontologyId={ontologyId} imported={[...direct.map((i) => i.iri), ...elsewhere.map((u) => u.iri)]} onClose={() => setOpen(false)} />}
     </section>
   );
@@ -112,5 +113,26 @@ function ImportDialog({ ontologyId, imported, onClose }: { ontologyId: string; i
         {create.error ? <InlineError error={create.error} /> : null}
       </div>
     </Dialog>
+  );
+}
+
+/** The federations this ontology is in, if any (federations are an Advanced feature, so this shows only when there are some). */
+function FederationsLine({ ontologyId }: { ontologyId: string }) {
+  const feds = useAsync(() => api.ontologyFederations(ontologyId), [ontologyId]);
+  if (!feds.data?.length) return null;
+  return (
+    <p className="mt-2 text-sm text-muted" data-testid="federations-line">
+      Used together with other ontologies in{' '}
+      {feds.data.map((f, i) => (
+        <span key={f.id}>
+          {i > 0 && ', '}
+          <Link to={`/f/${f.slug}`} className="text-accent hover:underline">
+            {f.title}
+          </Link>
+          {f.committed && ' (committed)'}
+        </span>
+      ))}
+      .
+    </p>
   );
 }
