@@ -475,8 +475,13 @@ describe('Generated JavaScript classes', () => {
 <https://example.org/e> a owl:Ontology .
 e:Big a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:integer ; owl:withRestrictions ( [ xsd:minInclusive 0 ] ) ] .
 e:Account a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:balance ; owl:allValuesFrom e:Big ] , [ a owl:Restriction ; owl:onProperty e:balance ; owl:maxCardinality 1 ] .
-e:balance a owl:DatatypeProperty .`);
+e:balance a owl:DatatypeProperty .
+e:Code a rdfs:Datatype ; owl:equivalentClass xsd:token .
+e:Account rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:code ; owl:allValuesFrom e:Code ] , [ a owl:Restriction ; owl:onProperty e:code ; owl:maxCardinality 1 ] .
+e:code a owl:DatatypeProperty .`);
     const mod = await toWrapperClasses(g, { name: 'big' });
+    // Review r2: text the ontology defines on xsd:token is checked as xsd:string, so it is written as that, not as a token.
+    expect(await toShacl(g)).toMatch(/sh:datatype xsd:string ;\s+sh:maxCount 1 ;\s+sh:path e:code/);
     expect(mod.ts).toMatch(/export class Account extends TermWrapper[\s\S]*?get balance\(\): string \| undefined/);
     mkdirSync(GEN, { recursive: true });
     const dir = path.join(GEN, `big-${process.pid}`);
@@ -492,6 +497,10 @@ e:balance a owl:DatatypeProperty .`);
       expect(q.object.value).toBe('9007199254740993');
       expect((q.object as any).datatype.value).toBe(NS.xsd + 'integer');
       expect(account.balance).toBe('9007199254740993');
+      account.code = 'GB';
+      const [c] = store.getQuads(null, DataFactory.namedNode('https://example.org/e#code'), null, null);
+      expect((c.object as any).datatype.value).toBe(NS.xsd + 'string');
+      expect(account.code).toBe('GB');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

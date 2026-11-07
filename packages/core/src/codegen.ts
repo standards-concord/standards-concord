@@ -18,6 +18,7 @@ import { NS, RDF_TYPE, localName } from './ns.js';
 import { literal, nn, typedLit } from './rdf.js';
 import type { OntologyGraph } from './graph.js';
 import { deriveShapes, type DerivedShapes } from './shacl.js';
+import { primitiveOf } from './xsdTypes.js';
 import { codeModel, identifierFrom, JS_KEYWORDS, RESERVED_CLASSES, THING, type CodeModel } from './codemodel.js';
 
 const SH = NS.sh;
@@ -158,7 +159,8 @@ function writtenAs(dt: string, bases: Map<string, string[]>, seen = new Set<stri
   seen.add(dt);
   for (const b of own) {
     const w = writtenAs(b, bases, seen);
-    if (!bases.has(w)) return w;
+    // Text the ontology defines is checked as xsd:string, even on xsd:token and the like (see combineDatatypes).
+    if (!bases.has(w)) return primitiveOf(w) === XSD + 'string' ? XSD + 'string' : w;
   }
   return dt;
 }
