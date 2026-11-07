@@ -179,6 +179,10 @@ run_piece() { # job:part
 
 export CI=1
 started=$(date +%s)
+# CPU time used so far by the whole machine (user, nice and system), in microseconds; 0 where
+# /proc/stat doesn't exist (macOS), which skips the CPU line at the end.
+cpu_usec() { awk '/^cpu / { printf "%.0f", ($2 + $3 + $4) * 1000000 / 100; exit }' /proc/stat 2>/dev/null || echo 0; }
+cpu_started=$(cpu_usec)
 echo "Installing and building the web app once…"
 pnpm install --frozen-lockfile >"$logdir/setup.log" 2>&1 \
   && pnpm --filter @concord/web build >>"$logdir/setup.log" 2>&1 \
@@ -196,19 +200,23 @@ finish_one() {
   local p=${pid_piece[$done_pid]}
   piece_rc[$p]=$rc
   local took=$(( $(date +%s) - ${piece_start[$p]} ))
-  if [ "$rc" = 0 ]; then printf '   ok    %-16s %3dm%02ds\n' "$p" $((took / 60)) $((took % 60))
-  else printf '   FAIL  %-16s %3dm%02ds  (log: %s)\n' "$p" $((took / 60)) $((took % 60)) "$logdir/${p/:/-}.log"; fi
+  # CPU seconds the piece used (its processes' user + system time), to see where the time goes.
+  local cpu; cpu=$(awk 'NR==2 { gsub(/s/, ""); split($1, u, "m"); split($2, s, "m"); printf "%d", u[1]*60 + u[2] + s[1]*60 + s[2] }' "$logdir/${p/:/-}.cpu" 2>/dev/null)
+  if [ "$rc" = 0 ]; then printf '   ok    %-16s %3dm%02ds  cpu %ss\n' "$p" $((took / 60)) $((took % 60)) "${cpu:-?}"
+  else printf '   FAIL  %-16s %3dm%02ds  cpu %ss  (log: %s)\n' "$p" $((took / 60)) $((took % 60)) "${cpu:-?}" "$logdir/${p/:/-}.log"; fi
   running=$((running - 1))
 }
 for p in "${pieces[@]}"; do
   while [ "$running" -ge "$parallel" ]; do finish_one; done
-  ( run_piece "$p" ) >"$logdir/${p/:/-}.log" 2>&1 &
+  ( run_piece "$p"; rc=$?; times >"$logdir/${p/:/-}.cpu"; exit $rc ) >"$logdir/${p/:/-}.log" 2>&1 &
   pid_piece[$!]=$p
   piece_start[$p]=$(date +%s)
   running=$((running + 1))
 done
 while [ "$running" -gt 0 ]; do finish_one; done
 total=$(( $(date +%s) - started ))
+cpu_total=$(( ($(cpu_usec) - cpu_started) / 1000000 ))
+[ "$cpu_total" -gt 0 ] && echo "CPU used: ${cpu_total}s over ${total}s on $(nproc) CPUs ($(( cpu_total * 100 / (total * $(nproc)) ))% busy)"
 if $update_timings && ls "$logdir"/preview-*.json >/dev/null 2>&1; then node scripts/e2e-shards.mjs --update "$logdir"/preview-*.json; fi
 
 printf '### Local CI run\n\nCommit `%s`, run by `%s` with `scripts/ci-local.sh`, %s, in %dm%02ds.\n\n| Job | Result |\n| --- | --- |\n' \
