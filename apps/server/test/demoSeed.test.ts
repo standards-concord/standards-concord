@@ -39,6 +39,11 @@ describe('seeding the demo', () => {
     await put('kv', { id: 'ontology-import', verifiedAt: 'kept' });
     await put('kv', { id: 'lease:startup', holder: 'another instance', until: Date.now() + 60_000 });
     const personas = (await list<User>('users')).filter((u) => u.simulated).map((u) => u.id).sort();
+    // Review r3 of step 5: reviews and votes are kept under a change request's or release's id, not the
+    // ontology's, so they were left behind, orphaned, when the unfinished demo was cleared.
+    const parents = [...(await list<{ id: string }>('changeRequests', before!.id)), ...(await list<{ id: string }>('releases', before!.id))].map((d) => d.id);
+    const children = async () => (await Promise.all(parents.flatMap((p) => [list<{ id: string }>('reviews', p), list<{ id: string }>('votes', p)]))).flat();
+    expect((await children()).length).toBeGreaterThan(0);
 
     const again = await seedDemo();
     expect(again?.id).not.toBe(before?.id);
@@ -47,6 +52,7 @@ describe('seeding the demo', () => {
     expect((await list<UseCase>('useCases')).filter((u) => u.ontologyId === before!.id)).toEqual([]);
     expect((await list<OntologyProject>('ontologies')).filter((o) => o.slug === DEMO_SLUG)).toHaveLength(1);
     expect(await get('kv', 'demo-seed-state')).toMatchObject({ state: 'done' });
+    expect(await children()).toEqual([]);
     expect(await get('users', someone.id)).toBeTruthy();
     expect(await get('feedback', 'fb-meanwhile')).toBeTruthy();
     expect(await get('privateFiles', `${someone.id}/notes.txt`)).toBeTruthy();

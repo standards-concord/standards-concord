@@ -92,6 +92,9 @@ export async function seedDemo(): Promise<OntologyProject | undefined> {
 /** Where a demo seed writes rows that belong to its ontology (named by parent, or by an `ontologyId` field). */
 const SEEDED: Collection[] = ['memberships', 'useCases', 'interviews', 'meetings', 'changeRequests', 'reviews', 'votes', 'releases', 'requirementsDocs', 'activity', 'apps', 'appChecks', 'appFollowUps', 'forks', 'agentReports', 'federations', 'federationReleases'];
 
+/** Collections whose rows are kept under a seeded row's id (not the ontology's), by the parent's collection. */
+const CHILDREN: Partial<Record<Collection, Collection[]>> = { changeRequests: ['reviews', 'votes', 'appChecks'], releases: ['votes'], federations: ['federationReleases'] };
+
 /**
  * Clears what a seed cut short left behind, and only that: the unfinished demo ontology, the rows that belong to it
  * and its history. Accounts (the personas too, which the next seed reuses), feedback, private data and the server's
@@ -107,10 +110,16 @@ async function clearUnfinishedSeed(partial: OntologyProject) {
   // History first: if this stops in between, the unfinished demo is still there to be found, and cleared again.
   await ontologyStore.forget(partial);
   await transaction(async () => {
+    const parents: string[] = [];
     for (const c of SEEDED) {
       const owned = new Set([...(await list<{ id: string }>(c, partial.id)).map((d) => d.id), ...(await list<{ id: string; ontologyId?: string }>(c)).filter((d) => d.ontologyId === partial.id).map((d) => d.id)]);
       for (const id of owned) await remove(c, id);
+      if (c in CHILDREN) parents.push(...owned);
     }
+    // Rows kept under a change request, release or federation rather than the ontology (reviews, votes, app
+    // checks, federation releases) go with it, in the same transaction.
+    const childCollections = [...new Set(Object.values(CHILDREN).flat())];
+    for (const parent of parents) for (const c of childCollections) for (const d of await list<{ id: string }>(c, parent)) await remove(c, d.id);
     await remove('ontologies', partial.id);
   });
 }
