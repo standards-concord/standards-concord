@@ -11,10 +11,11 @@ import { javascript, typescript } from '@codemirror/legacy-modes/mode/javascript
  * prefixed names, literals, blank nodes), so the same term looks the same in
  * every view, and SHACL compact syntax adds its keywords to the Turtle rules.
  * XML, JSON-LD and LinkML (YAML) use CodeMirror's Lezer grammars, and the
- * generated classes CodeMirror's JavaScript mode.
+ * generated classes CodeMirror's JavaScript mode. Shell covers the curl
+ * examples, with URLs in the same colour as IRIs.
  */
 
-export type CodeLanguage = 'turtle' | 'ntriples' | 'sparql' | 'manchester' | 'shaclc' | 'xml' | 'json' | 'yaml' | 'javascript' | 'typescript' | 'text';
+export type CodeLanguage = 'turtle' | 'ntriples' | 'sparql' | 'manchester' | 'shaclc' | 'xml' | 'json' | 'yaml' | 'javascript' | 'typescript' | 'shell' | 'text';
 
 /** Token names the tokenizers return, mapped to highlight tags (and so to colours). */
 const tokenTable: Record<string, Tag | readonly Tag[]> = {
@@ -35,6 +36,7 @@ const tokenTable: Record<string, Tag | readonly Tag[]> = {
   operator: t.operator,
   func: t.function(t.variableName),
   frame: t.heading,
+  flag: t.attributeName,
 };
 
 const PN_CHARS_BASE =
@@ -201,6 +203,115 @@ function rdfParser(mode: Mode): StreamParser<RdfState> {
   };
 }
 
+interface ShellState {
+  /** The previous line ended with a backslash, so this line carries on the same command. */
+  continued: boolean;
+  /** The next word is a command name. */
+  command: boolean;
+  /** Inside a quoted string that carries on past the end of a line: its quote. */
+  quote: "'" | '"' | null;
+  /** A new shell word can begin here (after a space, an operator or a line start), so # starts a comment. */
+  wordStart: boolean;
+}
+
+/** Reads a quoted string's body up to and including its closing quote. True when it closed on this line. */
+function readShellString(stream: StringStream, quote: "'" | '"'): boolean {
+  while (!stream.eol()) {
+    const ch = stream.next();
+    if (ch === quote) return true;
+    // Double quotes keep backslash escapes (a backslash at the line's end carries the string on); single quotes have none.
+    if (ch === '\\' && quote === '"') stream.next();
+  }
+  return false;
+}
+
+/** Characters that end an unquoted shell word fragment. */
+const SHELL_STOP = `\\s'"|;&\\\\`;
+const SHELL_URL = new RegExp(`^[a-z][a-z0-9+.-]*://[^${SHELL_STOP}]+`, 'i');
+const SHELL_FILE = new RegExp(`^@[^${SHELL_STOP}]+`);
+const SHELL_WORD = new RegExp(`^[^${SHELL_STOP}$]+`);
+
+/** Enough shell for commands such as the curl examples: commands, flags, strings, URLs, variables and @files. */
+const shellParser: StreamParser<ShellState> = {
+  name: 'shell',
+  startState: () => ({ continued: false, command: true, quote: null, wordStart: true }),
+  copyState: (s) => ({ ...s }),
+  // token() never runs on an empty line, which ends a continued command (a quoted string carries on through it).
+  blankLine(state) {
+    if (state.quote) return;
+    state.continued = false;
+    state.command = true;
+    state.wordStart = true;
+  },
+  languageData: { commentTokens: { line: '#' } },
+  tokenTable,
+  token(stream, state) {
+    if (state.quote) {
+      if (readShellString(stream, state.quote)) {
+        state.quote = null;
+        state.wordStart = false;
+      }
+      return 'string';
+    }
+    if (stream.sol()) {
+      // A continued line keeps the word boundary and command position from before the backslash (foo\ then #bar is foo#bar).
+      if (!state.continued) {
+        state.command = true;
+        state.wordStart = true;
+      }
+      state.continued = false;
+    }
+    if (stream.eatSpace()) {
+      state.wordStart = true;
+      return null;
+    }
+    const wordStart = state.wordStart;
+    const commandBefore = state.command;
+    const command = commandBefore && wordStart;
+    state.command = false;
+    state.wordStart = false;
+    const ch = stream.peek();
+    // Only where a word can begin: in a#b or $HOME#x the # belongs to the word.
+    if (ch === '#' && wordStart) {
+      stream.skipToEnd();
+      return 'comment';
+    }
+    if (ch === '\\') {
+      stream.next();
+      if (stream.eol()) {
+        state.continued = true;
+        state.wordStart = wordStart;
+        state.command = commandBefore;
+        return 'punct';
+      }
+      stream.next();
+      return null;
+    }
+    if (ch === "'" || ch === '"') {
+      stream.next();
+      if (!readShellString(stream, ch)) state.quote = ch;
+      return 'string';
+    }
+    if (stream.match(/^[|;&]+/)) {
+      state.command = true;
+      state.wordStart = true;
+      return 'operator';
+    }
+    if (stream.match(/^\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*)/)) return 'variable';
+    if (wordStart) {
+      if (stream.match(SHELL_URL)) return 'iri';
+      if (stream.match(/^--?[A-Za-z0-9][\w-]*(?=[\s=|;&'"]|$)/)) return 'flag';
+      if (stream.match(SHELL_FILE)) return 'variable';
+    }
+    if (stream.match(SHELL_WORD)) {
+      if (command) return 'func';
+      return wordStart && /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/.test(stream.current()) ? 'keyword' : null;
+    }
+    stream.next();
+    return null;
+  },
+};
+
 const streamLanguages = {
   turtle: StreamLanguage.define(rdfParser('turtle')),
   ntriples: StreamLanguage.define(rdfParser('ntriples')),
@@ -209,6 +320,7 @@ const streamLanguages = {
   shaclc: StreamLanguage.define(rdfParser('shaclc')),
   javascript: StreamLanguage.define(javascript),
   typescript: StreamLanguage.define(typescript),
+  shell: StreamLanguage.define(shellParser),
 };
 
 export function languageSupport(lang: CodeLanguage): LanguageSupport | null {
@@ -220,6 +332,7 @@ export function languageSupport(lang: CodeLanguage): LanguageSupport | null {
     case 'shaclc':
     case 'javascript':
     case 'typescript':
+    case 'shell':
       return new LanguageSupport(streamLanguages[lang]);
     case 'xml':
       return xml();

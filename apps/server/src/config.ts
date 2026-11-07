@@ -93,6 +93,8 @@ export const config = {
     publishToken: process.env.GITHUB_PUBLISH_TOKEN,
     /** Default org/user to publish new ontology repos into, e.g. "theodi". */
     publishOwner: process.env.GITHUB_PUBLISH_OWNER,
+    /** GitHub's API root, for publishing from the database store (tests point it elsewhere). */
+    publishApi: (process.env.GITHUB_PUBLISH_API || 'https://api.github.com').replace(/\/$/, ''),
   },
 
   solid: {

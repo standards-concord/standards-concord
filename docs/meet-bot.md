@@ -57,14 +57,14 @@ By default the bot's prompts only show on the meeting's page in Concord, for the
 
 6. **Check it end to end.** As a facilitator, invite the address to a test call 20 minutes or more ahead, tagged `#<ontology>`. Then check that:
    - the call appears under *Upcoming calls* on the Meetings tab as **Needs approval** (Google can take several minutes to update the feed);
-   - after you approve it, it shows **Bot booked** about 15 minutes before the start;
+   - after you approve it, it shows **Bot booked** within a minute or two;
    - the bot asks to join at the start, and you admit it;
    - transcript lines appear on the meeting's page as people talk (if not, Recall.ai can't reach `PUBLIC_URL`);
    - the bot's intro message, and a prompt you post with **Post in the Meet chat**, show in the Meet chat.
 
 ## How it works
 
-Every minute the server reads the bot's calendar feed, lists the calls in the next two weeks that have a Meet link and include the bot as an attendee (each week of a recurring series separately, with moved, skipped and cancelled weeks handled), and keeps a scheduled meeting for each. Fifteen minutes before an approved call it books a Recall.ai bot to join at the start time; Recall.ai asks for ten minutes' notice to guarantee one is free.
+Every minute the server reads the bot's calendar feed, lists the calls in the next two weeks that have a Meet link and include the bot as an attendee (each week of a recurring series separately, with moved, skipped and cancelled weeks handled), and keeps a scheduled meeting for each. As soon as a call is approved it books a Recall.ai bot to join at the start time. Recall.ai only guarantees a bot booked more than ten minutes ahead, and recommends booking as early as possible (a booked bot costs nothing until it joins), so missed minutes close to the start can't cost the call its bot. A moved call has its bot released and booked again for the new time. Without a Recall.ai key, an approved call says it can't have a bot fifteen minutes before it starts.
 
 Each meeting has one bot record with one state machine (`apps/server/src/services/botLifecycle.ts`): **idle** (nothing booked), **booking** (a booking recorded and sent, not yet answered), **booked** (Recall.ai named the bot), **releasing** (getting rid of the bot, until Recall.ai confirms) and **done**. The rules:
 

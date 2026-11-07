@@ -1,4 +1,4 @@
-import { demoOntology, expect, expectNoCrash, settle, signIn, test } from './fixtures';
+import { demoOntology, expect, expectNoCrash, networkQuiet, settle, signIn, test } from './fixtures';
 import type { Page } from '@playwright/test';
 
 /**
@@ -238,7 +238,7 @@ test.describe('editing a term inline', () => {
     await form.getByLabel('Comment').fill('Still typing here.');
     release();
     await done;
-    await page.waitForLoadState('networkidle');
+    await networkQuiet(page);
     await expect(form.getByLabel('Comment')).toHaveValue('Still typing here.');
     await expect(page.getByRole('status').filter({ hasText: 'Saved as draft' })).toHaveCount(0);
   });

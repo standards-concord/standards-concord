@@ -49,16 +49,26 @@ describe('reasoner worker pool', () => {
     const lines = [`<https://example.org/chain> a <${owl}Ontology> .`];
     for (let i = 0; i < 1000; i++) lines.push(`<${ex}C${i}> a <${owl}Class>${i ? ` ; <${rdfs}subClassOf> <${ex}C${i - 1}>` : ''} .`);
     const g = await OntologyGraph.fromTurtle(lines.join('\n'));
-    let ticks = 0;
-    const heartbeat = setInterval(() => ticks++, 10);
+    // The longest the main thread went without running a 10 ms timer: blocked, that is the whole call.
+    let last = performance.now(), longestGap = 0;
+    const heartbeat = setInterval(() => {
+      const now = performance.now();
+      longestGap = Math.max(longestGap, now - last);
+      last = now;
+    }, 10);
     const t0 = performance.now();
     const r = await reasonInWorker(g, { timeoutMs: 20, structuralTimeoutMs: 50, faults: { owl: 'hang' } });
     const elapsed = performance.now() - t0;
     clearInterval(heartbeat);
+    longestGap = Math.max(longestGap, performance.now() - last);
     expect(r).toMatchObject({ engine: 'none', available: false, checked: 'none', consistent: false, unsatisfiable: [] });
     expect(r.error).toMatch(/took longer than 20 ms.*structural checks took longer than 50 ms/);
     expect(elapsed).toBeLessThan(1000);
-    expect(ticks).toBeGreaterThan(elapsed / 10 / 3);
+    // Run on the main thread, the structural checks would stall it for seconds. This used to count
+    // the timer's ticks against the ideal rate (and later against an idle rate measured afterwards),
+    // which failed whenever other test files ran side by side and took the CPU, blocked or not;
+    // the longest single stall only goes wrong when something really holds the thread.
+    expect(longestGap).toBeLessThan(500);
   });
 
   // The same gap as a timeout, for a crash: the worker dying mid-check must not read as "consistent".

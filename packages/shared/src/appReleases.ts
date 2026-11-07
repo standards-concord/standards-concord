@@ -110,6 +110,41 @@ export const APP_RELEASES: AppRelease[] = [
     ],
   },
   {
+    version: '0.41.4',
+    date: '2026-11-07',
+    title: 'Tidier “Validate from your own code”',
+    pr: 104,
+    changes: [
+      {
+        id: 'validate-api-help-tidy',
+        type: 'fix',
+        title: 'The curl examples on Validate data are highlighted and line up',
+        detail:
+          'In Validate data’s “Validate from your own code” section, the curl examples are now syntax-highlighted like the rest of Concord’s code, each in one box with its own copy button, and the section no longer runs into the card’s edges. The key facts (address, body, answer, status, limits) are a short list instead of one long paragraph.',
+        roles: ['contributor', 'member', 'agent'],
+        to: '{o}/validate',
+        ask: 'Are the examples easy to read and copy?',
+      },
+    ],
+  },
+  {
+    version: '0.41.3',
+    date: '2026-11-07',
+    title: 'Sections you have opened come back at once',
+    pr: 102,
+    changes: [
+      {
+        id: 'instant-sections',
+        type: 'perf',
+        title: 'Moving between sections is instant',
+        detail: 'Change requests, releases, meetings, forks, use cases, app checks, agent reports and the overview show what they showed last time straight away when you come back to them, and quietly bring it up to date. The main lists are also fetched in the background once you open an ontology, so even the first visit to Change requests, Releases, Forks, Use cases or Meetings is instant. Nothing is kept for the next person after you sign out.',
+        roles: [],
+        to: '{o}/changes',
+        ask: 'Does moving between sections feel instant now? Did you ever see out-of-date information that confused you?',
+      },
+    ],
+  },
+  {
     version: '0.41.2',
     date: '2026-11-06',
     title: 'Concord’s own icon on the connector and in the tab',

@@ -85,7 +85,7 @@ export function SourceTab() {
   const [params, setParams] = useSearchParams();
   const format = (FORMATS.find((f) => f.id === params.get('format'))?.id ?? 'turtle') as OutputFormat;
   const ref = params.get('ref') ?? 'working';
-  const releases = useAsync(() => api.releases(id), [id]);
+  const releases = useAsync(() => api.releases(id), [id], { keep: `releases|${id}` });
   const source = useAsync(() => api.source(id, format, ref), [id, format, ref]);
   const meta = FORMATS.find((f) => f.id === format)!;
 

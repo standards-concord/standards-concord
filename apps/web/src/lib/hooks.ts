@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { finishLoad, keptKey, keptOwner, keptValue, startLoad } from './kept';
 
 export interface AsyncState<T> {
   data: T | undefined;
@@ -8,20 +9,38 @@ export interface AsyncState<T> {
   setData: (d: T | ((prev: T | undefined) => T)) => void;
 }
 
-/** Run an async loader whenever deps change; keeps previous data while reloading. */
-export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): AsyncState<T> {
-  const [data, setDataState] = useState<T>();
+/**
+ * Run an async loader whenever deps change; keeps previous data while reloading. With `keep`, a key
+ * naming what is loaded (with every dep in it), the last answer for that key is shown at once when the
+ * page is opened again, and replaced when the new one arrives.
+ */
+export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts?: { keep?: string }): AsyncState<T> {
+  const [data, setDataState] = useState<T | undefined>(() => keptValue<T>(keptKey(opts?.keep))?.value);
   const [error, setError] = useState<unknown>();
   const [loading, setLoading] = useState(true);
   const seq = useRef(0);
   const fnRef = useRef(fn);
   fnRef.current = fn;
+  const keepRef = useRef(opts?.keep);
+  keepRef.current = opts?.keep;
+  // Every key this page has loaded, all forgotten when it changes its data itself.
+  const [owner] = useState(keptOwner);
 
   const run = useCallback(async () => {
     const id = ++seq.current;
     setLoading(true);
+    const key = keptKey(keepRef.current);
+    owner.loading(key);
+    const started = startLoad(key);
+    const shown = keptValue<T>(key);
+    if (shown) {
+      setDataState(shown.value);
+      setError(undefined);
+    }
+    let answer: { value: T } | undefined;
     try {
       const d = await fnRef.current();
+      answer = { value: d };
       if (id === seq.current) {
         setDataState(d);
         setError(undefined);
@@ -29,9 +48,10 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): AsyncState<T
     } catch (e) {
       if (id === seq.current) setError(e);
     } finally {
+      finishLoad(started, answer);
       if (id === seq.current) setLoading(false);
     }
-  }, []);
+  }, [owner]);
 
   // The deps the loader last started with. When they change, the effect that starts the next load runs only after
   // the render, so that one render used to report the old load as finished (loading false, with the old deps' data).
@@ -47,9 +67,14 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): AsyncState<T
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
+  // A page's own change (after an edit) isn't kept: what was kept for anything the page loaded is
+  // forgotten instead (see keptOwner), and the next load keeps afresh. As before, a load already on its
+  // way still replaces the page's data when it answers; pages that edit call reload() afterwards, which
+  // supersedes it.
   const setData = useCallback((d: T | ((prev: T | undefined) => T)) => {
+    owner.changed(keepRef.current);
     setDataState((prev) => (typeof d === 'function' ? (d as (p: T | undefined) => T)(prev) : d));
-  }, []);
+  }, [owner]);
 
   return { data, error, loading: loading || stale, reload: run, setData };
 }
