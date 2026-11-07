@@ -119,52 +119,67 @@ async function tokenProblem(scope: TokenScope, token: unknown, now = Date.now())
 
 /* ------------------------------ rate limits ------------------------------ */
 
-const hits = new Map<string, number[]>();
-const sent = new Map<string, { reference: string; until: number }>();
-const MAX_KEYS = 50_000;
+/*
+ * Kept in the database, not this process, so every server (or function instance) counts the same posts: each
+ * visitor's recent posts (`report-hits:v:…`), each one's attempts (`report-hits:a:…`), and recent reports for
+ * answering a duplicate (`report-sent:…`). Each row says when it is no longer needed, and is swept then.
+ */
+const LIMITS = 'report-limits';
+interface Hits {
+  id: string;
+  ts: number[];
+  reportHitsUntil: number;
+}
+interface Sent {
+  id: string;
+  reference: string;
+  reportSentUntil: number;
+}
+const hitsId = (kind: 'v' | 'a', who: string) => `report-hits:${kind}:${crypto.createHash('sha256').update(who).digest('base64url')}`;
 let lastSweep = 0;
 
-/** Forgets what no limit needs any more, and keeps memory bounded. */
+/** Forgets what no limit needs any more. */
 async function sweep(now = Date.now(), force = false) {
   if (!force && now - lastSweep < 60_000) return;
   lastSweep = now;
-  for (const [k, ts] of hits) {
-    const live = ts.filter((t) => now - t < DAY_MS);
-    if (live.length) hits.set(k, live);
-    else hits.delete(k);
-  }
   await removeWhereAtMost('reportNonces', 'until', now);
-  for (const [k, v] of sent) if (v.until <= now) sent.delete(k);
-  for (const m of [hits, sent] as Map<string, unknown>[]) for (const k of m.keys()) if (m.size > MAX_KEYS) m.delete(k);
+  await removeWhereAtMost('kv', 'reportHitsUntil', now);
+  await removeWhereAtMost('kv', 'reportSentUntil', now);
 }
 
 /** For tests: clears every limit, and what was remembered about past reports. */
 export async function resetReportLimits() { return transaction(async () => {
-  hits.clear();
-  sent.clear();
+  await removeWhereAtMost('kv', 'reportHitsUntil', Number.MAX_SAFE_INTEGER);
+  await removeWhereAtMost('kv', 'reportSentUntil', Number.MAX_SAFE_INTEGER);
   lastSweep = 0;
   await removeWhereAtMost('reportNonces', 'until', Number.MAX_SAFE_INTEGER);
   for (const d of [0, 1]) await remove('kv', dailyKey(Date.now() - d * DAY_MS));
 }); }
 /** For tests: how many visitors and tokens are remembered. */
-export const reportMemory = async () => ({ visitors: [...hits.keys()].filter((k) => k.startsWith('v:')).length, attempts: [...hits.keys()].filter((k) => k.startsWith('a:')).length, tokens: (await list('reportNonces', 'nonce')).length, sent: sent.size });
+export const reportMemory = async () => {
+  const rows = await list<{ id: string }>('kv', LIMITS);
+  const count = (prefix: string) => rows.filter((r) => r.id.startsWith(prefix)).length;
+  return { visitors: count('report-hits:v:'), attempts: count('report-hits:a:'), tokens: (await list('reportNonces', 'nonce')).length, sent: count('report-sent:') };
+};
 export const sweepReportMemory = async (now: number) => await sweep(now, true);
 
-function visitorLimited(who: string, now: number): boolean {
-  const key = `v:${who}`;
-  const ts = (hits.get(key) ?? []).filter((t) => now - t < DAY_MS);
-  if (ts.filter((t) => now - t < VISITOR.short.ms).length >= VISITOR.short.max || ts.length >= VISITOR.day.max) return true;
-  hits.set(key, [...ts, now]);
-  return false;
+/** Counts a post in `who`'s window unless `full` says the window is full: in one transaction, so posts to two servers at once can't both take the last place. */
+async function counted(id: string, now: number, keepMs: number, full: (ts: number[]) => boolean): Promise<boolean> {
+  return await transaction(async () => {
+    const ts = ((await get<Hits>('kv', id))?.ts ?? []).filter((t) => now - t < keepMs);
+    if (full(ts)) return false;
+    await put<Hits>('kv', { id, ts: [...ts, now], reportHitsUntil: now + keepMs }, LIMITS);
+    return true;
+  });
+}
+
+async function visitorLimited(who: string, now: number): Promise<boolean> {
+  return !(await counted(hitsId('v', who), now, DAY_MS, (ts) => ts.filter((t) => now - t < VISITOR.short.ms).length >= VISITOR.short.max || ts.length >= VISITOR.day.max));
 }
 
 /** Every post counts here, before it is checked at all. */
-function attemptsLimited(who: string, now: number): boolean {
-  const key = `a:${who}`;
-  const ts = (hits.get(key) ?? []).filter((t) => now - t < ATTEMPTS.ms);
-  if (ts.length >= ATTEMPTS.max) return true;
-  hits.set(key, [...ts, now]);
-  return false;
+async function attemptsLimited(who: string, now: number): Promise<boolean> {
+  return !(await counted(hitsId('a', who), now, ATTEMPTS.ms, (ts) => ts.length >= ATTEMPTS.max));
 }
 
 interface DailyCounts {
@@ -319,7 +334,7 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
   // Before anything else, so posts that fail a check below are cleaned up after and limited too.
   await sweep(now);
   const who = visitor(req);
-  if (attemptsLimited(who, now)) throw new ReportError(429, 'Too many tries for now. Please try again later, or sign in as a member.');
+  if (await attemptsLimited(who, now)) throw new ReportError(429, 'Too many tries for now. Please try again later, or sign in as a member.');
   const b = (req.body ?? {}) as Record<string, unknown>;
   const iri = exact(b.term, 2000);
   const v = versionParam(b.version);
@@ -336,11 +351,11 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
   if (fields.description.length < REPORT_LIMITS.minDescription) return fail(400, 'Please describe the problem in a sentence or two.', 'description');
   if (fields.description.length > REPORT_LIMITS.description) return fail(400, `Please keep the description under ${REPORT_LIMITS.description} characters.`, 'description');
   if ((`${fields.title} ${fields.description}`.match(/https?:\/\/|www\./gi) ?? []).length > REPORT_LIMITS.links) return fail(400, `Please include at most ${REPORT_LIMITS.links} links.`, 'description');
-  if (visitorLimited(who, now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
+  if (await visitorLimited(who, now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
   // The same report twice from this browser: answered as the first time, and only ever about this browser's own reports.
   const fingerprint = crypto.createHmac('sha256', keyFor('duplicate')!).update([session, project.id, found.version, found.term.iri, fields.description.toLowerCase().replace(/\s+/g, ' ')].join('\n')).digest('base64url');
-  const before = sent.get(fingerprint);
-  if (before) return { found, fields, status: 201, reference: before.reference };
+  const before = await get<Sent>('kv', `report-sent:${fingerprint}`);
+  if (before && before.reportSentUntil > now) return { found, fields, status: 201, reference: before.reference };
   if (await dailyLimited(project.id, now)) return fail(429, 'Too many reports for now. Please try again later, or sign in as a member.');
 
   const report: PublicReport = {
@@ -354,7 +369,7 @@ async function submit(req: Request, res: Response, project: OntologyProject) {
     createdAt: clock.iso(),
   };
   await put('publicReports', report, project.id);
-  sent.set(fingerprint, { reference: report.id, until: now + DAY_MS });
+  await put<Sent>('kv', { id: `report-sent:${fingerprint}`, reference: report.id, reportSentUntil: now + DAY_MS }, LIMITS);
   return { found, fields, status: 201, reference: report.id };
 }
 

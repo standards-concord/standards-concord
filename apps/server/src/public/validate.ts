@@ -3,6 +3,7 @@ import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { DATA_FORMATS, DATA_MEDIA_TYPES, DataError, dataFormatForMediaType, sniffDataFormat, type DataFormat } from '@concord/core';
 import { config } from '../config.js';
 import { clientIp } from '../oauth.js';
+import { DbRateStore } from '../rateLimitStore.js';
 import { findProject } from '../services/ontologies.js';
 import { HELD_MESSAGE, isHeld } from './holds.js';
 import { ontologyStore } from '../services/ontologyStore.js';
@@ -44,6 +45,8 @@ export const RATE_LIMITS = { perMinute: Number(process.env.VALIDATE_RATE_LIMIT ?
 const limiter = rateLimit({
   windowMs: 60 * 1000,
   limit: () => RATE_LIMITS.perMinute,
+  // Counted across every instance when several serve at once (Vercel).
+  ...(config.sharedLimits ? { store: new DbRateStore('validate') } : {}),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => ipKeyGenerator(clientIp(req as Request)),

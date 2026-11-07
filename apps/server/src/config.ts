@@ -54,6 +54,11 @@ export const config = {
    * 'requests', after requests plus a daily cron call (Vercel, which has no long-running process).
    */
   schedule: (process.env.CONCORD_SCHEDULE ?? (process.env.VERCEL ? 'requests' : 'timer')) as 'timer' | 'requests',
+  /**
+   * Rate limits counted in the database, shared by every instance (OAuth endpoints, public validation), instead of
+   * each process's memory. On by default on Vercel, where several instances serve at once.
+   */
+  sharedLimits: bool(process.env.CONCORD_SHARED_LIMITS, !!process.env.VERCEL),
   /** Vercel Cron's bearer secret, for GET /api/cron/daily. Unset: the endpoint refuses every call. */
   cronSecret: process.env.CRON_SECRET || undefined,
   /**

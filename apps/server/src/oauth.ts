@@ -10,6 +10,7 @@ import type { OAuthConnection, OAuthRequestInfo, User } from '@concord/shared';
 import express, { type NextFunction, type Request, type RequestHandler, type Response, type Router } from 'express';
 import { ipKeyGenerator, rateLimit as rateLimiter } from 'express-rate-limit';
 import { config } from './config.js';
+import { DbRateStore } from './rateLimitStore.js';
 import { claim, detached, get, HttpError, list, put, remove, scrubFreeSpace, take, transaction, withoutWaiting } from './db.js';
 import { newId } from './ids.js';
 import { FetchError, safeFetchText } from './safeFetch.js';
@@ -679,10 +680,12 @@ export function clientIp(req: Request): string {
   if (passed && isIP(passed) && fromTrustedProxy(req)) return passed;
   return req.ip ?? 'unknown';
 }
-const limiter = (windowMs: number, limit: number) =>
+const limiter = (windowMs: number, limit: number, name: string) =>
   rateLimiter({
     windowMs,
     limit,
+    // Counted across every instance when several serve at once (Vercel).
+    ...(config.sharedLimits ? { store: new DbRateStore(`oauth-${name}`) } : {}),
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => ipKeyGenerator(clientIp(req as Request)),
@@ -690,8 +693,8 @@ const limiter = (windowMs: number, limit: number) =>
     message: { error: 'too_many_requests', error_description: 'Too many requests. Try again later.' },
   });
 const limits: [RegExp, RequestHandler][] = [
-  [/^\/register/, limiter(60 * 60 * 1000, 30)],
-  [/^\/(authorize|token|revoke)/, limiter(15 * 60 * 1000, 300)],
+  [/^\/register/, limiter(60 * 60 * 1000, 30, 'register')],
+  [/^\/(authorize|token|revoke)/, limiter(15 * 60 * 1000, 300, 'token')],
 ];
 const rateLimit = false as const;
 
