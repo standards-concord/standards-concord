@@ -120,6 +120,7 @@ describe('moving a database to the database-backed ontology store', () => {
     const podRow: StoredRow = {
       collection: 'kv',
       id: `pod:${user}`,
+      parent: null,
       data: JSON.stringify({ id: `pod:${user}`, podUrl: `https://pods.example.org/alice-${user.slice(-6)}/`, webId: 'https://pods.example.org/alice/profile/card#me', clientId: 'c', clientSecret: 's' }),
       createdAt: new Date().toISOString(),
     };
@@ -129,6 +130,7 @@ describe('moving a database to the database-backed ontology store', () => {
     const onDisk = path.join(config.dataDir, 'private', user);
     try {
       await copyDatabase(source);
+      await importHistories(config.dataDir);
       // As the Community Solid Server's file backend keeps them: a name that doesn't give the type gets `$.<ext>`.
       fs.mkdirSync(path.join(kept, 'interviews'), { recursive: true });
       fs.mkdirSync(path.join(kept, 'alpha'), { recursive: true });
