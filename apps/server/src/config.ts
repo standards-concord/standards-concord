@@ -75,6 +75,12 @@ export const config = {
    * data directory (the VM), or `db`, rows in the database (Vercel, which has no lasting disk).
    */
   privateStore: (process.env.CONCORD_PRIVATE_STORE ?? (process.env.VERCEL ? 'db' : 'files')) === 'db' ? ('db' as const) : ('files' as const),
+  /**
+   * Without CONCORD_ENCRYPTION_KEY, keep an administrator's Solid login (for reading testers' pods) in this process's
+   * memory. Fine for one long-running server (the VM); off by default on Vercel, where the next request can reach
+   * another instance, so there the feature needs the key and is turned off without it.
+   */
+  adminLoginsInMemory: bool(process.env.CONCORD_ADMIN_LOGINS_IN_MEMORY, !process.env.VERCEL),
   /** Vercel Cron's bearer secret, for GET /api/cron/daily. Unset: the endpoint refuses every call. */
   cronSecret: process.env.CRON_SECRET || undefined,
   /**

@@ -4,7 +4,7 @@ import { allTerms, compactIRI, expandIRI, FORMAT_INFO, serialize, usedBy, valida
 import type { OutputFormat } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
-import { adminLoginFor, endAdminLogin, providers, requireUser, SESSION_COOKIE, sessionHandle, setSessionCookie } from '../auth.js';
+import { adminLoginFor, adminLoginsKept, endAdminLogin, providers, requireUser, SESSION_COOKIE, sessionHandle, setSessionCookie } from '../auth.js';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { transaction, get, HttpError, list, put } from '../db.js';
@@ -1105,6 +1105,7 @@ export function apiRouter(): Router {
   // Testers' feedback read straight from their pods, as the admin's own WebID (only if they signed in with Solid).
   r.get('/feedback/pods', async (req, res) => {
     feedbackAdmin(req);
+    if (!adminLoginsKept()) throw new HttpError(503, 'Reading testers’ pods is off on this server: it needs CONCORD_ENCRYPTION_KEY to keep your Solid sign-in.');
     const login = await adminLoginFor(req);
     const read = login ? await podReader(login) : undefined;
     // Their Solid login is kept for the browser session that signed in (sealed in the database with CONCORD_ENCRYPTION_KEY, else in memory): sign-out, another browser or an expired token ends it.

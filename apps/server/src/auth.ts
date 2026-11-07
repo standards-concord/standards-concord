@@ -118,10 +118,32 @@ const remember = (key: string, login: SolidLogin) => {
   if (adminLogins.size >= MAX_ADMIN_LOGINS) adminLogins.delete(adminLogins.keys().next().value!);
   adminLogins.set(key, login);
 };
+/** Whether administrators' Solid logins can be kept here: sealed in the database, or in memory on a single server. */
+export const adminLoginsKept = () => sealingAvailable() || config.adminLoginsInMemory;
+/**
+ * Keep an administrator's Solid login for their browser session. Returns false when it can't be kept (several
+ * instances and no CONCORD_ENCRYPTION_KEY): reading testers' pods is then off, rather than working on one instance only.
+ */
+export async function keepAdminLogin(sessionToken: string, login: SolidLogin): Promise<boolean> {
+  const key = sessionKey(sessionToken);
+  if (sealingAvailable()) {
+    await removeWhereAtMost('kv', 'adminLoginExpires', Date.now());
+    await saveShared(key, login);
+    remember(key, { ...login, sharedId: key });
+    return true;
+  }
+  if (!config.adminLoginsInMemory) {
+    console.warn('[auth] an administrator signed in with Solid, but reading pods is off: set CONCORD_ENCRYPTION_KEY to keep their login');
+    return false;
+  }
+  remember(key, login);
+  return true;
+}
 export const adminLoginFor = async (req: Request): Promise<SolidLogin | undefined> => {
   const token = req.cookies?.[SESSION_COOKIE];
   if (typeof token !== 'string' || !token) return undefined;
   const key = sessionKey(token);
+  if (!adminLoginsKept()) return undefined;
   const here = adminLogins.get(key);
   if (here || !sealingAvailable()) return here;
   // Signed in through another instance.
@@ -313,14 +335,7 @@ export function mountAuth(router: Router) {
     if (await managedWebId(done.webId)) return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
     const { user, sessionToken } = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
     // Keep an administrator's login for this browser session (to read testers' pods as them); drop everyone else's.
-    if (isAdmin(user, 'solid')) {
-      const key = sessionKey(sessionToken);
-      if (sealingAvailable()) {
-        await removeWhereAtMost('kv', 'adminLoginExpires', Date.now());
-        await saveShared(key, done.login);
-        remember(key, { ...done.login, sharedId: key });
-      } else remember(key, done.login);
-    }
+    if (isAdmin(user, 'solid')) await keepAdminLogin(sessionToken, done.login);
     res.redirect(`${config.webUrl}${done.returnTo}`);
   });
 }

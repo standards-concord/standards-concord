@@ -50,3 +50,29 @@ describe('an administrator’s Solid login across instances', () => {
     expect(await adminLoginFor(req)).toBeUndefined();
   });
 });
+
+describe('an administrator’s Solid login without CONCORD_ENCRYPTION_KEY', () => {
+  it('isn’t kept on a server with several instances, and reading pods says why', async () => {
+    // Step 5 r1: on Vercel without the key, the login stayed in one instance's memory, so reading testers' pods
+    // worked or failed depending on which instance answered. Now it's off, and says so.
+    const oauth = await import('oauth4webapi');
+    const { config } = await import('../src/config.js');
+    const { adminLoginFor, adminLoginsKept, keepAdminLogin, SESSION_COOKIE } = await import('../src/auth.js');
+    const login = { webId: 'https://admin.example/profile#me', as: { issuer: 'https://idp.example' }, client: { client_id: 'concord' }, keys: await oauth.generateKeyPair('ES256', { extractable: true }), accessToken: 'at-1', refreshToken: 'rt-1', expiresAt: Date.now() + 60_000 } as never;
+    const saved = config.adminLoginsInMemory;
+    try {
+      config.adminLoginsInMemory = false;
+      const token = `session-multi-${Date.now()}`;
+      expect(adminLoginsKept()).toBe(false);
+      expect(await keepAdminLogin(token, login)).toBe(false);
+      expect(await adminLoginFor({ cookies: { [SESSION_COOKIE]: token } } as never)).toBeUndefined();
+      // One long-running server keeps it in memory, as before.
+      config.adminLoginsInMemory = true;
+      const single = `session-single-${Date.now()}`;
+      expect(await keepAdminLogin(single, login)).toBe(true);
+      expect(await adminLoginFor({ cookies: { [SESSION_COOKIE]: single } } as never)).toMatchObject({ accessToken: 'at-1' });
+    } finally {
+      config.adminLoginsInMemory = saved;
+    }
+  });
+});
