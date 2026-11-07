@@ -6,19 +6,32 @@
  * UI drift should not wreck a recording, so helpers that look for an element are soft:
  * if it isn't there they log a warning and carry on. Run with --strict to make any
  * warning fail the run (CI does this, so a renamed button is caught on the PR).
+ *
+ * A check run (--check, no video) is `fast`: what only paces the video for a viewer goes
+ * (glides, typing rhythm, pauses between shots, pacing in the stage pages), and settling
+ * waits for the page's own requests and spinners rather than fixed delays. Everything
+ * that is checked, and every wait for the app itself, stays the same.
  */
-import type { Locator, Page } from '@playwright/test';
+import type { Locator, Page, Request } from '@playwright/test';
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export class Director {
   private cursor = { x: 640, y: 420 };
   readonly warnings: string[] = [];
+  /** Requests the page has started and not yet finished (for a fast settle). */
+  private readonly inFlight = new Set<Request>();
 
   constructor(
     readonly page: Page,
     private readonly strict: boolean,
+    readonly fast = false,
   ) {
+    // Long-lived streams never finish, so they don't count as the page being busy.
+    const tracked = (r: Request) => !['eventsource', 'websocket'].includes(r.resourceType());
+    page.context().on('request', (r) => tracked(r) && this.inFlight.add(r));
+    page.context().on('requestfinished', (r) => this.inFlight.delete(r));
+    page.context().on('requestfailed', (r) => this.inFlight.delete(r));
     // A script error, a console error or a failed request is a broken shot, even if every
     // click landed: the page may be showing an error state the narration doesn't mention.
     page.context().on('weberror', (e) => this.note(`Page error on ${e.page()?.url() ?? '?'}: ${e.error().message.split('\n')[0]}`));
@@ -40,6 +53,14 @@ export class Director {
     page.context().on('response', (r) => {
       if (r.status() >= 400 && !/\/favicon\.ico$/.test(r.url())) this.note(`HTTP ${r.status()} from ${r.request().method()} ${r.url()}`);
     });
+  }
+
+  /**
+   * A pause that is only there for the viewer (a beat to read a ring, a gap between shots).
+   * A check run skips it; a wait for the app to do something must use sleep() or a real wait.
+   */
+  pause(ms: number) {
+    return this.fast ? Promise.resolve() : sleep(ms);
   }
 
   /** Records a warning without throwing (for events that arrive outside a step). */
@@ -85,6 +106,7 @@ export class Director {
   }
 
   async settle(spinners = true) {
+    if (this.fast) return this.settleFast(spinners);
     await this.page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
     if (spinners) {
       // No spinners for a moment in a row: some pages load in two waves.
@@ -96,6 +118,21 @@ export class Director {
     }
     await this.page.evaluate(() => document.fonts?.ready).catch(() => {});
     await sleep(250);
+  }
+
+  /**
+   * settle() for a check run: no request in flight and no spinner, seen on three polls in a
+   * row 50 ms apart (some pages load in two waves), then fonts. networkidle instead waits
+   * at least 500 ms after the last request, and the fixed delays above are for the video.
+   */
+  private async settleFast(spinners: boolean) {
+    await this.page.waitForLoadState('domcontentloaded', { timeout: 15_000 }).catch(() => {});
+    const busy = async () => this.inFlight.size > 0 || (spinners && (await this.page.locator('[aria-busy="true"]').count().catch(() => 0)) > 0);
+    for (let quiet = 0, tries = 0; quiet < 3 && tries < 300; tries++) {
+      quiet = (await busy()) ? 0 : quiet + 1;
+      await sleep(50);
+    }
+    await this.page.evaluate(() => document.fonts?.ready).catch(() => {});
   }
 
   /** Resolves a locator to its first visible match, or warns and returns undefined. */
@@ -112,6 +149,11 @@ export class Director {
 
   /** Glides the pointer to (x, y) with an ease-in-out curve. */
   async moveTo(x: number, y: number, ms = 650) {
+    if (this.fast) {
+      await this.page.mouse.move(x, y);
+      this.cursor = { x, y };
+      return;
+    }
     const from = { ...this.cursor };
     const steps = Math.max(8, Math.round(ms / 16));
     for (let i = 1; i <= steps; i++) {
@@ -136,9 +178,9 @@ export class Director {
   async click(target: Locator, what: string, opts: { settle?: boolean } = {}) {
     const l = await this.pointAt(target, what);
     if (!l) return false;
-    await sleep(180);
+    await this.pause(180);
     await this.page.mouse.down();
-    await sleep(70);
+    await this.pause(70);
     await this.page.mouse.up();
     if (opts.settle !== false) await this.settle();
     return true;
@@ -147,7 +189,7 @@ export class Director {
   async type(target: Locator, text: string, what: string, cps = 16) {
     if (!(await this.click(target, what, { settle: false }))) return false;
     await target.first().fill('');
-    await target.first().pressSequentially(text, { delay: 1000 / cps });
+    await target.first().pressSequentially(text, { delay: this.fast ? 0 : 1000 / cps });
     return true;
   }
 
@@ -200,6 +242,7 @@ export class Director {
 
   /** A full-screen chapter card that fades out to reveal the page underneath. */
   async chapter(card: { eyebrow?: string; title: string; sub?: string }, holdMs = 2800) {
+    if (this.fast) holdMs = Math.min(holdMs, 300);
     await this.page.evaluate(([c, ms]) => (window as any).__wt?.chapter(c, ms), [card, holdMs] as const);
   }
 
@@ -208,8 +251,10 @@ export class Director {
     const steps = Math.max(6, Math.round(ms / 16));
     for (let i = 0; i < steps; i++) {
       await this.page.mouse.wheel(0, dy / steps);
-      await sleep(ms / steps);
+      if (!this.fast) await sleep(ms / steps);
     }
+    // The page scrolls after the wheel events are handled, so give it a moment to get there.
+    if (this.fast) await sleep(150);
   }
 }
 

@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.41.2',
+    version: '0.41.3',
     date: '2026-11-07',
     title: 'Sections you have opened come back at once',
     pr: 102,
@@ -66,6 +66,22 @@ export const APP_RELEASES: AppRelease[] = [
         roles: [],
         to: '{o}/changes',
         ask: 'Does moving between sections feel instant now? Did you ever see out-of-date information that confused you?',
+      },
+    ],
+  },
+  {
+    version: '0.41.2',
+    date: '2026-11-06',
+    title: 'Concord’s own icon on the connector and in the tab',
+    pr: 106,
+    changes: [
+      {
+        id: 'concord-app-icon',
+        type: 'fix',
+        title: 'Concord’s icon on the MCP connector and the browser tab',
+        detail: 'Claude and other agents now show Concord’s plane for the Concord connector instead of a generic plug, and the browser tab shows it in every look, the ODI look included. The ODI logo stays in the ODI look’s header.',
+        roles: ['agent'],
+        to: '/connect',
       },
     ],
   },
