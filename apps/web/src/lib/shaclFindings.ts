@@ -3,7 +3,7 @@
  * written with the prefixes from their own data, and finds where in their
  * Turtle each problem is (see turtleDoc.ts), so the editor can underline it.
  */
-import { derivedTypes } from '@concord/core/xsd-types';
+import { derivedTypes, primitiveOf } from '@concord/core/xsd-types';
 import { GENERATED_BLANK, RDF, RDF_TYPE, XSD, parseTurtle, termKey, type Placed, type RdfTerm, type Span, type TurtleDoc } from './turtleDoc';
 
 const SH = 'http://www.w3.org/ns/shacl#';
@@ -428,10 +428,10 @@ function describeAlternative(t: RdfTerm, shapes: ShapesIndex, prefixes: [string,
 
 /**
  * The datatype an sh:or stands for when its members are that datatype and every built-in type derived from it,
- * as Concord writes "an xsd:integer" (#27), so the finding names one type rather than thirteen.
+ * as Concord writes "an xsd:integer" (#27), so the finding names one type rather than listing them (thirteen for xsd:integer).
  */
 function datatypeFamily(members: RdfTerm[], shapes: ShapesIndex): string | undefined {
-  if (members.length < 3) return undefined;
+  if (members.length < 2) return undefined;
   const types: string[] = [];
   for (const m of members) {
     const params = [...(shapes.shape(m)?.params ?? [])].filter(([p]) => !DESCRIPTIVE.has(p));
@@ -531,7 +531,13 @@ export function describeFinding(raw: RawFinding, ctx: DescribeContext, bySubject
     // "abc"^^xsd:byte where an integer is asked for has an allowed type, just not a valid value of it.
     const allowed = actual === expected || (orDerived && derivedTypes(expected).includes(actual));
     if (allowed && actual !== expected) return [['Value ', shownValue, ' isn’t a valid ', iri(actual)], undefined];
-    const parts: Part[] = allowed ? ['Value ', shownValue, ' isn’t a valid ', iri(expected)] : ['Value ', shownValue, ' is of type ', iri(actual), ' but must be of type ', iri(expected), ...derived];
+    // Shapes check how a value is written, not its value: "3"^^xsd:integer is a non-negative integer in OWL, and
+    // "GB"^^xsd:token a string, but neither is written as a type the shapes take. Said so, not that the value is wrong.
+    const parts: Part[] = allowed
+      ? ['Value ', shownValue, ' isn’t a valid ', iri(expected)]
+      : primitiveOf(actual) === primitiveOf(expected)
+        ? ['Value ', shownValue, ' is written as ', iri(actual), ', but the shapes take only ', iri(expected), ...derived]
+        : ['Value ', shownValue, ' is of type ', iri(actual), ' but must be of type ', iri(expected), ...derived];
     // "sixteen" → 16, but only for a number type and plain text (never change "one"@en into 1).
     const word = NUMBER_WORDS.indexOf(value.value.trim().toLowerCase());
     const numeric = expected.startsWith(XSD) && NUMERIC_TYPES.has(expected.slice(XSD.length));

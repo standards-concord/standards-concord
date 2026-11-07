@@ -284,6 +284,13 @@ describe('one datatype on a property (#27)', () => {
     expectValues(age, ['"30"^^xsd:integer', '"30"^^xsd:byte'], ['"-1"^^xsd:integer', '"151"^^xsd:integer']);
   });
 
+  // Review of #27: one the ontology defines on a datatype Concord can't check by value got no check at all.
+  it('keeps the datatype an ontology’s own datatype comes down to, when its values can’t be checked by value', async () => {
+    const shape = await shapesFor(['e:Shape'], 'e:Shape a rdfs:Datatype ; owl:equivalentClass <http://www.opengis.net/ont/geosparql#wktLiteral> .');
+    expectValues(shape, ['"POINT(1 2)"^^<http://www.opengis.net/ont/geosparql#wktLiteral>'], ['"5"^^xsd:integer', '"POINT(1 2)"', '<https://example.org/x>']);
+    expect(shape).not.toMatch(/# Note:/);
+  });
+
   it('a parent asking for xsd:integer accepts a child whose values are xsd:byte', async () => {
     const shapes = await parentChildShapes('xsd:integer', 'xsd:byte');
     // An e:Child is an e:Parent too, so both node shapes apply to it.

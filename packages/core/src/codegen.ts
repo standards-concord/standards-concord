@@ -148,6 +148,21 @@ function converterShapes(derived: DerivedShapes): { store: Store; model: CodeMod
 /** Text for a code comment: nothing in it can end the comment or the line. */
 export const commentSafe = (s: string) => s.replace(/\*\//g, '*\u2215').replace(/[\r\n\u2028\u2029]+/g, ' ');
 
+/**
+ * The datatype a value of `dt` is written as. A datatype the ontology defines is never a literal's own datatype (#27):
+ * the shapes check its values as the datatype from outside the ontology it comes down to, so they are written as that.
+ */
+function writtenAs(dt: string, bases: Map<string, string[]>, seen = new Set<string>()): string {
+  const own = bases.get(dt);
+  if (!own || seen.has(dt)) return dt;
+  seen.add(dt);
+  for (const b of own) {
+    const w = writtenAs(b, bases, seen);
+    if (!bases.has(w)) return w;
+  }
+  return dt;
+}
+
 /** A writer for a typed literal, for datatypes the converter's built-in mappings would get wrong. */
 const LITERAL_WRITER = `/** Writes a value as a literal of the given datatype (dates in ISO 8601). */
 function literalWriter<T>(datatype: string): ITermFromValueMapping<T> {
@@ -237,8 +252,11 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
     }
     let text = body.join('\n').trim();
     // Exact literal writers for datatypes the converter would write with the wrong (or a missing) datatype.
-    for (const [path, dt] of datatypes.get(c.name) ?? []) {
-      if (EXACT_WRITERS.has(dt)) continue;
+    for (const [path, declared] of datatypes.get(c.name) ?? []) {
+      // The accessor keeps the declared datatype's value type (an integer the ontology defines stays a string, so
+      // nothing past 2^53 is rounded); only the datatype it is written as changes.
+      const dt = writtenAs(declared, derived.datatypeBases);
+      if (dt === declared && EXACT_WRITERS.has(dt)) continue;
       const iri = JSON.stringify(path);
       const writer = `literalWriter(${JSON.stringify(dt)})`;
       const before = text;

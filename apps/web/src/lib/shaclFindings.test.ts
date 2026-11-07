@@ -376,10 +376,20 @@ describe('review regressions', () => {
     const text = '@prefix ex: <http://e/> .\nex:a a ex:C ; ex:q 1.5 .\n';
     const result = { focusNode: `<${EX}a>`, path: `<${EX}q>`, value: `"1.5"^^<${X}decimal>`, sourceConstraintComponent: sh('Or'), message: 'Value does not conform to any member shape' };
     const [f] = describeFindings([result], exCtx(text, shapes(family)));
-    expect(f.text).toBe('Value "1.5" is of type xsd:decimal but must be of type xsd:integer or a type derived from it');
+    expect(f.text).toBe('Value "1.5" is written as xsd:decimal, but the shapes take only xsd:integer or a type derived from it');
     // A value of a derived type that isn't valid as that type is named as such, not as the wrong type.
     const [h] = describeFindings([{ ...result, value: `"lots"^^<${X}byte>` }], exCtx('@prefix ex: <http://e/> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\nex:a a ex:C ; ex:q "lots"^^xsd:byte .\n', shapes(family)));
     expect(h.text).toBe('Value "lots" isn’t a valid xsd:byte');
+    // A value written as a type the shapes don't take, though OWL may count it (a decimal for an integer), is said to be
+    // written that way, not to be the wrong kind of value; one that fits gets the rewrite.
+    const [w] = describeFindings([{ ...result, value: `"1.0"^^<${X}decimal>` }], exCtx(text, shapes(family)));
+    expect(w.text).toBe('Value "1.0" is written as xsd:decimal, but the shapes take only xsd:integer or a type derived from it');
+    const nonNegative = ['nonNegativeInteger', 'unsignedLong', 'unsignedInt', 'unsignedShort', 'unsignedByte', 'positiveInteger'];
+    const [n] = describeFindings([{ ...result, value: `"3"^^<${X}integer>` }], exCtx(text, shapes(nonNegative)));
+    expect(n.text).toBe('Value "3" is written as xsd:integer, but the shapes take only xsd:nonNegativeInteger or a type derived from it. Write it as "3"^^xsd:nonNegativeInteger');
+    // Two-member families are named as one type too.
+    const [d] = describeFindings([{ ...result, value: `"2026-11-07"^^<${X}date>` }], exCtx(text, shapes(['dateTime', 'dateTimeStamp'])));
+    expect(d.text).toBe('Value "2026-11-07" is of type xsd:date but must be of type xsd:dateTime or a type derived from it');
     // Missing one of the family, it is a plain list again: the sentence never claims more than the shape allows.
     const [g] = describeFindings([result], exCtx(text, shapes(family.slice(0, -1))));
     expect(g.text).toMatch(/^Value 1\.5 must be a xsd:integer value, a xsd:nonPositiveInteger value, .* or a xsd:unsignedByte value$/);

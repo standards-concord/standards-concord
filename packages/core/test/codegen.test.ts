@@ -395,10 +395,11 @@ describe('Generated JavaScript classes', () => {
     // Datatype constraints from two superclasses: xsd:positiveInteger from DB narrows xsd:integer from DA.
     expect(cls('DC').extends).toBeUndefined();
     expect(mod.ts).toMatch(/export class DC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#positiveInteger"\)/);
-    // The ontology's own datatypes count too: e:MyToken restricts xsd:string, so it narrows TA's xsd:string. No literal
-    // is written as e:MyToken (#27), so values are written as xsd:string, as TA's are, and TC can extend TA.
-    expect(cls('TC').extends).toBe('TA');
-    // None of the ontology's own datatypes (MyToken, MyToken2, SZ) is written as a literal's datatype.
+    // The ontology's own datatypes count too: e:MyToken restricts xsd:string, so it narrows TA's xsd:string.
+    expect(cls('TC').extends).toBeUndefined();
+    // No literal is written as e:MyToken, MyToken2 or SZ (#27): the shapes check them as the xsd:string they
+    // restrict, so values are written as that.
+    expect(mod.ts).toMatch(/export class TC extends TermWrapper[\s\S]*?literalWriter\("http:\/\/www\.w3\.org\/2001\/XMLSchema#string"\)/);
     expect(mod.ts).not.toContain('literalWriter("https://example.org/e#');
     // Types neither of which is narrower can't both be expressed: the first is used, and the module says so.
     expect(mod.notes).toEqual(expect.arrayContaining([
@@ -463,6 +464,38 @@ describe('Generated JavaScript classes', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 60_000);
+
+  // #27 review: checking an ontology's own integer datatype by value made its accessors numbers, so a value past
+  // 2^53 was rounded. The accessor keeps the declared type; only the datatype values are written as changes.
+  it('keeps an ontology’s own datatype as a string accessor, written as the built-in it restricts', async () => {
+    const g = await OntologyGraph.fromTurtle(`@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix e: <https://example.org/e#> .
+<https://example.org/e> a owl:Ontology .
+e:Big a rdfs:Datatype ; owl:equivalentClass [ a rdfs:Datatype ; owl:onDatatype xsd:integer ; owl:withRestrictions ( [ xsd:minInclusive 0 ] ) ] .
+e:Account a owl:Class ; rdfs:subClassOf [ a owl:Restriction ; owl:onProperty e:balance ; owl:allValuesFrom e:Big ] , [ a owl:Restriction ; owl:onProperty e:balance ; owl:maxCardinality 1 ] .
+e:balance a owl:DatatypeProperty .`);
+    const mod = await toWrapperClasses(g, { name: 'big' });
+    expect(mod.ts).toMatch(/export class Account extends TermWrapper[\s\S]*?get balance\(\): string \| undefined/);
+    mkdirSync(GEN, { recursive: true });
+    const dir = path.join(GEN, `big-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    try {
+      writeFileSync(path.join(dir, 'package.json'), '{"type":"module"}');
+      writeFileSync(path.join(dir, 'index.js'), mod.js);
+      const m = await import(path.join(dir, 'index.js'));
+      const store = new Store();
+      const account = new m.Account('https://x/a', store, DataFactory);
+      account.balance = '9007199254740993';
+      const [q] = store.getQuads(null, DataFactory.namedNode('https://example.org/e#balance'), null, null);
+      expect(q.object.value).toBe('9007199254740993');
+      expect((q.object as any).datatype.value).toBe(NS.xsd + 'integer');
+      expect(account.balance).toBe('9007199254740993');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('works out shared ancestors once, so diamond hierarchies stay fast', async () => {
     // 30 layers of two classes, each a subclass of both classes in the layer above: 2^30 paths to the top.

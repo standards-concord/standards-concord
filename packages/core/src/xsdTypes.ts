@@ -24,3 +24,10 @@ export function derivedTypes(dt: string): string[] {
     .map((l) => XSD + l)
     .filter((d) => d !== dt && derives(d, dt));
 }
+
+/** The primitive a built-in datatype is derived from (xsd:decimal for xsd:byte), or the datatype itself. */
+export function primitiveOf(dt: string): string {
+  let x = dt;
+  while (x.startsWith(XSD) && XSD_BASE[x.slice(XSD.length)]) x = XSD + XSD_BASE[x.slice(XSD.length)];
+  return x;
+}

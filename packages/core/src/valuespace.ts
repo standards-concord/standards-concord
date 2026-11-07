@@ -200,6 +200,8 @@ const tighterMax = (a: Bound | undefined, b: Bound | undefined): Bound | undefin
 };
 
 const name = (iri: string) => (iri.startsWith(XSD) ? `xsd:${iri.slice(XSD.length)}` : `<${iri}>`);
+/** What a value space says it can't check about a datatype it knows nothing of. */
+export const uncheckable = (dt: string) => `${name(dt)} isn't a datatype whose values can be checked`;
 
 /** Both value spaces: what values of `a` and of `b` must satisfy. */
 function meet(a: ValueSpace, b: ValueSpace): ValueSpace {
@@ -245,7 +247,7 @@ export function valueSpace(dt: string, defs: Map<string, Definition[]>, seen: Se
     return out;
   }
   const own = defs.get(dt);
-  if (!own || seen.has(dt)) return { patterns: [], partial: [`${name(dt)} isn't a datatype whose values can be checked`] };
+  if (!own || seen.has(dt)) return { patterns: [], partial: [uncheckable(dt)] };
   seen.add(dt);
   // Every definition is equivalent, so values satisfy all of them.
   let out: ValueSpace | undefined;
