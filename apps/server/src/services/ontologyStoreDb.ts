@@ -15,6 +15,7 @@ import {
   setRef,
   subject,
   writeCommit,
+  entryAt,
   writeTree,
   type Commit,
 } from './gitdb.js';
@@ -121,7 +122,11 @@ export const dbStore = {
 
   async at(project: Pick<OntologyProject, 'slug'>, ref: string | undefined): Promise<OntologyGraph> {
     if (!ref || ref === 'working') return this.working(project);
-    const key = `${project.slug}@v${ref}`;
+    // Keyed by the release file's own id, not its name: another instance can reset the demo and release the same
+    // version again with other content, and only this instance's cache would be cleared.
+    const entry = /^[\w.-]+$/.test(ref) ? await entryAt((await readCommit(await this.head(project))).tree, `releases/${ref}/${FILE}`) : undefined;
+    if (!entry) throw new HttpError(404, `Version ${ref} not found`);
+    const key = `${project.slug}@v${ref}@${entry.sha}`;
     let g = graphCache.get(key);
     if (!g) {
       const text = await this.readReleaseFile(project, ref, FILE);

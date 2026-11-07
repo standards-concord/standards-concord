@@ -31,6 +31,18 @@ const ttl = (label: string) => `<urn:x:thing> <http://www.w3.org/2000/01/rdf-sch
 const graph = (label: string) => OntologyGraph.fromTurtle(ttl(label));
 
 describe('database-backed ontology store', () => {
+  it('serves a release as it is now, even when the same version is released again with other content', async () => {
+    // Step 5: the release graph cache was keyed by name only, so on Vercel an instance that cached a demo release
+    // kept serving it after another instance reset the demo and released that version again.
+    const p = project();
+    await dbStore.init(p, ttl('v0'), '# Readme\n');
+    await dbStore.writeRelease(p, '1.0.0', await graph('first'), {}, 'First', { name: 'Steward' });
+    expect(await (await dbStore.at(p, '1.0.0')).toTurtle()).toContain('"first"');
+    await dbStore.writeRelease(p, '1.0.0', await graph('again'), {}, 'Again', { name: 'Steward' });
+    expect(await (await dbStore.at(p, '1.0.0')).toTurtle()).toContain('"again"');
+    await expect(dbStore.at(p, '9.9.9')).rejects.toMatchObject({ status: 404 });
+  });
+
   it('lets one of two writers that read the same draft commit, and rolls back the other’s bookkeeping', async () => {
     const p = project();
     const base = await dbStore.init(p, ttl('v0'), '# Readme\n');
