@@ -27,7 +27,7 @@ import type { DocStore, StoredRow } from '../store/types.js';
  *   VM's Solid server's data directory (`podsDir`), the import also takes what Concord kept in the pods it made for
  *   people (each pod's `concord/` folder), where Concord read it first: on Vercel there is no such server, so
  *   Google and GitHub accounts' data stays in the database, and Solid accounts' moves into their own pod at their
- *   next Solid sign-in (services/ownPods.ts `carryIntoOwnPod`).
+ *   next Solid sign-in (services/solid.ts `carryIntoOwnPod`).
  */
 
 /** Recorded once an import is verified (or a database store started with nothing to import). */
