@@ -230,6 +230,30 @@ describe('when GitHub can’t be read', () => {
     await expect((await fresh()).mediaIndex()).rejects.toThrow(/no longer play/);
   });
 
+  // Sol review of #124 (round 2): the check that a kept set still plays went to GitHub even on the VM, which serves
+  // the videos from its own disk, so an outage hid videos it had downloaded in full.
+  it('on a server with the videos on its own disk, keeps serving them through an outage, downloads included', async () => {
+    const urls = 'https://dl.example/disk';
+    const files = Object.fromEntries(['', '/concord-walkthrough.mp4', '/concord-feedback.mp4', '/concord-feedback.vtt'].map((p) => [`${urls}${p}`, `data${p}`]));
+    stubGitHub(release(631, 'v1', 6031, urls), files);
+    const first = await fresh();
+    const before = await first.mediaIndex();
+    for (const f of ['concord-walkthrough.mp4', 'concord-walkthrough.vtt', 'concord-feedback.mp4', 'concord-feedback.vtt']) await first.mediaFile(f);
+
+    failing(503); // the API and the downloads alike
+    const media = await fresh();
+    expect(await media.mediaIndex()).toEqual(before);
+    expect(fs.readFileSync((await media.mediaFile('concord-feedback.mp4'))!, 'utf8')).toBe('data/concord-feedback.mp4');
+
+    // On Vercel the browser is sent to GitHub, so there it counts as gone.
+    process.env.CONCORD_MEDIA_REDIRECT = 'true';
+    try {
+      await expect((await fresh()).mediaIndex()).rejects.toThrow(/no longer play/);
+    } finally {
+      delete process.env.CONCORD_MEDIA_REDIRECT;
+    }
+  });
+
   // Sol review of #124: with the database refusing writes, a refresh that failed brought back the older set the
   // database still held, and the newer set's files (its clips, say) went missing from the same instance.
   it('never goes back to an older set after one it couldn’t save, in the same instance', async () => {

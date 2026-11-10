@@ -195,7 +195,7 @@ async function kept(): Promise<Found | undefined> {
 }
 
 /**
- * Whether a kept set still plays where the browser is sent: its tour's MP4 answers a one-byte request. A release that
+ * Whether a kept set still plays from GitHub: its tour's MP4 answers a one-byte request. A release that
  * was deleted, or a repository that went private, would otherwise leave the page showing players that can't play.
  */
 async function stillPlays(set: Found): Promise<boolean> {
@@ -210,11 +210,23 @@ async function stillPlays(set: Found): Promise<boolean> {
   }
 }
 
+/**
+ * Whether this server can play a kept set from its own disk: it serves videos itself (not on Vercel) and has both
+ * videos and their captions downloaded already. Then an outage at GitHub, downloads included, changes nothing.
+ */
+function servedFromDisk(set: Found): boolean {
+  if (redirectsVideos()) return false;
+  return REQUIRED.every((name) => {
+    const asset = set.assets.get(name);
+    return !!asset && !!regularFileIn(path.join(cacheRoot(), asset.key), name, cacheRoot());
+  });
+}
+
 /** The kept set, if it still plays; otherwise the lookup has failed. */
 async function fallBack(why: Error): Promise<Found> {
   const before = await kept();
   if (!before) throw why;
-  if (!(await stillPlays(before))) throw new Error(`${why.message}; the videos of ${before.index.release?.tag} kept from before no longer play either`);
+  if (!servedFromDisk(before) && !(await stillPlays(before))) throw new Error(`${why.message}; the videos of ${before.index.release?.tag} kept from before no longer play either`);
   console.warn(`media: ${why.message}; serving the videos of ${before.index.release?.tag} kept from before`);
   return before;
 }
