@@ -27,6 +27,17 @@ function LinkButton({ to, primary, icon: Icon, children }: { to: string; primary
   );
 }
 
+/**
+ * What to say when a video isn't there. It used to say "being recorded for the next release" whatever the reason,
+ * so when the videos couldn't be looked up (2026-11-10) testers were told about a recording that wasn't happening.
+ */
+const missing = (index: MediaIndex | undefined, clips?: 'clips') => {
+  const [what, is] = clips ? ['The feature clips', 'aren’t'] : ['This video', 'isn’t'];
+  return !index || index.unavailable
+    ? `${what} can’t be loaded right now. Please try again later; the guided walkthrough covers the same ground.`
+    : `${what} ${is} ready yet. The guided walkthrough covers the same ground in the meantime.`;
+};
+
 const minutes = (s: number) => (s < 90 ? `${Math.max(1, Math.round(s))} seconds` : `${Math.round(s / 60)} minutes`);
 
 function Video({ id, title, blurb, base, index, loading }: { id: string; title: string; blurb: string; base: string; index?: MediaIndex; loading: boolean }) {
@@ -54,7 +65,7 @@ function Video({ id, title, blurb, base, index, loading }: { id: string; title: 
         ) : (
           <div className="flex size-full flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted" data-testid={`${id}-pending`}>
             <Clapperboard className="size-6 text-subtle" aria-hidden />
-            {loading ? 'Checking for the video…' : 'This video is being recorded for the next release. The guided walkthrough covers the same ground in the meantime.'}
+            {loading ? 'Checking for the video…' : missing(index)}
           </div>
         )}
       </div>
@@ -195,7 +206,7 @@ function FeatureClips({ index, loading }: { index?: MediaIndex; loading: boolean
         <Card className="mt-6">
           <div className="flex flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted" data-testid="clips-pending">
             <Clapperboard className="size-6 text-subtle" aria-hidden />
-            {loading || manifest === undefined ? 'Checking for the clips…' : 'Short clips of single features are being recorded for the next release.'}
+            {loading || manifest === undefined ? 'Checking for the clips…' : missing(index, 'clips')}
           </div>
         </Card>
       )}

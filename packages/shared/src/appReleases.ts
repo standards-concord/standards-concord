@@ -53,6 +53,22 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.44.2',
+    date: '2026-11-10',
+    title: 'The welcome page keeps its videos',
+    changes: [
+      {
+        id: 'welcome-videos-kept',
+        type: 'fix',
+        title: 'The welcome page no longer says its videos are being recorded when they just couldn’t be loaded',
+        detail:
+          'When Concord couldn’t reach the place its videos are kept, the welcome page said they were being recorded for the next release, though nothing was. It now keeps showing the last videos it found, and if it has none, says plainly that they can’t be loaded right now.',
+        roles: [],
+        to: '/welcome',
+      },
+    ],
+  },
+  {
     version: '0.44.1',
     date: '2026-11-07',
     title: 'Validate data takes every value the ontology allows',
