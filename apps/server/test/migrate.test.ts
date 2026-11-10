@@ -157,6 +157,23 @@ describe('moving a database to the database-backed ontology store', () => {
       await expect(verifyImport(source, config.dataDir, pods)).rejects.toThrow(`private file ${user}/alpha/testing.jsonld wasn't imported as it is on disk`);
       const elsewhere = fs.mkdtempSync(path.join(tmpdir(), 'concord-pods-'));
       await expect(importPrivateFiles(config.dataDir, elsewhere)).rejects.toThrow(`pod:${user}: its pod https://pods.example.org/alice-${user.slice(-6)}/ isn't in`);
+      // Review r1: a pod folder (or its concord/ folder) that links outside the directory used to be followed, so
+      // someone else's files could be imported as this account's.
+      const outside = fs.mkdtempSync(path.join(tmpdir(), 'concord-outside-'));
+      fs.mkdirSync(path.join(outside, 'concord'), { recursive: true });
+      fs.writeFileSync(path.join(outside, 'concord', 'bob.ttl'), 'Bob’s');
+      fs.symlinkSync(outside, path.join(elsewhere, `alice-${user.slice(-6)}`));
+      await expect(importPrivateFiles(config.dataDir, elsewhere)).rejects.toThrow(`pod:${user}: its pod https://pods.example.org/alice-${user.slice(-6)}/ isn't a folder of`);
+      fs.rmSync(path.join(elsewhere, `alice-${user.slice(-6)}`));
+      fs.mkdirSync(path.join(elsewhere, `alice-${user.slice(-6)}`));
+      fs.symlinkSync(path.join(outside, 'concord'), path.join(elsewhere, `alice-${user.slice(-6)}`, 'concord'));
+      await expect(importPrivateFiles(config.dataDir, elsewhere)).rejects.toThrow(`pod:${user}: its pod https://pods.example.org/alice-${user.slice(-6)}/ isn't a folder of`);
+      // Nor a folder inside concord/ that links out.
+      fs.rmSync(path.join(elsewhere, `alice-${user.slice(-6)}`, 'concord'));
+      fs.mkdirSync(path.join(elsewhere, `alice-${user.slice(-6)}`, 'concord'));
+      fs.symlinkSync(path.join(outside, 'concord'), path.join(elsewhere, `alice-${user.slice(-6)}`, 'concord', 'interviews'));
+      await expect(importPrivateFiles(config.dataDir, elsewhere)).rejects.toThrow(/interviews\/bob\.ttl is reached through a link/);
+      fs.rmSync(outside, { recursive: true, force: true });
       fs.rmSync(elsewhere, { recursive: true, force: true });
     } finally {
       fs.rmSync(pods, { recursive: true, force: true });

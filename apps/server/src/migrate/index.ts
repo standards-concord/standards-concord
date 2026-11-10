@@ -81,7 +81,9 @@ interface PodRecord {
  * metadata files (`.acl`, `.meta`) aren't data.
  */
 async function* podFilesIn(podsDir: string): AsyncGenerator<PrivateSourceFile> {
-  const root = path.resolve(podsDir);
+  // Compared as real paths: a pod folder, or its concord/ folder, that links elsewhere would otherwise bring in
+  // files that aren't that pod's (another person's, even).
+  const root = fs.realpathSync(path.resolve(podsDir));
   const pods = (await (await rawStore()).rows())
     .filter((r) => r.collection === 'kv' && r.id.startsWith('pod:'))
     .map((r) => JSON.parse(r.data) as PodRecord)
@@ -93,10 +95,13 @@ async function* podFilesIn(podsDir: string): AsyncGenerator<PrivateSourceFile> {
     if (!fs.existsSync(folder)) throw new Error(`${rec.id}: its pod ${rec.podUrl} isn't in ${root} (is that the Solid server's data directory?)`);
     const base = path.join(folder, 'concord');
     if (!fs.existsSync(base)) continue; // nothing kept there yet
+    if (fs.realpathSync(base) !== base) throw new Error(`${rec.id}: its pod ${rec.podUrl} isn't a folder of ${root} (it links elsewhere)`);
     for (const rel of fs.readdirSync(base, { recursive: true, encoding: 'utf8' })) {
       const file = path.join(base, rel);
       const name = path.basename(file);
       if (!fs.lstatSync(file).isFile() || /(^|\.)(acl|meta)$/.test(name)) continue;
+      // Listing follows links to folders, so a file is only taken where it really is.
+      if (fs.realpathSync(file) !== file) throw new Error(`${rec.id}: ${file} is reached through a link, so it may not be this pod's`);
       yield { userId, relPath: rel.split(path.sep).join('/').replace(/\$\.[^/]*$/, ''), file };
     }
   }

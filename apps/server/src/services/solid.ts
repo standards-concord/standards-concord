@@ -137,6 +137,15 @@ async function podAccess(userId: string): Promise<PodAccess | undefined> {
 const typeOfPath = (rel: string) =>
   rel.endsWith('.ttl') ? 'text/turtle' : rel.endsWith('.jsonld') ? 'application/ld+json' : rel.endsWith('.json') ? 'application/json' : rel.endsWith('.md') ? 'text/markdown' : 'application/octet-stream';
 
+/** Whether the document at `relPath` in their pod holds exactly `bytes`. */
+async function sameAt(access: PodAccess, relPath: string, bytes: Buffer): Promise<boolean> {
+  const url = urlIn(access.base, relPath);
+  const res = await (await access.request())('GET', url);
+  if (res.status === 404 || res.status === 410) return false;
+  if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+  return Buffer.from(await res.arrayBuffer()).equals(bytes);
+}
+
 /** A failed write to someone's own pod, as the person sees it (the sign-in and configuration messages pass through). */
 const ownPodFailed = (err: unknown, verb = 'save to') =>
   err instanceof HttpError || err instanceof PreconditionFailed ? err : new HttpError(502, `Couldn’t ${verb} your pod: ${(err as Error).message}`.slice(0, 300));
@@ -394,6 +403,8 @@ export const solid = {
         } catch (err) {
           if (!(err instanceof PreconditionFailed)) throw err;
         }
+        // Taken: by this very document, if an earlier try wrote it there and then couldn't remove it here.
+        if (await sameAt(access, at, bytes)) break;
       }
       await remove('privateFiles', row.id);
       moved++;

@@ -19,9 +19,9 @@ Run it as `node --import tsx src/migrate/cli.ts …` from `apps/server`. Anythin
 The VM runs a Solid server (the Community Solid Server, at `pods.…sslip.io`) and made a pod there for people who signed in with GitHub, Google or the demo. Concord kept their private data (testing records, query drafts, chats) in that pod's `concord/` folder. Vercel has no such server, so at the cutover that data moves into the database with `--pods`:
 
 - **Google, GitHub and demo accounts:** their private data then lives in the database, like any account with no pod.
-- **Solid accounts:** what was kept for them moves into their own pod the next time they sign in with Solid (`carryIntoOwnPod` in `services/solid.ts`). Each document is created there, never over one already there (it goes beside it as `<name>.from-concord-<n>`), and only then removed from the database. If anything fails, the rest is tried again at their next sign-in. Their testing record is copied there afresh.
+- **Solid accounts:** what was kept for them moves into their own pod the next time they sign in with Solid (`carryIntoOwnPod` in `services/solid.ts`). Each document is created there, never over one already there (it goes beside it as `<name>.from-concord-<n>`), and only then removed from the database. A copy an earlier try made but couldn't remove here is recognised by its content. If anything fails, the rest is tried again at their next sign-in. Their testing record is copied there afresh.
 
-`--pods` takes the Solid server's data directory: on the VM, the `solid-data` docker volume. A pod at `https://pods.…/alice/` is the folder `alice/` there. Files ending `.acl` or `.meta` are skipped, and the `$.<ext>` the server adds to some names is taken off. A pod the database names but the folder doesn't have stops the copy, which usually means the wrong directory was given.
+`--pods` takes the Solid server's data directory: on the VM, the `solid-data` docker volume. A pod at `https://pods.…/alice/` is the folder `alice/` there. Files ending `.acl` or `.meta` are skipped, and the `$.<ext>` the server adds to some names is taken off. A pod the database names but the folder doesn't have stops the copy, which usually means the wrong directory was given. So does a pod folder, or anything in it, that is reached through a link: it may hold someone else's files.
 
 ## Guarantees in the app
 

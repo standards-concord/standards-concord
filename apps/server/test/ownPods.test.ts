@@ -465,6 +465,27 @@ describe('private data kept on this server for a Solid account', () => {
     expect(await solid.carryIntoOwnPod(a.id)).toBe(0);
   });
 
+  // Review r1 of the pod copy: when a document's move reached the pod but removing it here failed, the next try found
+  // its own copy in the way, as if someone else's. With the original name and the first three spare names taken, it
+  // then found no free name at all and stopped for good, holding up everything after it.
+  it('recognises a move that reached the pod but was never removed here, and finishes it', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    await put('privateFiles', { id: `${a.id}/use-cases/u.ttl`, data: Buffer.from('from the VM').toString('base64') }, a.id);
+    await put('privateFiles', { id: `${a.id}/use-cases/v.ttl`, data: Buffer.from('next').toString('base64') }, a.id);
+    const at = (name: string) => `/${a.id}/concord/use-cases/${name}`;
+    docs.set(at('u.ttl'), { body: Buffer.from('theirs'), type: 'text/turtle', etag: '"0"' });
+    for (const n of [1, 2, 3]) docs.set(at(`u.from-concord-${n}.ttl`), { body: Buffer.from(`theirs ${n}`), type: 'text/turtle', etag: `"${n}"` });
+    // The last try wrote the fourth spare name, then couldn't remove the row.
+    docs.set(at('u.from-concord-4.ttl'), { body: Buffer.from('from the VM'), type: 'text/turtle', etag: '"4"' });
+    expect(await solid.carryIntoOwnPod(a.id)).toBe(2);
+    expect(await get('privateFiles', `${a.id}/use-cases/u.ttl`)).toBeUndefined();
+    expect(docs.get(at('v.ttl'))?.body.toString()).toBe('next');
+    // Nothing of theirs was touched, and no second copy was made.
+    expect(docs.get(at('u.ttl'))?.body.toString()).toBe('theirs');
+    expect([...docs.keys()].filter((k) => k.includes('/use-cases/u.from-concord-'))).toHaveLength(4);
+  });
+
   it('stays here for Google and GitHub accounts', async () => {
     const g = await account('github');
     await put('privateFiles', { id: `${g.id}/use-cases/u.ttl`, data: Buffer.from('x').toString('base64') }, g.id);
