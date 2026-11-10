@@ -170,6 +170,16 @@ test.describe('feature clips playlist', () => {
     await expect(playlist(page).getByRole('combobox', { name: 'Choose a feature' }).getByRole('option')).toHaveCount(2);
   });
 
+  // Sol review of #124: a playlist the release lists but that failed to download was described as not ready yet.
+  test('says the clips can’t be loaded when their playlist fails to download', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/Failed to load resource: the server responded with a status of 503/);
+    await page.route('**/api/media/concord-clips.json', (route) => route.fulfill({ status: 503, json: { error: 'unavailable' } }));
+    await page.goto('/welcome');
+    await expect(playlist(page).getByTestId('clips-pending')).toContainText('The feature clips can’t be loaded right now.');
+    // The main videos are unaffected.
+    await expect(page.getByTestId('tour-video')).toBeVisible();
+  });
+
   test('says the clips aren’t ready yet when the release has none', async ({ page }) => {
     await page.route('**/api/media/index.json', async (route) => {
       const res = await route.fetch();

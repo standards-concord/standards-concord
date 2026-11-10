@@ -97,7 +97,10 @@ function FeatureClips({ index, loading }: { index?: MediaIndex; loading: boolean
   const has = (name: string) => index?.files.find((f) => f.name === name)?.url;
   const manifestUrl = has('concord-clips.json');
   const [manifest, setManifest] = useState<ClipManifest | null>();
+  // The playlist is listed but couldn't be downloaded: that's "can't be loaded", not "not ready yet".
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
+    setFailed(false);
     if (!manifestUrl) {
       setManifest(loading ? undefined : null);
       return;
@@ -105,7 +108,11 @@ function FeatureClips({ index, loading }: { index?: MediaIndex; loading: boolean
     let live = true;
     api.mediaClips().then(
       (m) => live && setManifest(m),
-      () => live && setManifest(null),
+      () => {
+        if (!live) return;
+        setManifest(null);
+        setFailed(true);
+      },
     );
     return () => {
       live = false;
@@ -206,7 +213,7 @@ function FeatureClips({ index, loading }: { index?: MediaIndex; loading: boolean
         <Card className="mt-6">
           <div className="flex flex-col items-center justify-center gap-2 p-8 text-center text-sm text-muted" data-testid="clips-pending">
             <Clapperboard className="size-6 text-subtle" aria-hidden />
-            {loading || manifest === undefined ? 'Checking for the clips…' : missing(index, 'clips')}
+            {loading || manifest === undefined ? 'Checking for the clips…' : missing(failed ? undefined : index, 'clips')}
           </div>
         </Card>
       )}

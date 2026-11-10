@@ -174,8 +174,12 @@ describe('which release', () => {
 // On 2026-11-10 the repository went private: GitHub answered the anonymous lookup with "not found", the server took
 // that as "no release has videos", and /welcome told testers the videos were being recorded, though nothing was.
 describe('when GitHub can’t be read', () => {
-  const failing = (status: number) =>
-    vi.stubGlobal('fetch', async (url: string) => (url.startsWith('https://api.github.com/') ? new Response('{"message":"Not Found"}', { status }) : new Response('', { status: 404 })));
+  /** GitHub's API answers `status`; downloads under the `playing` prefixes still work, everything else is gone. */
+  const failing = (status: number, playing: string[] = []) =>
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (url.startsWith('https://api.github.com/')) return new Response('{"message":"Not Found"}', { status });
+      return playing.some((p) => url.startsWith(p)) ? new Response('x', { status: 206 }) : new Response('', { status: 404 });
+    });
 
   it('treats "not found" for the repository as a failed lookup, not as "no videos"', async () => {
     failing(404);
@@ -190,22 +194,64 @@ describe('when GitHub can’t be read', () => {
     await first.mediaFile('concord-walkthrough.vtt');
 
     for (const status of [404, 403, 500]) {
-      failing(status);
+      failing(status, ['https://dl.example/v6/']);
       const media = await fresh();
       expect(await media.mediaIndex()).toEqual(before);
       // The files still come from that release (its captions were downloaded while GitHub could be read).
       expect(fs.readFileSync((await media.mediaFile('concord-walkthrough.vtt'))!, 'utf8')).toBe('WEBVTT v6');
     }
 
-    // A newer release whose recording failed, and the old one gone: still the old set.
-    stubGitHub([{ id: 602, tag_name: 'v7', html_url: 'https://github.com/x/y/releases/tag/v7', assets: [] }], {});
+    // A newer release whose recording failed, and the old one gone from the list: still the old set, while it plays.
+    vi.stubGlobal('fetch', async (url: string) =>
+      url.startsWith('https://api.github.com/')
+        ? Response.json([{ id: 602, tag_name: 'v7', html_url: 'https://github.com/x/y/releases/tag/v7', assets: [] }])
+        : url.startsWith('https://dl.example/v6/')
+          ? new Response('x', { status: 206 })
+          : new Response('', { status: 404 }),
+    );
     expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v6');
 
     // A newer complete set replaces the kept one.
     stubGitHub(release(603, 'v8', 6003, 'https://dl.example/v8'), {});
     expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v8');
-    failing(404);
+    failing(404, ['https://dl.example/v8/']);
     expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v8');
+  });
+
+  // Sol review of #124: the kept set could point at a deleted release or a repository gone private, and the page
+  // showed players that couldn't play. Now a kept set that no longer plays counts as nothing kept.
+  it('doesn’t fall back to videos that no longer play', async () => {
+    stubGitHub(release(611, 'v1', 6011, 'https://dl.example/gone'), {});
+    await (await fresh()).mediaIndex();
+    failing(404); // the API and the downloads alike
+    await expect((await fresh()).mediaIndex()).rejects.toThrow(/no longer play/);
+    // Nor when the release just isn't listed any more.
+    vi.stubGlobal('fetch', async (url: string) => (url.startsWith('https://api.github.com/') ? Response.json([]) : new Response('', { status: 404 })));
+    await expect((await fresh()).mediaIndex()).rejects.toThrow(/no longer play/);
+  });
+
+  // Sol review of #124: with the database refusing writes, a refresh that failed brought back the older set the
+  // database still held, and the newer set's files (its clips, say) went missing from the same instance.
+  it('never goes back to an older set after one it couldn’t save, in the same instance', async () => {
+    const now = Date.now();
+    vi.useFakeTimers({ now, toFake: ['Date'] });
+    try {
+      stubGitHub(release(621, 'v1', 6021, 'https://dl.example/old'), {});
+      const media = await fresh();
+      expect((await media.mediaIndex()).release?.tag).toBe('v1'); // saved
+      db.failWrites = true;
+      vi.setSystemTime(now + 11 * 60 * 1000);
+      stubGitHub(release(622, 'v2', 6022, 'https://dl.example/new'), {});
+      expect((await media.mediaIndex()).release?.tag).toBe('v2'); // couldn't be saved
+      vi.setSystemTime(now + 22 * 60 * 1000);
+      failing(500, ['https://dl.example/new/']);
+      expect((await media.mediaIndex()).release?.tag).toBe('v2');
+      process.env.CONCORD_MEDIA_REDIRECT = 'true';
+      expect(await media.mediaRedirect('concord-feedback.mp4')).toBe('https://dl.example/new/concord-feedback.mp4');
+    } finally {
+      delete process.env.CONCORD_MEDIA_REDIRECT;
+      vi.useRealTimers();
+    }
   });
 
   it('doesn’t serve a set kept from another repository', async () => {
@@ -214,7 +260,7 @@ describe('when GitHub can’t be read', () => {
     process.env.MEDIA_REPO = 'someone/elsewhere';
     stubGitHub([], {});
     expect(await (await fresh()).mediaIndex()).toEqual({ release: null, files: [] });
-    failing(404);
+    failing(404, ['https://dl.example/old-repo/']);
     await expect((await fresh()).mediaIndex()).rejects.toThrow(/someone\/elsewhere: HTTP 404/);
   });
 

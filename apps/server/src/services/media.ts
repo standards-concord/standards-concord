@@ -12,9 +12,10 @@
  * GitHub once per release.
  *
  * The page must never lose its videos (it did on 2026-11-10, when the repository went private and GitHub answered
- * "not found"). So the last complete set found is kept in the database: when GitHub can't be read, or no longer
- * lists a release with a complete set, that set is served instead. Only when there has never been one does the
- * index come back empty, and only a failed lookup with nothing kept says `unavailable`.
+ * "not found"). So the last complete set found is kept, in memory and in the database: when GitHub can't be read, or
+ * no longer lists a release with a complete set, that set is served instead, as long as its videos still play. Only
+ * when there has never been one does the index come back empty; a failed lookup with nothing that still plays says
+ * `unavailable` (the route sets it).
  */
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -177,11 +178,45 @@ async function keep(found: { index: MediaIndex; assets: Map<string, Asset> }) {
   await put<LastGood>('kv', { id: LAST_GOOD, repo: repo(), index: found.index, assets, savedAt: new Date().toISOString() });
 }
 
+type Found = { index: MediaIndex; assets: Map<string, Asset> };
+
+/**
+ * The newest complete set this instance has found, in memory: the database copy is for other and later instances,
+ * and a write to it can fail, so a failed save must never bring back an older set here.
+ */
+let latest: { repo: string; found: Found } | undefined;
+
 /** The set kept from before, if it came from the repository we read now (another one's links may not work). */
-async function kept(): Promise<{ index: MediaIndex; assets: Map<string, Asset> } | undefined> {
+async function kept(): Promise<Found | undefined> {
+  if (latest?.repo === repo()) return latest.found;
   const was = await get<LastGood>('kv', LAST_GOOD).catch(() => undefined);
   if (!was || was.repo !== repo() || !was.index?.release) return undefined;
   return { index: was.index, assets: new Map(was.assets) };
+}
+
+/**
+ * Whether a kept set still plays where the browser is sent: its tour's MP4 answers a one-byte request. A release that
+ * was deleted, or a repository that went private, would otherwise leave the page showing players that can't play.
+ */
+async function stillPlays(set: Found): Promise<boolean> {
+  const mp4 = set.assets.get('concord-walkthrough.mp4');
+  if (!mp4) return false;
+  try {
+    const res = await fetch(mp4.url, { headers: { range: 'bytes=0-0' }, redirect: 'follow', signal: AbortSignal.timeout(8000) });
+    await res.body?.cancel().catch(() => undefined);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** The kept set, if it still plays; otherwise the lookup has failed. */
+async function fallBack(why: Error): Promise<Found> {
+  const before = await kept();
+  if (!before) throw why;
+  if (!(await stillPlays(before))) throw new Error(`${why.message}; the videos of ${before.index.release?.tag} kept from before no longer play either`);
+  console.warn(`media: ${why.message}; serving the videos of ${before.index.release?.tag} kept from before`);
+  return before;
 }
 
 /** The kept set, for a demo reset to put back after it wipes the database (the videos aren't demo data). */
@@ -192,23 +227,23 @@ export async function snapshotKeptMedia(): Promise<() => Promise<void>> {
   };
 }
 
-/** What GitHub lists now, or else the last complete set found. */
-async function lookup(): Promise<{ index: MediaIndex; assets: Map<string, Asset> }> {
-  let found: Awaited<ReturnType<typeof fromGitHub>>;
+/** What GitHub lists now, or else the last complete set found, as long as it still plays. */
+async function lookup(): Promise<Found> {
+  let found: Found;
   try {
     found = await fromGitHub();
   } catch (err) {
-    const before = await kept();
-    if (!before) throw err;
-    console.warn(`media: ${(err as Error).message}; serving the videos of ${before.index.release?.tag} kept from before`);
-    return before;
+    return fallBack(err as Error);
   }
   if (found.index.release) {
+    latest = { repo: repo(), found };
     // Remembering it is a bonus: a read-only or busy database mustn't stop the page showing the videos.
     await keep(found).catch((err) => console.warn(`media: couldn't keep the video list: ${(err as Error).message}`));
     return found;
   }
-  return (await kept()) ?? found;
+  // No release lists a complete set any more (say, the newest recording failed and the older release was deleted).
+  if (!(await kept())) return found;
+  return fallBack(new Error(`no release of ${repo()} has a complete set of videos`));
 }
 
 /** Which videos exist, and for which release. Cached for ten minutes. */

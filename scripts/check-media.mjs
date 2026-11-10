@@ -12,7 +12,28 @@
  */
 
 const MAIN = ['concord-walkthrough', 'concord-feedback'];
+const CLIP_FILE = /^concord-clip-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const TIMEOUT_MS = 30_000;
+
+/** The first `n` bytes of a response, then the rest is dropped: a server may ignore Range and send a whole video. */
+async function firstBytes(res, n) {
+  const out = new Uint8Array(n);
+  let have = 0;
+  if (!res.body) return out.subarray(0, 0);
+  const reader = res.body.getReader();
+  try {
+    while (have < n) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const take = value.subarray(0, n - have);
+      out.set(take, have);
+      have += take.length;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return out.subarray(0, have);
+}
 
 export async function checkMedia(base, { release, fetch: get = fetch } = {}) {
   base = base.replace(/\/+$/, '');
@@ -44,7 +65,7 @@ export async function checkMedia(base, { release, fetch: get = fetch } = {}) {
     if (!url) return void problems.push(`${name} is missing`);
     try {
       const res = await fetchOk(url, { headers: { range: 'bytes=0-63' } });
-      const head = new Uint8Array(await res.arrayBuffer()).slice(0, 12);
+      const head = await firstBytes(res, 12);
       if (new TextDecoder().decode(head.slice(4, 8)) !== 'ftyp') problems.push(`${name} doesn’t look like an MP4 (from ${res.url})`);
     } catch (err) {
       problems.push(`${name} doesn’t play: ${err.message}`);
@@ -66,10 +87,13 @@ export async function checkMedia(base, { release, fetch: get = fetch } = {}) {
   if (files.has('concord-clips.json')) {
     try {
       const manifest = await (await fetchOk(files.get('concord-clips.json'))).json();
-      const clips = manifest.clips ?? [];
-      if (!clips.length) problems.push('the feature clips’ playlist lists no clips');
-      for (const c of clips) jobs.push(playable(`${c.file}.mp4`), captions(`${c.file}.vtt`));
-      notes.push(`${clips.length} feature clips`);
+      const clips = Array.isArray(manifest?.clips) ? manifest.clips : [];
+      // The page lists only clips with a title and a well-formed file name (apps/web/src/pages/Welcome.tsx).
+      const shown = clips.filter((c) => typeof c?.title === 'string' && c.title && typeof c.file === 'string' && CLIP_FILE.test(c.file));
+      for (const c of clips) if (!shown.includes(c)) problems.push(`the playlist entry ${JSON.stringify(c?.id ?? c?.file ?? c)} can’t be shown: it needs a title and a concord-clip-… file`);
+      if (!shown.length) problems.push('the feature clips’ playlist lists no clip the page can show');
+      for (const c of shown) jobs.push(playable(`${c.file}.mp4`), captions(`${c.file}.vtt`));
+      notes.push(`${shown.length} feature clips`);
     } catch (err) {
       problems.push(`the feature clips’ playlist can’t be read: ${err.message}`);
     }
