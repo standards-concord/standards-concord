@@ -1,10 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { afterAll } from 'vitest';
 
 // Isolated data dir, simulated LLM and no external services, before config is imported.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-test-'));
 process.env.CONCORD_DATA_DIR = dir;
+// Removed once the file's tests are done. It used to be left behind, one per test file per run: a day of runs filled
+// a 30 GB disk with them.
+afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 process.env.LLM_PROVIDER = 'simulated';
 process.env.DEMO_MODE = 'true';
 delete process.env.SOLID_SERVER_URL;
