@@ -211,11 +211,11 @@ describe('when GitHub can’t be read', () => {
   it('doesn’t serve a set kept from another repository', async () => {
     stubGitHub(release(701, 'v1', 7001, 'https://dl.example/old-repo'), {});
     await (await fresh()).mediaIndex();
-    process.env.MEDIA_REPO = 'standards-concord/concord-media';
+    process.env.MEDIA_REPO = 'someone/elsewhere';
     stubGitHub([], {});
     expect(await (await fresh()).mediaIndex()).toEqual({ release: null, files: [] });
     failing(404);
-    await expect((await fresh()).mediaIndex()).rejects.toThrow(/concord-media: HTTP 404/);
+    await expect((await fresh()).mediaIndex()).rejects.toThrow(/someone\/elsewhere: HTTP 404/);
   });
 
   it('still shows the videos when the database can’t keep them', async () => {

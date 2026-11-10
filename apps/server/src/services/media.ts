@@ -4,7 +4,8 @@
  * latest release's copies from our own origin, so the page can embed them with captions
  * (cross-origin caption tracks need CORS, which GitHub doesn't send) and seek within them.
  *
- *   MEDIA_REPO  owner/name of the repository whose releases hold the videos (the newest release that has them is used)
+ *   MEDIA_REPO  owner/name of the public repository whose releases hold the videos (the newest release that has them
+ *               is used; default standards-concord/concord-media)
  *   MEDIA_DIR   serve files from this local folder instead (tests, or a recording you just made)
  *
  * Downloads are cached in the data directory per release tag, so a file is fetched from
@@ -53,7 +54,8 @@ export interface MediaIndex {
   unavailable?: true;
 }
 
-const repo = () => process.env.MEDIA_REPO ?? 'standards-concord/standards-concord';
+// A public repository of its own, so the videos stay playable whatever the main repository's visibility.
+const repo = () => process.env.MEDIA_REPO ?? 'standards-concord/concord-media';
 const localDir = () => (process.env.MEDIA_DIR ? path.resolve(process.env.MEDIA_DIR) : undefined);
 const cacheRoot = () => path.join(config.dataDir, 'media');
 const INDEX_TTL_MS = 10 * 60 * 1000;
