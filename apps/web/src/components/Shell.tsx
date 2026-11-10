@@ -86,6 +86,9 @@ function UserMenu() {
   const logout = async () => {
     // Signing out leaves nothing of this account's query drafts or chats behind on a shared browser, in any tab.
     beginSignOut(user.id);
+    // Sign-in is shown now, with the account closed on screen, not once the server has answered: a move made
+    // after that (going back, following a link) used to be undone by this navigation arriving late.
+    nav('/login');
     try {
       await api.logout();
     } catch (e) {
@@ -95,7 +98,6 @@ function UserMenu() {
     finishSignOut(user.id);
     const s = await refresh();
     if (s) setSession(s);
-    nav('/login');
   };
   return (
     <div
