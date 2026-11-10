@@ -76,6 +76,15 @@ test.describe('account and hub', () => {
     const target = `/o/${id}/validate`;
     await page.goto(target);
     await settle(page);
+    // Also went wrong: sign-in is shown the moment you sign out, but the move to /login waited for the server to
+    // end the session, so going back in that time was undone a moment later (and lost where you were going). The
+    // server's answer is held back here so that window is always open.
+    let answer!: () => void;
+    const answered = new Promise<void>((r) => (answer = r));
+    await page.route('**/api/auth/logout', async (route) => {
+      await answered;
+      await route.continue();
+    });
     await page.getByRole('button', { name: new RegExp(name) }).click();
     await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
     await expect(page.getByRole('button', { name: 'Try the demo' })).toBeVisible();
@@ -97,7 +106,14 @@ test.describe('account and hub', () => {
       dispatchEvent(new PopStateEvent('popstate'));
     }, target);
     await expect(page).toHaveURL(new RegExp(`/login\\?next=${encodeURIComponent(target)}$`));
+    // The server ends the session now; you stay where you went.
+    const ended = page.waitForResponse('**/api/session');
+    answer();
+    await ended;
+    await settle(page);
+    await expect(page).toHaveURL(new RegExp(`/login\\?next=${encodeURIComponent(target)}$`));
     await expect(page.getByRole('button', { name: 'Try the demo' })).toBeVisible();
+    expect((await page.request.get('/api/agent-tokens')).status()).toBe(401);
   });
 
   test('the hub lists ontologies and its activity feed links to what happened', async ({ page, request }) => {
