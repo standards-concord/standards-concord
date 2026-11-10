@@ -32,6 +32,8 @@ let acp = false;
 let tag = 0;
 /** Answers a refresh at /token (after running, if set, `onToken`). */
 let onToken: (() => Promise<void>) | undefined;
+/** When set, the next PUT gets a DPoP nonce challenge (401 use_dpop_nonce), after running this. */
+let nonceChallenge: (() => Promise<void>) | undefined;
 
 beforeAll(async () => {
   await openDb();
@@ -58,6 +60,12 @@ beforeAll(async () => {
           await onToken?.();
           res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ access_token: `at-${++tag}`, token_type: 'DPoP', expires_in: 3600, refresh_token: `rt-${tag}` }));
         })();
+        return;
+      }
+      if (method === 'PUT' && nonceChallenge) {
+        const before = nonceChallenge;
+        nonceChallenge = undefined;
+        void before().then(() => res.writeHead(401, { 'www-authenticate': 'DPoP error="use_dpop_nonce", error_description="Resource server requires nonce in DPoP proof"', 'dpop-nonce': 'n-1' }).end());
         return;
       }
       if (method === 'PUT') {
@@ -90,6 +98,7 @@ beforeEach(() => {
   refuse = undefined;
   acp = false;
   onToken = undefined;
+  nonceChallenge = undefined;
 });
 afterEach(() => {
   delete process.env.CONCORD_ENCRYPTION_KEY;
@@ -332,6 +341,20 @@ describe('a Solid account’s private data in its own pod', () => {
     log = [];
     expect(await status(req('PUT', `${a.pod}concord/x.ttl`, { body: 'x' }))).toMatch(/^409 Your Solid sign-in has ended/);
     expect(log).toEqual([]);
+  });
+
+  // Review r3 of step 5e: the check ran once per send, outside the DPoP nonce retry, so a PUT whose first attempt met a
+  // nonce challenge was sent again after a sign-out that finished while the challenge came back.
+  it('sends nothing more once signed out, even when the pod first asks for a DPoP nonce', async () => {
+    const { ownPodOf } = await import('../src/services/ownPods.js');
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    const req = await (await ownPodOf(a.id))!.request();
+    nonceChallenge = () => forgetOwnPodLogin(a.id);
+    log = [];
+    expect(await status(req('PUT', `${a.pod}concord/x.ttl`, { body: 'x' }))).toMatch(/^409 Your Solid sign-in has ended/);
+    expect(log).toEqual([`PUT /${a.id}/concord/x.ttl`]);
+    expect(docs.has(`/${a.id}/concord/x.ttl`)).toBe(false);
   });
 
   it('doesn’t count a refresh that ended in a sign-out as a refresh', async () => {

@@ -635,14 +635,18 @@ export async function podRequester(login: SolidLogin, opts: { pods?: readonly st
     return podPool().run(async () => {
       const send = async () => {
         if (!(await fresh(login))) throw new SolidLoginError('The Solid login has ended');
-        // Checked last, after any wait for a connection and any refresh: a login ended meanwhile (a sign-out, step
-        // 5e) sends nothing more, even with a token that hasn't expired.
-        await stillValid?.();
         const token = login.accessToken;
         const DPoP = oauth.DPoP(login.client, login.keys);
         const opts = { DPoP, [oauth.customFetch]: held as never, ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}) };
         try {
-          return { token, res: await withNonceRetry(() => oauth.protectedResourceRequest(token, method, u, new Headers({ accept: '*/*', ...init.headers }), init.body ?? null, opts)) };
+          const attempt = async () => {
+            // Checked last before each attempt goes out (after any wait for a connection, any refresh, and the pod's
+            // DPoP nonce challenge): a login ended meanwhile (a sign-out, step 5e) sends nothing more, even with a
+            // token that hasn't expired.
+            await stillValid?.();
+            return oauth.protectedResourceRequest(token, method, u, new Headers({ accept: '*/*', ...init.headers }), init.body ?? null, opts);
+          };
+          return { token, res: await withNonceRetry(attempt) };
         } catch (err) {
           // oauth4webapi raises a 401 challenge as an error; hand it back as the response it was.
           if (err instanceof oauth.WWWAuthenticateChallengeError) return { token, res: err.response };
