@@ -45,7 +45,7 @@ test('says what Concord is for in a few lines, and leads into the walkthrough', 
   await expect(page.getByRole('button', { name: /^Walkthrough/ })).toHaveCount(1);
 });
 
-test('plays the tour with captions, and says the feedback video is on its way', async ({ page }) => {
+test('plays the tour with captions, and says the feedback video isn’t ready yet', async ({ page }) => {
   await page.goto('/welcome');
   const tour = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'A tour of Concord' }) });
   const video = tour.getByTestId('tour-video');
@@ -70,8 +70,21 @@ test('plays the tour with captions, and says the feedback video is on its way', 
   await expect(transcript).toHaveAttribute('href', '/api/media/concord-walkthrough.transcript.md');
 
   const feedback = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'How to take part and give feedback' }) });
-  await expect(feedback.getByTestId('feedback-pending')).toContainText('being recorded for the next release');
+  await expect(feedback.getByTestId('feedback-pending')).toContainText('This video isn’t ready yet.');
   await expect(feedback.getByTestId('feedback-video')).toHaveCount(0);
+});
+
+// On 2026-11-10 the server couldn't read the releases (the repository had gone private), and the page told testers
+// each video was "being recorded for the next release", though no recording was running. When the lookup fails it
+// must say so, not promise a recording.
+test('says the videos can’t be loaded, not that they’re being recorded, when the server can’t look them up', async ({ page }) => {
+  await page.route('**/api/media/index.json', (route) => route.fulfill({ json: { release: null, files: [], unavailable: true } }));
+  await page.goto('/welcome');
+  for (const id of ['tour', 'feedback']) await expect(page.getByTestId(`${id}-pending`)).toContainText('This video can’t be loaded right now.');
+  await expect(page.getByTestId('clips-pending')).toContainText('The feature clips can’t be loaded right now.');
+  await expect(page.getByText(/being recorded/)).toHaveCount(0);
+  // The way in that doesn't need the videos is still there.
+  await expect(page.getByRole('link', { name: 'Start the guided walkthrough' })).toBeVisible();
 });
 
 test('the start button opens the guided walkthrough', async ({ page }) => {
@@ -157,7 +170,17 @@ test.describe('feature clips playlist', () => {
     await expect(playlist(page).getByRole('combobox', { name: 'Choose a feature' }).getByRole('option')).toHaveCount(2);
   });
 
-  test('says the clips are on their way when the release has none', async ({ page }) => {
+  // Sol review of #124: a playlist the release lists but that failed to download was described as not ready yet.
+  test('says the clips can’t be loaded when their playlist fails to download', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/Failed to load resource: the server responded with a status of 503/);
+    await page.route('**/api/media/concord-clips.json', (route) => route.fulfill({ status: 503, json: { error: 'unavailable' } }));
+    await page.goto('/welcome');
+    await expect(playlist(page).getByTestId('clips-pending')).toContainText('The feature clips can’t be loaded right now.');
+    // The main videos are unaffected.
+    await expect(page.getByTestId('tour-video')).toBeVisible();
+  });
+
+  test('says the clips aren’t ready yet when the release has none', async ({ page }) => {
     await page.route('**/api/media/index.json', async (route) => {
       const res = await route.fetch();
       const index = await res.json();
@@ -165,7 +188,7 @@ test.describe('feature clips playlist', () => {
       await route.fulfill({ response: res, json: index });
     });
     await page.goto('/welcome');
-    await expect(playlist(page).getByTestId('clips-pending')).toContainText('being recorded for the next release');
+    await expect(playlist(page).getByTestId('clips-pending')).toContainText('The feature clips aren’t ready yet.');
     await expect(playlist(page).getByRole('combobox')).toHaveCount(0);
   });
 });
