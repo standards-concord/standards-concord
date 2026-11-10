@@ -227,10 +227,13 @@ describe('POST to the ontology IRI validates data', () => {
   });
 
   it('stops a validation that runs too long, and keeps serving', async () => {
+    // Used to check the three-line VALID document, which a warm worker can answer within the 1 ms allowed: once,
+    // under load, it came back 200. Five hundred opportunities take tens of milliseconds to check, even warm.
+    const many = PREFIXES + Array.from({ length: 500 }, (_, i) => `ex:opp${i} a vol:VolunteeringOpportunity ; vol:title "Clean-up ${i}" ; vol:offeredBy ex:org ; vol:hasRole ex:role${i} .\nex:role${i} a vol:Role .`).join('\n');
     const before = POOL_LIMITS.timeoutMs;
     POOL_LIMITS.timeoutMs = 1;
     try {
-      const slow = await post('/def/volunteering', VALID);
+      const slow = await post('/def/volunteering', many);
       expect(slow.status).toBe(422);
       expect(slow.body.error).toMatch(/took longer than/);
     } finally {
@@ -243,7 +246,9 @@ describe('POST to the ontology IRI validates data', () => {
     const before = POOL_LIMITS.timeoutMs;
     POOL_LIMITS.timeoutMs = 1;
     try {
-      const slow = await post('/def/volunteering', JSON.stringify({ '@id': 'https://example.org/r', '@type': 'https://w3id.org/odi/volunteering#Role' }), 'application/ld+json');
+      // Many nodes, not one, so converting them can't finish within the 1 ms allowed (as the Turtle test above).
+      const graph = Array.from({ length: 500 }, (_, i) => ({ '@id': `https://example.org/r${i}`, '@type': 'https://w3id.org/odi/volunteering#Role' }));
+      const slow = await post('/def/volunteering', JSON.stringify({ '@graph': graph }), 'application/ld+json');
       expect(slow.status).toBe(413);
       expect(slow.body.error).toMatch(/JSON-LD took longer than 0.001 s to convert to triples/);
     } finally {
