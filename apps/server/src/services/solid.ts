@@ -547,27 +547,31 @@ export async function makePrivate(req: PodRequest, folder: string, owner: string
     existing = await readAcl(req, acl, folder);
     if (!existing) throw new Error(`${acl} wasn’t there after it was written`);
   }
-  onlyTheOwner(existing.quads, acl, folder, owner, { folder: true, readers: false });
+  onlyTheOwner(existing.quads, acl, folder, owner, { folder: true, readers: [] });
 }
+
+/** The folders in Concord's folder that are shared read-only with the administrators (feedback.ts shareFeedbackFolder). */
+const ADMIN_READ_FOLDERS = ['feedback/'];
 
 /**
  * Before Concord writes `url` in someone's own pod: Concord's folder is private to them (makePrivate), and no access
- * control between it and `url` (a folder's, or the document's own) lets anyone else in, apart from Concord's own
- * rule that lets the administrators read a shared folder (shareRead).
+ * control between it and `url` (each folder's, and the document's own) lets anyone else in. Paths not there yet are
+ * checked too: an access control can exist before what it governs, and would apply the moment the write creates it.
+ * The one exception is Concord's own rule letting the administrators (ADMIN_WEBIDS) read the folders shared with them.
  */
 async function privateTarget(req: PodRequest, base: string, url: string, owner: string): Promise<void> {
   await makePrivate(req, base, owner);
   const rest = url.slice(base.length).split('/');
+  const admins = ADMIN_READ_FOLDERS.some((f) => url.startsWith(base + f)) ? config.adminWebIds : [];
   for (let i = 0; i < rest.length; i++) {
     const at = base + rest.slice(0, i + 1).join('/') + (i < rest.length - 1 ? '/' : '');
-    if (at === base) continue;
+    if (at === base || at.endsWith('//')) continue;
     const head = await req('HEAD', at);
-    if (head.status === 404 || head.status === 410) return; // not there yet, nor anything below it: it takes the rules above
-    if (head.status !== 200) throw new Error(`HEAD ${at} → ${head.status}`);
+    if (head.status !== 200 && head.status !== 404 && head.status !== 410) throw new Error(`HEAD ${at} → ${head.status}`);
     const { acl, acp } = aclOf(head.headers.get('link'), at);
     if (acp) throw acpRefusal(at);
     const own = await readAcl(req, acl, at);
-    if (own) onlyTheOwner(own.quads, acl, at, owner, { folder: at.endsWith('/'), readers: true });
+    if (own) onlyTheOwner(own.quads, acl, at, owner, { folder: at.endsWith('/'), readers: admins });
   }
 }
 
@@ -577,18 +581,18 @@ const notPrivate = (resource: string, why: string) =>
 
 /**
  * Checks an access control document gives access to the owner only: every rule names agents (no classes such as
- * everyone or any signed-in agent, and no groups), and only the owner, except Concord's own read-only rule for the
- * administrators where `readers` allows it. For a folder, the owner's rule must also cover what is in it
+ * everyone or any signed-in agent, and no groups), and only the owner, except Concord's own read-only rule naming
+ * only agents in `readers` (the administrators, in the folders shared with them). For a folder, the owner's rule must also cover what is in it
  * (acl:default), or its documents would take rules from above it.
  */
-function onlyTheOwner(quads: Quad[], aclUrl: string, resource: string, owner: string, opts: { folder: boolean; readers: boolean }) {
+function onlyTheOwner(quads: Quad[], aclUrl: string, resource: string, owner: string, opts: { folder: boolean; readers: readonly string[] }) {
   const rules = new Set(quads.filter((x) => x.predicate.value.startsWith(ACL) || (x.predicate.value === RDF_TYPE && x.object.value === `${ACL}Authorization`)).map((x) => x.subject.value));
   const of = (rule: string, p: string) => quads.filter((x) => x.subject.value === rule && x.predicate.value === `${ACL}${p}`).map((x) => x.object.value);
   let coversContents = false;
   for (const rule of rules) {
     if (of(rule, 'agentClass').length || of(rule, 'agentGroup').length) throw notPrivate(resource, 'can be opened by others than you');
     const others = of(rule, 'agent').filter((a) => a !== owner);
-    const adminsRead = opts.readers && rule === `${aclUrl}#concord-admins` && of(rule, 'mode').every((m) => m === `${ACL}Read`);
+    const adminsRead = rule === `${aclUrl}#concord-admins` && of(rule, 'mode').every((m) => m === `${ACL}Read`) && others.every((a) => opts.readers.includes(a));
     if (others.length && !adminsRead) throw notPrivate(resource, 'can be opened by others than you');
     if (of(rule, 'agent').includes(owner) && of(rule, 'default').includes(resource)) coversContents = true;
   }

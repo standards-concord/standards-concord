@@ -30,6 +30,10 @@ let log: string[] = [];
 let refuse: ((method: string, path: string) => number | undefined) | undefined;
 let acp = false;
 let tag = 0;
+/** Answers a refresh at /token (after running, if set, `onToken`). */
+let onToken: (() => Promise<void>) | undefined;
+/** When set, the next PUT gets a DPoP nonce challenge (401 use_dpop_nonce), after running this. */
+let nonceChallenge: (() => Promise<void>) | undefined;
 
 beforeAll(async () => {
   await openDb();
@@ -50,6 +54,19 @@ beforeAll(async () => {
         if (!have) return res.writeHead(404, { link: aclLink }).end();
         res.writeHead(200, { 'content-type': have.type, etag: have.etag, link: aclLink });
         return res.end(method === 'GET' ? have.body : undefined);
+      }
+      if (method === 'POST' && path === '/token') {
+        void (async () => {
+          await onToken?.();
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify({ access_token: `at-${++tag}`, token_type: 'DPoP', expires_in: 3600, refresh_token: `rt-${tag}` }));
+        })();
+        return;
+      }
+      if (method === 'PUT' && nonceChallenge) {
+        const before = nonceChallenge;
+        nonceChallenge = undefined;
+        void before().then(() => res.writeHead(401, { 'www-authenticate': 'DPoP error="use_dpop_nonce", error_description="Resource server requires nonce in DPoP proof"', 'dpop-nonce': 'n-1' }).end());
+        return;
       }
       if (method === 'PUT') {
         if (req.headers['if-none-match'] === '*' && have) return res.writeHead(412).end();
@@ -80,6 +97,8 @@ beforeEach(() => {
   log = [];
   refuse = undefined;
   acp = false;
+  onToken = undefined;
+  nonceChallenge = undefined;
 });
 afterEach(() => {
   delete process.env.CONCORD_ENCRYPTION_KEY;
@@ -188,9 +207,37 @@ describe('a Solid account’s private data in its own pod', () => {
     expect(await status(solid.write(a.id, 'interviews/first.ttl', 'y'))).toMatch(/^409 .*first\.ttl can be opened by others than you/);
     expect(docs.get(`/${a.id}/concord/interviews/first.ttl`)?.body.toString()).toBe('x');
     // Concord's own share of the feedback folder (the administrators may read) is fine to write below.
-    await solid.writeExisting(a.id, 'feedback/f1.json', '{}', 'application/json');
-    expect(await solid.shareRead(a.id, 'feedback/', ['https://admin.example/profile#me'])).toBe('shared');
-    expect(await status(solid.writeExisting(a.id, 'feedback/f2.json', '{}', 'application/json'))).toBe('ok');
+    const admins = config.adminWebIds;
+    (config as { adminWebIds: string[] }).adminWebIds = ['https://admin.example/profile#me'];
+    try {
+      await solid.writeExisting(a.id, 'feedback/f1.json', '{}', 'application/json');
+      expect(await solid.shareRead(a.id, 'feedback/', config.adminWebIds)).toBe('shared');
+      expect(await status(solid.writeExisting(a.id, 'feedback/f2.json', '{}', 'application/json'))).toBe('ok');
+      // Review r2 of step 5e: a rule with that name was let through whoever it named, and wherever it was.
+      const fb = `${a.pod}concord/feedback/`;
+      const named = (agent: string, folder: string) =>
+        `${ownerOnly(folder, a.webId)}<#concord-admins> a acl:Authorization; acl:agent <${agent}>; acl:accessTo <${folder}>; acl:default <${folder}>; acl:mode acl:Read.\n`;
+      docs.set(`/${a.id}/concord/feedback/.acl`, aclDoc(named('https://not-an-admin.example/#me', fb)));
+      expect(await status(solid.writeExisting(a.id, 'feedback/f3.json', '{}', 'application/json'))).toMatch(/^409 .*can be opened by others than you/);
+      docs.set(`/${a.id}/concord/interviews/.acl`, aclDoc(named('https://admin.example/profile#me', sub)));
+      expect(await status(solid.write(a.id, 'interviews/third.ttl', 'x'))).toMatch(/^409 .*interviews\/ can be opened by others than you/);
+    } finally {
+      (config as { adminWebIds: string[] }).adminWebIds = admins;
+    }
+  });
+
+  // Review r2 of step 5e: the check stopped at the first path not there yet, but an access control can be made
+  // before the document it governs, and applies as soon as the write creates it.
+  it('checks the access control of a document or folder that isn’t there yet', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    await solid.write(a.id, 'interviews/first.ttl', 'x');
+    docs.set(`/${a.id}/concord/interviews/new.ttl.acl`, aclDoc(everyone(`${a.pod}concord/interviews/new.ttl`, a.webId)));
+    expect(await status(solid.write(a.id, 'interviews/new.ttl', 'x'))).toMatch(/^409 .*new\.ttl can be opened by others than you/);
+    expect(docs.has(`/${a.id}/concord/interviews/new.ttl`)).toBe(false);
+    docs.set(`/${a.id}/concord/later/.acl`, aclDoc(everyone(`${a.pod}concord/later/`, a.webId)));
+    expect(await status(solid.write(a.id, 'later/doc.ttl', 'x'))).toMatch(/^409 .*later\/ can be opened by others than you/);
+    expect([...docs.keys()].some((k) => k.includes('/later/doc'))).toBe(false);
   });
 
   // Review r1 of step 5e: the path was put after Concord's folder as it was, so `../x` landed elsewhere in the pod
@@ -280,6 +327,43 @@ describe('a Solid account’s private data in its own pod', () => {
     await saveOwnPodLogin(kept.sharedId, { ...refreshing, accessToken: 'at-2', refreshToken: 'rt-2' });
     expect(await get('kv', `solid-user:${a.id}`)).toBeUndefined();
     expect(await status(solid.write(a.id, 'use-cases/u.ttl', 'x'))).toMatch(/^409 .*sign in with Solid again/i);
+  });
+
+  // Review r2 of step 5e: a requester made before sign-out kept sending with its unexpired token, and a refresh
+  // whose save was discarded (signed out meanwhile) still reported success.
+  it('sends nothing more once signed out, even through a requester made before', async () => {
+    const { ownPodOf } = await import('../src/services/ownPods.js');
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    const req = await (await ownPodOf(a.id))!.request();
+    expect((await req('HEAD', `${a.pod}concord/`)).status).toBe(404);
+    await forgetOwnPodLogin(a.id);
+    log = [];
+    expect(await status(req('PUT', `${a.pod}concord/x.ttl`, { body: 'x' }))).toMatch(/^409 Your Solid sign-in has ended/);
+    expect(log).toEqual([]);
+  });
+
+  // Review r3 of step 5e: the check ran once per send, outside the DPoP nonce retry, so a PUT whose first attempt met a
+  // nonce challenge was sent again after a sign-out that finished while the challenge came back.
+  it('sends nothing more once signed out, even when the pod first asks for a DPoP nonce', async () => {
+    const { ownPodOf } = await import('../src/services/ownPods.js');
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    const req = await (await ownPodOf(a.id))!.request();
+    nonceChallenge = () => forgetOwnPodLogin(a.id);
+    log = [];
+    expect(await status(req('PUT', `${a.pod}concord/x.ttl`, { body: 'x' }))).toMatch(/^409 Your Solid sign-in has ended/);
+    expect(log).toEqual([`PUT /${a.id}/concord/x.ttl`]);
+    expect(docs.has(`/${a.id}/concord/x.ttl`)).toBe(false);
+  });
+
+  it('doesn’t count a refresh that ended in a sign-out as a refresh', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId, { expiresAt: Date.now() - 1000, refreshToken: 'rt-old' }), a.pod);
+    onToken = () => forgetOwnPodLogin(a.id);
+    expect(await status(solid.write(a.id, 'use-cases/u.ttl', 'x'))).toMatch(/^409 .*sign/i);
+    expect(log).toContain('POST /token');
+    expect(log.filter((l) => l.startsWith('PUT'))).toEqual([]);
   });
 
   it('signs out through the API: the kept login goes with the session', async () => {

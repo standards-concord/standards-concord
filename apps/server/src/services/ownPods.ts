@@ -93,15 +93,16 @@ export async function loadOwnPodLogin(sharedId: string): Promise<SolidLogin | un
   const open = id && (await openLogin(id.userId, id.gen));
   return open && { ...(await importLogin(open.stored)), sharedId };
 }
-/** For `shareLogins`: a refresh changes only the tokens, and only of the generation it refreshed. */
-export async function saveOwnPodLogin(sharedId: string, login: SolidLogin) {
+/** For `shareLogins`: a refresh changes only the tokens, and only of the generation it refreshed. False if that has ended. */
+export async function saveOwnPodLogin(sharedId: string, login: SolidLogin): Promise<boolean> {
   const id = parseSharedId(sharedId);
-  if (!id) return;
-  await transaction(async () => {
+  if (!id) return false;
+  return await transaction(async () => {
     const open = await openLogin(id.userId, id.gen);
-    if (!open) return; // signed out, or signed in again, meanwhile
+    if (!open) return false; // signed out, or signed in again, meanwhile
     const stored = { ...open.stored, accessToken: login.accessToken, refreshToken: login.refreshToken, expiresAt: login.expiresAt };
     await put<OwnPodRow>('kv', { ...open.row, sealed: seal('user-login', stored, boundTo(id.userId, open.row)) });
+    return true;
   });
 }
 
@@ -137,7 +138,11 @@ export async function ownPodOf(userId: string): Promise<OwnPod | undefined> {
       // replaced it. Only inside the folder this pod was opened for: a sign-in naming another pod doesn't redirect it.
       const now = await get<OwnPodRow>('kv', rowId(userId));
       const login = now && now.pod === row.pod ? await loadOwnPodLogin(sharedIdOf(userId, now.gen)) : undefined;
-      const req = login && (await podRequester(login, { pods: [concordFolder(row.pod)] }));
+      // Before each request it sends: this sign-in is still the kept one (not signed out, nor replaced).
+      const stillValid = async () => {
+        if ((await get<OwnPodRow>('kv', rowId(userId)))?.gen !== now?.gen) throw new OwnPodUnavailable(`Your Solid sign-in has ended. ${AGAIN}`);
+      };
+      const req = login && (await podRequester(login, { pods: [concordFolder(row.pod)], stillValid }));
       if (!req) throw new OwnPodUnavailable(`Your Solid sign-in has ended. ${AGAIN}`);
       return req;
     },
