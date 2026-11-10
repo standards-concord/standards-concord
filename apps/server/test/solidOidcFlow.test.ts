@@ -170,7 +170,7 @@ beforeAll(async () => {
       return send('application/json', JSON.stringify(body), behaviour.padToken, behaviour.stallToken);
     }
     if (url.pathname === '/alice/profile/card')
-      return res.writeHead(200, { 'content-type': 'text/turtle' }).end(`<#me> <http://www.w3.org/ns/solid/terms#oidcIssuer> <${behaviour.profileIssuer ?? issuer}> ; <http://xmlns.com/foaf/0.1/name> "Alice" .`);
+      return res.writeHead(200, { 'content-type': 'text/turtle' }).end(`<#me> <http://www.w3.org/ns/solid/terms#oidcIssuer> <${behaviour.profileIssuer ?? issuer}> ; <http://xmlns.com/foaf/0.1/name> "Alice" ; <http://www.w3.org/ns/pim/space#storage> <${base}/elsewhere/>, <${base}/alice/>, <ftp://x.example/> .`);
     res.writeHead(404).end();
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -218,6 +218,8 @@ describe('Solid-OIDC against a scripted provider', () => {
   it('signs in with a DPoP-bound token, a verified ID token and our nonce', async () => {
     const done = await signIn();
     expect(done).toMatchObject({ webId: webId(), issuer, name: 'Alice', returnTo: '/somewhere' });
+    // Step 5e: the pod the profile names, preferring the one the WebID is in, never one Concord can't use.
+    expect(done.storage).toBe(`${base}/alice/`);
     expect(sawDpop).toBe(true);
     expect(done.login.accessToken).toBe('at-1');
     // Discovery, the profile, registration, token, JWKS and the profile again: all guarded (checked after each test).

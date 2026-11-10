@@ -81,6 +81,12 @@ export const config = {
    * another instance, so there the feature needs the key and is turned off without it.
    */
   adminLoginsInMemory: bool(process.env.CONCORD_ADMIN_LOGINS_IN_MEMORY, !process.env.VERCEL),
+  /**
+   * People who sign in with Solid keep their private data in their own pod (step 5e, the 4 November decision), written
+   * with their own Solid login, sealed in the database (CONCORD_ENCRYPTION_KEY). On by default on Vercel; the VM keeps
+   * giving every account a pod on its own Solid server until the cutover.
+   */
+  solidOwnPods: bool(process.env.CONCORD_SOLID_OWN_PODS, !!process.env.VERCEL),
   /** Vercel Cron's bearer secret, for GET /api/cron/daily. Unset: the endpoint refuses every call. */
   cronSecret: process.env.CRON_SECRET || undefined,
   /**

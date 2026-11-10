@@ -268,7 +268,7 @@ const sharingError = async (userId: string) => (await get_<{ value: string }>('k
 
 /** Bring every tester's feedback folder in line with ADMIN_WEBIDS (run at start-up: the list may have changed). */
 export async function syncFeedbackSharing() {
-  if (!solid.enabled) return { shared: 0, unchanged: 0, missing: 0, failed: 0 };
+  if (!solid.enabled && !config.solidOwnPods) return { shared: 0, unchanged: 0, missing: 0, failed: 0 };
   const counts = { shared: 0, unchanged: 0, missing: 0, failed: 0 };
   for (const pod of await solid.pods()) {
     const r = await shareFeedbackFolder(pod.userId);
@@ -374,7 +374,7 @@ async function readFolder(get: PodGet, testerId: string, url: string): Promise<P
  * exactly what the pods' access control lets that WebID read.
  */
 export async function readPodFeedback(as: { webId: string; get: PodGet }): Promise<PodFeedbackReport> {
-  if (!solid.enabled) return { readAs: as.webId, readers: config.adminWebIds, folders: [] };
+  if (!solid.enabled && !config.solidOwnPods) return { readAs: as.webId, readers: config.adminWebIds, folders: [] };
   // Looked up first, then filtered: filter() itself would take each async lookup's promise as a yes.
   const all = await solid.pods();
   const real = await Promise.all(all.map(async (p) => !(await get_<User>('users', p.userId))?.simulated));

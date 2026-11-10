@@ -24,7 +24,7 @@ const PROFILE = `@prefix solid: <http://www.w3.org/ns/solid/terms#> .
 describe('WebID profiles', () => {
   it('reads the WebID’s own issuers and name, not anyone else’s in the document', () => {
     const p = parseProfile(WEBID, 'https://alice.example/profile/card', PROFILE);
-    expect(p).toEqual({ webId: WEBID, issuers: ['https://idp.example/'], name: 'Alice' });
+    expect(p).toEqual({ webId: WEBID, issuers: ['https://idp.example/'], name: 'Alice', storages: [] });
   });
 
   it('accepts a sign-in only from a provider the profile names (trailing slash aside)', () => {

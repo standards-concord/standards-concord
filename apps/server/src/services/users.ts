@@ -47,6 +47,12 @@ export async function createUser(input: {
   return await put('users', base);
 }
 
+/** Records the pod a Solid account's private data now goes to (its own, step 5e). */
+export async function setPodUrl(userId: string, podUrl: string) { return transaction(async () => {
+  const u = await get<User>('users', userId);
+  if (u && u.podUrl !== podUrl) await put('users', { ...u, podUrl });
+}); }
+
 export async function findByProvider(provider: AuthProvider, subject: string): Promise<User | undefined> {
   return (await list<User>('users')).find((u) => u.providers.some((p) => p.provider === provider && p.subject === subject));
 }

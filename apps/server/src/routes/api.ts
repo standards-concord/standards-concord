@@ -20,6 +20,8 @@ import { proposeTermEdit } from '../services/termEdits.js';
 import { withTriageBudget } from '../services/budget.js';
 import { feedbackChat, listFeedback, questionsFor, readPodFeedback, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
 import { podReader } from '../solidOidc.js';
+import { solid } from '../services/solid.js';
+import { forgetOwnPodLogin } from '../services/ownPods.js';
 import { alphaMe, clearTesterCookie, recordVersion, rememberTester, testerFor, testerForSaving } from '../services/alpha.js';
 import {
   checkPublicSummary,
@@ -213,6 +215,8 @@ export function apiRouter(): Router {
     const meant = optStr(req.body?.session);
     if (meant !== undefined && meant !== sessionHandle(req.cookies?.[SESSION_COOKIE])) return void res.json({ ended: false });
     await endAdminLogin(req.cookies?.[SESSION_COOKIE]);
+    // The Solid login Concord writes their own pod with ends too (step 5e): nothing writes as them after they sign out.
+    if (req.user) await forgetOwnPodLogin(req.user.id);
     await clearTesterCookie(req, res);
     await destroySession(req.cookies?.[SESSION_COOKIE]);
     res.clearCookie(SESSION_COOKIE, { path: '/' }).json({ ended: true });
@@ -1107,7 +1111,9 @@ export function apiRouter(): Router {
     feedbackAdmin(req);
     if (!adminLoginsKept()) throw new HttpError(503, 'Reading testers’ pods is off on this server: it needs CONCORD_ENCRYPTION_KEY to keep your Solid sign-in.');
     const login = await adminLoginFor(req);
-    const read = login ? await podReader(login) : undefined;
+    // Where people keep their own pods, reads go only inside the testers' pods Concord knows (solidOidc.ts inPods).
+    const pods = config.solidOwnPods ? { pods: (await solid.pods()).map((p) => p.podUrl) } : {};
+    const read = login ? await podReader(login, pods) : undefined;
     // Their Solid login is kept for the browser session that signed in (sealed in the database with CONCORD_ENCRYPTION_KEY, else in memory): sign-out, another browser or an expired token ends it.
     if (!login || !read) throw new HttpError(403, 'Your Solid sign-in has ended. Sign out and sign in with your WebID again to read the pods.');
     res.json(await readPodFeedback({ webId: login.webId, get: read }));
