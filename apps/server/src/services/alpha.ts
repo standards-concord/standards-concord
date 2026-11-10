@@ -3,6 +3,7 @@ import { APP_RELEASES, APP_VERSION, compareVersions, findRelease, parseVersion, 
 import { config } from '../config.js';
 import { get, HttpError, put, transaction } from '../db.js';
 import { createSession, destroySession, destroyUserSessions, sessionUser } from './users.js';
+import { usesOwnPod } from './ownPods.js';
 import { PreconditionFailed, solid } from './solid.js';
 
 /**
@@ -194,7 +195,7 @@ export function runSerially(queues: Map<string, Promise<void>>, key: string, job
   return run;
 }
 
-const podKind = (u: User): 'solid' | 'local' => (config.solid.serverUrl && u.podUrl?.startsWith(config.solid.serverUrl) ? 'solid' : 'local');
+const podKind = (u: User): 'solid' | 'local' => ((config.solid.serverUrl && u.podUrl?.startsWith(config.solid.serverUrl)) || (usesOwnPod(u) && u.podUrl) ? 'solid' : 'local');
 const podUrlOf = (u: User, rel: string) => (podKind(u) === 'solid' && u.podUrl ? `${u.podUrl}concord/${rel}` : `${config.publicUrl}/people/${u.id}/private/${rel}`);
 
 /**

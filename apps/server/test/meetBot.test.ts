@@ -6,7 +6,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import request from 'supertest';
 import type { Meeting } from '@concord/shared';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
 import { list, openDb, put, remove } from '../src/db.js';
@@ -22,6 +22,17 @@ import { setKeepAlive } from '../src/keepAlive.js';
 import { calendar, oneOff, weeklySeries } from './fixtures/invites.js';
 
 const app = createApp();
+
+/**
+ * The wall clock these tests run on. The fixtures are calls on fixed dates (mostly 10 November 2026), passed to the
+ * dispatcher as its `now`, while the server stamps some things with the real time (a transcript line's `lastLineAt`,
+ * an approval sent through the API, leases) and a few tests count a day on from the real time. Once the real date
+ * reached the fixtures, six tests failed on every branch: a quiet call never closed because its last line looked
+ * newer than the dispatch time, an approval came after the call, and a call was dropped before its bot was found.
+ * So the real clock is set two days before those calls, and keeps ticking from there (timings and leases still work).
+ */
+const WALL_CLOCK = new Date('2026-11-08T00:00:00Z');
+vi.useFakeTimers({ toFake: ['Date'], now: WALL_CLOCK, shouldAdvanceTime: true });
 
 /* A stand-in for the Recall.ai API that records what the server asked it to do. */
 type Call = { method: string; url: string; body: Record<string, unknown> };
@@ -129,6 +140,7 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
+  vi.useRealTimers();
   stub.close();
   config.meetBot.recallApiKey = undefined;
   config.meetBot.calendarIcsUrl = undefined;
@@ -149,6 +161,13 @@ const syncCalendar = async (now?: Date) => {
   await meetBotIdle();
   return r;
 };
+
+// The file used to run on the real date, and by 10 November 2026 six tests below failed on every branch.
+it('runs on a wall clock set before the calls in its fixtures, so the real date can’t break it', () => {
+  expect(Date.now()).toBeGreaterThanOrEqual(WALL_CLOCK.getTime());
+  // The 9.4 test counts 31 hours on from the real time and needs that to fall before its call ends (16:00 on 10 November).
+  expect(Date.now() + 31 * 3600e3).toBeLessThan(new Date('2026-11-10T16:00:00Z').getTime());
+});
 
 describe('reading calendar invites', () => {
   it('expands a weekly series in London time, with skipped, moved and cancelled weeks', () => {

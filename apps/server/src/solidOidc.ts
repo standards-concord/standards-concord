@@ -28,6 +28,8 @@ import { refuseWhenReadOnly } from './db.js';
 
 const SOLID_OIDC_ISSUER = 'http://www.w3.org/ns/solid/terms#oidcIssuer';
 const FOAF_NAME = 'http://xmlns.com/foaf/0.1/name';
+const PIM_STORAGE = 'http://www.w3.org/ns/pim/space#storage';
+const PIM_STORAGE_TYPE = 'http://www.w3.org/ns/pim/space#Storage';
 const VCARD_FN = 'http://www.w3.org/2006/vcard/ns#fn';
 const MAX_BYTES = 256 * 1024;
 const TIMEOUT_MS = 8000;
@@ -141,6 +143,19 @@ export const podFetch: typeof podFetchAny = (input, init) => {
 /** podFetch for a request that already holds one of the pod server's connections. */
 const podFetchHeld = guarded(POD_MAX_BYTES, podUrl, 'held');
 
+/**
+ * A URL inside one of `scope`'s pods (folder URLs ending in /): where a requester for people's own pods may go
+ * (step 5e). Anywhere else, including the rest of the same host, is refused before anything is sent. The guarded
+ * transport still refuses private addresses on any host that isn't a trusted one.
+ */
+export function inPods(scope: readonly string[]) {
+  return (raw: string | URL): URL => {
+    const u = new URL(raw);
+    if (u.username || u.password || !scope.some((root) => root.endsWith('/') && u.href.startsWith(root))) throw new FetchError('bad-response', `Not in this person’s pod: ${u.href}`);
+    return u;
+  };
+}
+
 const oauthOptions = (url: URL) => ({
   [oauth.customFetch]: guardedFetch as typeof fetch,
   // Plain http only for the operator's own (trusted) Solid server, in development and tests.
@@ -157,6 +172,8 @@ export interface WebIdProfile {
   webId: string;
   issuers: string[];
   name?: string;
+  /** The pods the profile names (pim:storage). */
+  storages: string[];
 }
 
 /** Parse a WebID profile document (Turtle) for the WebID's OIDC issuers and name. */
@@ -170,7 +187,8 @@ export function parseProfile(webId: string, docUrl: string, turtle: string): Web
   const about = quads.filter((q) => q.subject.termType === 'NamedNode' && q.subject.value === webId);
   const issuers = [...new Set(about.filter((q) => q.predicate.value === SOLID_OIDC_ISSUER && q.object.termType === 'NamedNode').map((q) => q.object.value))];
   const name = about.find((q) => (q.predicate.value === FOAF_NAME || q.predicate.value === VCARD_FN) && q.object.termType === 'Literal')?.object.value;
-  return { webId, issuers, name: name?.slice(0, 120) };
+  const storages = [...new Set(about.filter((q) => q.predicate.value === PIM_STORAGE && q.object.termType === 'NamedNode').map((q) => q.object.value))];
+  return { webId, issuers, name: name?.slice(0, 120), storages };
 }
 
 /** The check that makes a Solid sign-in mean something: the WebID's own profile names the provider that vouched for it. */
@@ -375,8 +393,8 @@ export async function importLogin(stored: StoredLogin): Promise<SolidLogin> {
 /** Where shared logins are kept (auth.ts registers it): each instance loads the latest before refreshing. */
 export interface SharedLogins {
   load(id: string): Promise<SolidLogin | undefined>;
-  /** Saves the login's new tokens (its keys don't change). */
-  save(id: string, login: SolidLogin): Promise<void>;
+  /** Saves the login's new tokens (its keys don't change). False when it was ended meanwhile, and nothing was saved. */
+  save(id: string, login: SolidLogin): Promise<boolean | void>;
 }
 let sharedLogins: SharedLogins | undefined;
 export const shareLogins = (s: SharedLogins) => void (sharedLogins = s);
@@ -387,6 +405,50 @@ export interface FinishedLogin {
   name: string;
   returnTo: string;
   login: SolidLogin;
+  /** The person's own pod, from their profile (see podOf), if it names one Concord can use. */
+  storage?: string;
+}
+
+/**
+ * The pod a profile names that Concord would write to: an https folder (http only on a trusted server), with no user
+ * name or password. Of several, the one the WebID itself is in comes first (a pod's own profile), else the first.
+ */
+export function podOf(profile: WebIdProfile): string | undefined {
+  const usable = profile.storages.filter((s) => {
+    try {
+      const u = new URL(s);
+      return !u.username && !u.password && !u.search && !u.hash && u.pathname.endsWith('/') && (u.protocol === 'https:' || (u.protocol === 'http:' && isTrusted(u)));
+    } catch {
+      return false;
+    }
+  });
+  return usable.find((s) => profile.webId.startsWith(s)) ?? usable[0];
+}
+
+/**
+ * The pod a WebID lives in when its profile names none (a Community Solid Server profile doesn't, by default): the
+ * nearest folder above the profile document that says it is a storage (Link: <pim:Storage>; rel="type"), as the
+ * Solid Protocol describes. Read without signing in, through the guarded transport. Undefined if none says so.
+ */
+export async function storageAbove(webId: string): Promise<string | undefined> {
+  let folder: URL;
+  try {
+    folder = new URL('.', new URL(webId));
+  } catch {
+    return undefined;
+  }
+  for (let i = 0; i < 6; i++) {
+    try {
+      const r = await guardedFetch(folder, { method: 'HEAD' });
+      const types = (r.headers.get('link') ?? '').split(',').filter((part) => /;\s*rel="?type"?/i.test(part));
+      if (types.some((part) => part.includes(`<${PIM_STORAGE_TYPE}>`))) return podOf({ webId, issuers: [], storages: [folder.href] });
+    } catch {
+      return undefined;
+    }
+    if (folder.pathname === '/') return undefined;
+    folder = new URL('..', folder);
+  }
+  return undefined;
 }
 
 /** Retry once when the provider asks for a DPoP nonce (the DPoP handle remembers it). */
@@ -457,6 +519,7 @@ export async function finishLogin(loginId: string | undefined, callbackUrl: stri
     issuer: claims.iss,
     name: profile.name ?? nameFromWebId(webId),
     returnTo: p.returnTo,
+    storage: podOf(profile) ?? (await storageAbove(webId)),
     login: { webId, as, client, keys, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresAt: Date.now() + (tokens.expires_in ?? 300) * 1000 },
   };
 }
@@ -518,15 +581,15 @@ async function renew(login: SolidLogin): Promise<boolean> {
   const store = sharedLogins;
   return await withLease(`solid-refresh:${id}`, 30_000, async () => {
     const latest = await store.load(id);
-    if (!latest) return false; // signed out meanwhile
+    if (!latest) return false; // signed out, or (an own-pod login, step 5e) replaced by a newer sign-in, meanwhile
     if (latest.accessToken !== login.accessToken && Date.now() < latest.expiresAt - 30_000) {
       Object.assign(login, { accessToken: latest.accessToken, refreshToken: latest.refreshToken, expiresAt: latest.expiresAt });
       return true;
     }
     Object.assign(login, { refreshToken: latest.refreshToken });
     const ok = await renewHere(login);
-    if (ok) await store.save(id, login);
-    return ok;
+    // A login ended while it was being refreshed (signed out, or replaced by a newer sign-in) isn't refreshed.
+    return ok && (await store.save(id, login)) !== false;
   });
 }
 
@@ -561,18 +624,29 @@ export type PodRequest = (method: 'GET' | 'HEAD' | 'PUT', url: string, init?: { 
  * not) and signs its proof, so time spent queueing can't leave it stale. A 401
  * gets one refresh and retry; any other answer comes back as the response.
  */
-export async function podRequester(login: SolidLogin): Promise<PodRequest | undefined> {
+export async function podRequester(login: SolidLogin, opts: { pods?: readonly string[]; stillValid?: () => Promise<void> } = {}): Promise<PodRequest | undefined> {
   if (!(await fresh(login))) return undefined;
+  const stillValid = opts.stillValid;
+  // People's own pods (step 5e): only inside the pods named, on any public host. Otherwise the operator's pod server.
+  const check = opts.pods ? inPods(opts.pods) : podUrl;
+  const held = opts.pods ? guarded(POD_MAX_BYTES, check, 'held') : podFetchHeld;
   return async (method, url, init = {}) => {
-    const u = podUrl(url);
+    const u = check(url);
     return podPool().run(async () => {
       const send = async () => {
         if (!(await fresh(login))) throw new SolidLoginError('The Solid login has ended');
         const token = login.accessToken;
         const DPoP = oauth.DPoP(login.client, login.keys);
-        const opts = { DPoP, [oauth.customFetch]: podFetchHeld as never, ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}) };
+        const opts = { DPoP, [oauth.customFetch]: held as never, ...(u.protocol === 'http:' ? { [oauth.allowInsecureRequests]: true } : {}) };
         try {
-          return { token, res: await withNonceRetry(() => oauth.protectedResourceRequest(token, method, u, new Headers({ accept: '*/*', ...init.headers }), init.body ?? null, opts)) };
+          const attempt = async () => {
+            // Checked last before each attempt goes out (after any wait for a connection, any refresh, and the pod's
+            // DPoP nonce challenge): a login ended meanwhile (a sign-out, step 5e) sends nothing more, even with a
+            // token that hasn't expired.
+            await stillValid?.();
+            return oauth.protectedResourceRequest(token, method, u, new Headers({ accept: '*/*', ...init.headers }), init.body ?? null, opts);
+          };
+          return { token, res: await withNonceRetry(attempt) };
         } catch (err) {
           // oauth4webapi raises a 401 challenge as an error; hand it back as the response it was.
           if (err instanceof oauth.WWWAuthenticateChallengeError) return { token, res: err.response };
@@ -589,8 +663,8 @@ export async function podRequester(login: SolidLogin): Promise<PodRequest | unde
 }
 
 /** A GET as the signed-in WebID (see podRequester). Undefined if the login can no longer be used. */
-export async function podReader(login: SolidLogin): Promise<((url: string, accept: string) => Promise<Response>) | undefined> {
-  const req = await podRequester(login);
+export async function podReader(login: SolidLogin, opts: { pods?: readonly string[] } = {}): Promise<((url: string, accept: string) => Promise<Response>) | undefined> {
+  const req = await podRequester(login, opts);
   return req && ((url, accept) => req('GET', url, { headers: { accept } }));
 }
 
