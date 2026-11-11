@@ -54,16 +54,32 @@ export interface AppRelease {
 export const APP_RELEASES: AppRelease[] = [
   {
     version: '0.45.0',
-    date: '2026-11-10',
+    date: '2026-11-11',
     title: 'Check data in a SPARQL endpoint',
     changes: [{
       id: 'validate-sparql-endpoint',
       type: 'feat',
       title: 'Check a live sample from your triplestore',
       detail: 'On Validate data, open Check data in a SPARQL endpoint to sample classes from the selected version. Your browser fetches the data directly, checks it here, and shows undefined terms and classes with no instances in the sample.',
-      roles: ['steward', 'contributor', 'agent'],
+      roles: [],
       to: '{o}/validate',
     }],
+  },
+  {
+    version: '0.44.2',
+    date: '2026-11-10',
+    title: 'The welcome page keeps its videos',
+    changes: [
+      {
+        id: 'welcome-videos-kept',
+        type: 'fix',
+        title: 'The welcome page no longer says its videos are being recorded when they just couldn’t be loaded',
+        detail:
+          'When Concord couldn’t reach the place its videos are kept, the welcome page said they were being recorded for the next release, though nothing was. It now keeps showing the last videos it found, and if it has none, says plainly that they can’t be loaded right now.',
+        roles: [],
+        to: '/welcome',
+      },
+    ],
   },
   {
     version: '0.44.1',
