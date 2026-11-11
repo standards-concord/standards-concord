@@ -116,3 +116,7 @@ Every feature comes with Playwright tests, and **every bug fix comes with a Play
 - [Alpha walkthrough](docs/alpha-walkthrough.md)
 - [Narrated walkthrough video](walkthrough/README.md): `pnpm walkthrough` records it from an editable script
 - Research: [ontology practice, requirements, versioning and governance](docs/research/ontology-practice.md), [visual views of an ontology](docs/research/ontology-visualisation.md), [technical options](docs/research/tech.md), [ODI playbooks](docs/research/playbooks.md)
+
+## Licence
+
+Concord is open source under the [MIT licence](LICENSE). The vendored packages in `packages/pod-auth` and `packages/suite-ui` carry their own MIT licences. The Open Data Institute's name and logo (used by the `odi` look) and the third-party logos listed in [docs/third-party-marks.md](docs/third-party-marks.md) are trademarks of their owners and aren't covered by the licence. A fork should pick one of the unbranded looks.
