@@ -109,7 +109,7 @@ test('codes are proposed, reviewed and merged, then used in Browse, data checks 
   await page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(page.getByRole('button', { name: /^Status: In review/ })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Merge into working draft' })).toHaveCount(0);
-  await expect(page.getByText(`“gardening” (GARD) under “outdoor” to “${listName}”`, { exact: true })).toBeVisible();
+  await expect(page.getByText(`In “${listName}”, under “outdoor”`, { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: 'Diff', exact: true }).click();
   await expect(page.getByText('skos:ConceptScheme', { exact: false }).first()).toBeVisible();
 
@@ -189,7 +189,7 @@ test('codes are proposed, reviewed and merged, then used in Browse, data checks 
   await page.goto(`/def/${slug}/draft#sec-code-lists`);
   await expect(page.getByRole('heading', { name: /^Code lists/ })).toBeVisible();
   for (const code of ['outdoor', 'indoor', 'gardening', 'cooking']) {
-    await expect(page.getByRole('link', { name: code === 'outdoor' ? 'OUT' : code === 'indoor' ? 'IN' : code === 'gardening' ? 'GARD' : 'COOK', exact: true }).first()).toHaveAttribute('href', `#${code}`);
+    await expect(page.getByRole('link', { name: code, exact: true }).first()).toHaveAttribute('href', `#${code}`);
     await page.goto(`/def/${slug}/draft#${code}`);
     await expect(page.getByRole('heading', { name: new RegExp(`${listName}$`), level: 3 })).toBeVisible();
   }

@@ -57,11 +57,13 @@ export function describeOp(op: ChangeOp, label: Labeler): { verb: string; tone: 
     case 'addConceptScheme':
       return { verb: 'Create code list', tone: 'add', title: op.label, lines: [op.definition] };
     case 'addConcept':
-      return { verb: 'Add code', tone: 'add', title: `“${op.label}”${op.notation ? ` (${op.notation})` : ''}${op.broader ? ` under “${label(op.broader)}”` : ''} to “${label(op.scheme)}”`, lines: [op.definition] };
+      return { verb: 'Add code', tone: 'add', title: op.label, lines: [`In “${label(op.scheme)}”${op.broader ? `, under “${label(op.broader)}”` : ', at the top level'}`, ...(op.notation ? [`Code: ${op.notation}`] : []), op.definition] };
     case 'moveConcept':
-      return { verb: 'Move', tone: 'modify', title: `“${label(op.iri)}” ${op.broader ? `under “${label(op.broader)}”` : 'to the top level'}`, lines: [] };
+      return { verb: 'Move code', tone: 'modify', title: label(op.iri), lines: [op.broader ? `Now under “${label(op.broader)}”` : 'Now at the top level'] };
     case 'setCodeList':
-      return { verb: 'Values of', tone: 'modify', title: `“${label(op.property)}” ${op.scheme ? `come from “${label(op.scheme)}”` : 'no longer come from a code list'}`, lines: [] };
+      return op.scheme
+        ? { verb: 'Use code list', tone: 'modify', title: label(op.scheme), lines: [`For the values of “${label(op.property)}”`] }
+        : { verb: 'Stop using a code list for', tone: 'modify', title: label(op.property), lines: ['Its values are no longer limited to a list'] };
     case 'addClass': {
       const lines: string[] = [];
       if (op.definition) lines.push(`“${op.definition}”`);
@@ -92,7 +94,7 @@ export function describeOp(op: ChangeOp, label: Labeler): { verb: string; tone: 
       return { verb: 'Add individual', tone: 'add', title: op.label || op.localName, lines };
     }
     case 'updateConcept':
-      return { verb: 'Edit', tone: 'modify', title: `“${label(op.iri)}”`, lines: Object.entries(op.set).map(([k, v]) => `${({ label: 'Label', definition: 'Definition', notation: 'Code', altLabels: 'Also known as', examples: 'Examples', editorialNote: 'Editorial note' } as Record<string, string>)[k] ?? k}: ${Array.isArray(v) ? v.join('; ') : v || '—'}`) };
+      return { verb: 'Edit', tone: 'modify', title: label(op.iri), lines: Object.entries(op.set).map(([k, v]) => `${({ label: 'Label', definition: 'Definition', notation: 'Code', altLabels: 'Also known as', examples: 'Examples', editorialNote: 'Editorial note' } as Record<string, string>)[k] ?? k}: ${Array.isArray(v) ? v.join('; ') : v || '—'}`) };
     case 'updateAnnotations': {
       const lines = Object.entries(op.set)
         .filter(([, v]) => v !== undefined)
@@ -118,7 +120,7 @@ export function describeOp(op: ChangeOp, label: Labeler): { verb: string; tone: 
     case 'setCharacteristics':
       return { verb: 'Set characteristics of', tone: 'modify', title: label(op.iri), lines: [op.characteristics.length ? op.characteristics.join(', ') : '(none)'] };
     case 'deprecateConcept':
-      return { verb: 'Deprecate', tone: 'deprecate', title: `“${label(op.iri)}”: ${op.reason}${op.replacedBy ? `, use “${label(op.replacedBy)}” instead` : ''}`, lines: [] };
+      return { verb: 'Deprecate code', tone: 'deprecate', title: label(op.iri), lines: [op.reason, ...(op.replacedBy ? [`Replaced by ${label(op.replacedBy)}`] : [])] };
     case 'deprecateTerm':
       return { verb: 'Deprecate', tone: 'deprecate', title: label(op.iri), lines: [op.reason, ...(op.replacedBy ? [`Replaced by ${label(op.replacedBy)}`] : [])] };
     case 'removeTerm':

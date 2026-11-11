@@ -1328,15 +1328,16 @@ it('renders governed code lists with nested codes, escaped definitions, deprecat
   expect(html).toContain('id="PageActivities"');
   expect(html).toContain('id="page-outdoor"');
   expect(html).toMatch(/id="page-outdoor"[^]*?<ul><li id="page-gardening"/);
+  expect(html).toContain('<a class="code-label" href="#page-gardening">page gardening</a>');
   // Code fragments must live in their list's article, so public navigation can reveal them.
   expect(html).toMatch(/<article[^>]*id="PageActivities"[^]*?id="page-gardening"[^]*?<\/article>/);
   expect(html).toContain('aria-label="Codes in page activities"');
-  expect(html).toContain('<code>GARD</code>');
+  expect(html).toContain('<code class="notation" title="Code">GARD</code>');
   const property = html.match(/id="pageActivity"[^]*?<\/article>/)![0];
   expect(property).toContain('Values from code list');
   expect(property).not.toContain('Any (unconstrained)');
   expect(html).toContain('&lt;Plants&gt; &amp; gardens');
-  expect(html).toMatch(/id="page-gardening"[^]*?<strong>Deprecated<\/strong>/);
+  expect(html).toMatch(/id="page-gardening"[^]*?<span class="kind kind-deprecated">Deprecated<\/span>/);
   const anchors = termAnchors(input.view, ns);
   expect(anchors.get(ns + 'page-gardening')).toBe('page-gardening');
 });

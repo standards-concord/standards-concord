@@ -200,7 +200,7 @@ function TermDetailPanel({
       {t.comment && <p className="mt-2 text-sm text-muted">{t.comment}</p>}
 
       {/* Always visible: what it is and where it sits. Everything else is grouped below. */}
-      <dl className="mt-4 divide-y divide-line border-t border-line">
+      <dl className={cx('mt-4 divide-y divide-line', t.kind !== 'conceptScheme' && 'border-t border-line')}>
         {t.kind === 'class' && (
           <>
             <Row k="Subclass of">

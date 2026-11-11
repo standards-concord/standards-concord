@@ -33,12 +33,12 @@ describe('code list change request previews', () => {
   const labels: Record<string, string> = { list: 'Activity types', parent: 'outdoor', code: 'gardening', property: 'has activity type', replacement: 'planting' };
   const label = (iri: string) => labels[iri] ?? iri;
   it('names the new code, notation, parent and list', () => {
-    expect(describeOp({ op: 'addConcept', localName: 'gardening', label: 'gardening', definition: 'Growing plants.', notation: 'GARD', scheme: 'list', broader: 'parent' }, label)).toMatchObject({ verb: 'Add code', title: '“gardening” (GARD) under “outdoor” to “Activity types”' });
+    expect(describeOp({ op: 'addConcept', localName: 'gardening', label: 'gardening', definition: 'Growing plants.', notation: 'GARD', scheme: 'list', broader: 'parent' }, label)).toMatchObject({ verb: 'Add code', title: 'gardening', lines: ['In “Activity types”, under “outdoor”', 'Code: GARD', 'Growing plants.'] });
   });
   it('explains moving, deprecating and using a list for a property', () => {
-    expect(describeOp({ op: 'moveConcept', iri: 'code', broader: null }, label).title).toBe('“gardening” to the top level');
-    expect(describeOp({ op: 'deprecateConcept', iri: 'code', reason: 'Too broad', replacedBy: 'replacement' }, label).title).toBe('“gardening”: Too broad, use “planting” instead');
-    expect(describeOp({ op: 'setCodeList', property: 'property', scheme: 'list' }, label)).toMatchObject({ verb: 'Values of', title: '“has activity type” come from “Activity types”' });
+    expect(describeOp({ op: 'moveConcept', iri: 'code', broader: null }, label)).toMatchObject({ verb: 'Move code', title: 'gardening', lines: ['Now at the top level'] });
+    expect(describeOp({ op: 'deprecateConcept', iri: 'code', reason: 'Too broad', replacedBy: 'replacement' }, label)).toMatchObject({ verb: 'Deprecate code', title: 'gardening', lines: ['Too broad', 'Replaced by planting'] });
+    expect(describeOp({ op: 'setCodeList', property: 'property', scheme: 'list' }, label)).toMatchObject({ verb: 'Use code list', title: 'Activity types', lines: ['For the values of “has activity type”'] });
     expect(describeOp({ op: 'updateConcept', iri: 'code', set: { notation: 'NEW', altLabels: ['growing'] } }, label).lines).toEqual(['Code: NEW', 'Also known as: growing']);
   });
 });

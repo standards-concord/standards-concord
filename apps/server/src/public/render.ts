@@ -256,7 +256,8 @@ export function renderOntologyPage(input: OntologyPageInput): string {
       const anchorAttribute = anchoredCodes.has(code.iri) ? '' : ` id="${esc(anchor)}"`;
       anchoredCodes.add(code.iri);
       const children = codes.filter((c) => c.broader.includes(code.iri)).map(branch).join('');
-      return `<li${anchorAttribute} data-kind="concept"><a href="#${esc(fragment(anchor))}"><code>${esc(code.notation ?? localName(code.iri))}</code></a> — ${esc(nameOf(code))}${code.deprecated ? ' <strong>Deprecated</strong>' : ''}${code.definition ? `<p>${esc(code.definition)}</p>` : ''}${children ? `<ul>${children}</ul>` : ''}</li>`;
+      // The label links to the code's own anchor; the notation (the value data stores) sits beside it.
+      return `<li${anchorAttribute} data-kind="concept"${code.deprecated ? ' class="is-deprecated"' : ''}><div class="code-head"><a class="code-label" href="#${esc(fragment(anchor))}">${esc(nameOf(code))}</a>${code.notation ? ` <code class="notation" title="Code">${esc(code.notation)}</code>` : ''}${code.deprecated ? ` <span class="kind kind-deprecated">Deprecated</span>${code.replacedBy ? ` <span class="code-replaced">use ${ref(code.replacedBy)}</span>` : ''}` : ''}</div>${code.definition ? `<p class="code-def">${esc(code.definition)}</p>` : ''}${children ? `<ul>${children}</ul>` : ''}</li>`;
     };
     const roots = codes.filter((c) => !c.broader.some((iri) => codeIris.has(iri)));
     const body = roots.map(branch).join('') + codes.filter((c) => !rendered.has(c.iri)).map(branch).join('');

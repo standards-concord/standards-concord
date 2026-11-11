@@ -42,18 +42,25 @@ function NewCodeRows({ rows, setRows, codes, namespace, view, reserved = [] }: {
       const error = localError(local(r), false, namespace, view, [...reserved, ...rows.filter((x) => x.key !== r.key).map(local)]);
       const duplicate = !!r.notation.trim() && [...codes.map((c) => c.notation), ...rows.filter((x) => x.key !== r.key).map((x) => x.notation.trim())].includes(r.notation.trim());
       return <fieldset key={r.key} className="space-y-3 border-t border-line pt-3">
-        <legend className="px-1 text-sm font-medium">New code {i + 1}</legend>
-        <Field label="Label"><Input required value={r.label} onChange={(e) => set({ label: e.target.value })} /></Field>
-        <Field label="Definition"><Textarea required rows={2} value={r.definition} onChange={(e) => set({ definition: e.target.value })} /></Field>
-        <Field label="Code" hint="Optional code, such as GARD."><Input value={r.notation} aria-invalid={duplicate} onChange={(e) => set({ notation: e.target.value })} /></Field>
+        <legend className="sr-only">New code {i + 1}</legend>
+        <div className="flex items-center justify-between gap-2">
+          <span aria-hidden className="text-sm font-medium">New code {i + 1}</span>
+          {rows.length > 1 && <Button type="button" size="sm" variant="ghost" icon={X} aria-label={`Remove new code ${i + 1}`} title={`Remove new code ${i + 1}`} onClick={() => setRows(rows.filter((x) => x.key !== r.key).map((x) => x.parent === `new:${r.key}` ? { ...x, parent: '' } : x))} />}
+        </div>
+        <div className="grid gap-3 sm:grid-cols-[1fr_10rem]">
+          <Field label="Label"><Input required value={r.label} onChange={(e) => set({ label: e.target.value })} /></Field>
+          <Field label="Code (optional)"><Input value={r.notation} aria-invalid={duplicate} placeholder="e.g. GARD" onChange={(e) => set({ notation: e.target.value })} /></Field>
+        </div>
         {duplicate && <p className="text-xs text-danger">This code is already used in the list.</p>}
-        <Field label="Parent"><Select value={r.parent} onChange={(e) => set({ parent: e.target.value })}>
-          <option value="">Top level</option>
-          {codes.map((c) => <option key={c.iri} value={c.iri}>{c.label ?? c.iri}</option>)}
-          {rows.slice(0, i).map((x) => <option key={x.key} value={`new:${x.key}`}>{x.label || `New code ${rows.indexOf(x) + 1}`}</option>)}
-        </Select></Field>
-        <LocalName name={local(r)} onChange={(localName) => set({ localName })} error={r.label ? error : undefined} namespace={namespace} />
-        <Button type="button" size="sm" variant="ghost" icon={X} aria-label={`Remove new code ${i + 1}`} onClick={() => setRows(rows.filter((x) => x.key !== r.key).map((x) => x.parent === `new:${r.key}` ? { ...x, parent: '' } : x))}>Remove code</Button>
+        <Field label="Definition"><Textarea required rows={2} value={r.definition} onChange={(e) => set({ definition: e.target.value })} /></Field>
+        <div className="grid gap-3 sm:grid-cols-2 sm:items-start">
+          <Field label="Parent"><Select value={r.parent} onChange={(e) => set({ parent: e.target.value })}>
+            <option value="">Top level</option>
+            {codes.map((c) => <option key={c.iri} value={c.iri}>{c.label ?? c.iri}</option>)}
+            {rows.slice(0, i).map((x) => <option key={x.key} value={`new:${x.key}`}>{x.label || `New code ${rows.indexOf(x) + 1}`}</option>)}
+          </Select></Field>
+          <div className="sm:pt-7"><LocalName name={local(r)} onChange={(localName) => set({ localName })} error={r.label ? error : undefined} namespace={namespace} /></div>
+        </div>
       </fieldset>;
     })}
     <Button type="button" size="sm" variant="ghost" icon={Plus} disabled={rows.length >= 48} onClick={() => setRows([...rows, blankRow(counter.current++)])}>Add another code</Button>
@@ -109,7 +116,7 @@ export function ProposeCodesForm({ scheme, onCancel, onProposed }: { scheme?: Co
     if (alive.current) onProposed(cr);
   });
   return <form ref={ref} aria-label={scheme ? 'Propose codes' : 'New code list'} className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (valid) void save.run(true); }}>
-    <h2 className="text-lg font-semibold">{scheme ? `Propose codes for “${scheme.label}”` : 'New code list'}</h2>
+    {scheme ? <h3 className="text-base font-semibold">Propose codes for “{scheme.label}”</h3> : <h2 className="text-lg font-semibold">New code list</h2>}
     <p className="text-sm text-muted">Your edit is proposed as a change request; the published ontology and the working draft stay as they are until it is approved and merged.</p>
     {!scheme && <>
       <Field label="Name"><Input required value={name} onChange={(e) => setName(e.target.value)} /></Field>
@@ -165,14 +172,25 @@ export function CodeListContents({ scheme, onSelect, onProposed, refreshKey }: {
     })}
   </ul>;
   return <>
-    <div className="mt-4 border-t border-line py-3 text-sm"><span className="mr-4 text-xs font-medium text-muted">Values for</span>
-      {properties.length ? properties.map((p, i) => <span key={p.iri}>{i > 0 && ', '}<button className="text-accent hover:underline" onClick={() => onSelect(p.iri)}>{label(p.iri)}</button></span>) : 'No property uses this list yet.'}
-      {session?.user && <Button size="sm" variant="ghost" onClick={() => setUsing(!using)}>Use for a property</Button>}
-      {using && <form aria-label="Use for a property" className="mt-3 space-y-2" onSubmit={(e) => { e.preventDefault(); if (property) void saveUse.run(); }}>
-        <Field label="Property"><Select value={property} onChange={(e) => setProperty(e.target.value)}><option value="">Choose a property</option>{available.map((p) => <option key={p.iri} value={p.iri}>{label(p.iri)}</option>)}</Select></Field>
-        <InlineError error={saveUse.error} /><Button type="button" variant="ghost" onClick={() => setUsing(false)}>Cancel</Button><Button type="submit" size="sm" disabled={!property} loading={saveUse.pending}>Propose change</Button>
-      </form>}
-    </div>
+    {/* Same layout as the always-visible rows on other terms' panels. */}
+    <dl className="border-t border-line">
+      <div className="grid gap-1 py-2.5 sm:grid-cols-[160px_1fr] sm:items-baseline sm:gap-4">
+        <dt className="text-xs font-medium text-muted">Values for</dt>
+        <dd className="text-sm">
+          <span className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            {properties.length ? properties.map((p, i) => <span key={p.iri}><button type="button" className="text-left text-accent hover:underline" onClick={() => onSelect(p.iri)}>{label(p.iri)}</button>{i < properties.length - 1 && <span className="text-muted">,</span>}</span>) : <span className="text-muted">No property uses this list yet.</span>}
+            {session?.user && !using && available.length > 0 && <Button size="sm" variant="ghost" icon={Plus} onClick={() => setUsing(true)}>Use for a property</Button>}
+          </span>
+          {using && <form aria-label="Use for a property" className="mt-3 flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (property) void saveUse.run(); }}>
+            <Field label="Property" className="min-w-56 flex-1"><Select value={property} onChange={(e) => setProperty(e.target.value)}><option value="">Choose a property</option>{available.map((p) => <option key={p.iri} value={p.iri}>{label(p.iri)}</option>)}</Select></Field>
+            <Button type="button" variant="ghost" onClick={() => setUsing(false)}>Cancel</Button>
+            <Button type="submit" variant="primary" disabled={!property} loading={saveUse.pending}>Propose change</Button>
+            <p className="w-full text-xs text-muted">Data that already uses this property with other values would stop passing the checks, so this is reviewed as a major change.</p>
+            <InlineError error={saveUse.error} />
+          </form>}
+        </dd>
+      </div>
+    </dl>
     <Disclosure title="Codes" summary={codes.length} defaultOpen className="border-t border-line pt-3" heading={3}>
       {codes.length > 15 && <Field label="Filter codes"><Input value={filter} onChange={(e) => setFilter(e.target.value)} /></Field>}
       {tree(codes.filter((c) => !c.broader.some((p) => byIri.has(p))), true)}
