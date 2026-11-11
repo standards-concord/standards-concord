@@ -34,7 +34,7 @@ title: Concord: designing data standards together
 ## Welcome {#intro}
 
 [do: title-card]
-Hi, and welcome to Concord. It's a prototype from the Open Data Institute for designing data standards together, in the open.
+Hi, and welcome to Concord: an Open Data Institute prototype for designing data standards together, in the open.
 
 [do: open-hub]
 [if: jsClasses]
