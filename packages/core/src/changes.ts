@@ -297,6 +297,9 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     case 'moveConcept': {
       const iri = requireTerm(notRecorded(ex(op.iri)));
       const code = requireCode(iri);
+      if (op.expect && (code.broader[0] ?? null) !== (op.expect.broader === null ? null : ex(op.expect.broader))) {
+        fail(`the parent of <${iri}> has changed since this edit was proposed; revise the edit against the current parent`);
+      }
       if (!code.inScheme.length) fail('code has no scheme');
       const broader = op.broader === null ? null : ex(op.broader);
       if (broader) checkBroader(iri, code.inScheme, broader);

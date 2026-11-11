@@ -90,7 +90,7 @@ Each flow is tested as someone allowed to do it and, where the UI hides or refus
 
 | Flow | Status | Specs |
 | --- | --- | --- |
-| Code list with nested codes and property association → minor request → owner approval and manual merge → Browse hierarchy and property range; code addition → notation major warning and draft → deprecation with replacement and merge | ✅ | code-lists |
+| Code list with nested codes attached to an existing property → major request → owner approval and manual merge → Browse hierarchy and property range; code addition → notation major warning and draft → deprecation with replacement and merge | ✅ | code-lists |
 | Plain-language request → drafted edits → submit → classified and validated | ✅ | change-requests |
 | Checking with imports: a change is reasoned over with every ontology it imports (hosted on Concord, latest release or draft, held versions never loaded), passes when consistent, fails a class an import makes impossible and names that import, lists imports not on Concord as not checked, warns about statements on imported terms; proposing an import from the Overview; signed out refused | ✅ | imports (API detail in `apps/server/test/imports.test.ts`, core in `packages/core/test/imports.test.ts`) |
 | Across federations: a change to an ontology that follows its draft in a federation shows what it does there (advice, or failing the change when the ontology is committed); the Overview lists the federations an ontology is in; federations that pin a release are left alone | ✅ | federations (API detail in `apps/server/test/federations.test.ts`, core in `packages/core/test/federation.test.ts`) |

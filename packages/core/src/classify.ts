@@ -273,7 +273,9 @@ export function classifyChange(diff: OntologyDiff, before?: OntologyGraph, after
           emit('metadata-changed', t.iri, `metadata of ${name} changed`);
           break;
       }
-      if (isDeprecation) continue; // OBO obsoletion strips logical axioms from the old term; that is part of the deprecation.
+      // OBO obsoletion strips logical axioms, but codes retain their notation and hierarchy.
+      // Changes to those still break consumers even when the code is deprecated too.
+      if (isDeprecation && !['notation', 'broader', 'inScheme', 'topConceptOf'].includes(f.field)) continue;
 
       switch (f.field) {
         case 'notation':
@@ -284,11 +286,9 @@ export function classifyChange(diff: OntologyDiff, before?: OntologyGraph, after
           if (!reasons.some((r) => r.rule === 'code-moved' && r.iri === t.iri)) emit('code-moved', t.iri, `code ${name} moved: ${t.details.filter((d) => /^(broader|inScheme|topConceptOf):/.test(d)).join('; ')}`);
           break;
         case 'codeList':
-          if (!f.removed.length && f.added.length && f.added.every(isNew)) {
-            emit('axiom-relates-new-term', t.iri, `${name} takes codes from new code list ${list(f.added)}`);
-          } else {
-            emit(f.added.length ? 'code-list-set' : 'code-list-cleared', t.iri, `code list of ${name}: ${list(f.removed) || '∅'} → ${list(f.added) || '∅'}`);
-          }
+          // Added properties were handled above. Narrowing an existing one is breaking,
+          // regardless of whether the list is also new in this change.
+          emit(f.added.length ? 'code-list-set' : 'code-list-cleared', t.iri, `code list of ${name}: ${list(f.removed) || '∅'} → ${list(f.added) || '∅'}`);
           break;
         case 'superClasses':
           for (const r of f.removed) emit('superclass-removed', t.iri, `${name} is no longer a subclass of ${c(r)}`);

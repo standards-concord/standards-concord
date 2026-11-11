@@ -122,7 +122,7 @@ export function ProposeCodesForm({ scheme, onCancel, onProposed }: { scheme?: Co
       <Field label="Name"><Input required value={name} onChange={(e) => setName(e.target.value)} /></Field>
       <Field label="Definition"><Textarea required rows={3} value={definition} onChange={(e) => setDefinition(e.target.value)} /></Field>
       <LocalName name={schemeName} onChange={setCustomName} error={name ? error : undefined} namespace={namespace} />
-      <Field label="Use for property"><Select value={property} onChange={(e) => setProperty(e.target.value)}><option value="">Choose later</option>{v.objectProperties.map((p) => <option key={p.iri} value={p.iri}>{p.label ?? p.iri}</option>)}</Select></Field>
+      <Field label="Use for property" hint="Data that already uses this property with other values would stop passing the checks, so this makes the change major."><Select value={property} onChange={(e) => setProperty(e.target.value)}><option value="">Choose later</option>{v.objectProperties.map((p) => <option key={p.iri} value={p.iri}>{p.label ?? p.iri}</option>)}</Select></Field>
     </>}
     <NewCodeRows rows={rows} setRows={setRows} codes={codes} namespace={namespace} view={v} reserved={!scheme ? [schemeName] : []} />
     {!rows.length && <p className="text-sm text-danger">Add at least one code.</p>}
@@ -234,7 +234,7 @@ export function CodeEditForm({ term, onCancel, onProposed }: { term: ConceptView
     for (const f of annotationFields) if (changed.includes(f)) { Object.assign(set, { [f]: clean(form[f]) }); Object.assign(previous, { [f]: baseline[f] }); }
     const ops: CodeListEditOp[] = [];
     if (Object.keys(set).length) ops.push({ op: 'updateConcept', iri: term.iri, set, previous, definitionIntent: rewords ? intent : undefined });
-    if (changed.includes('parent')) ops.push({ op: 'moveConcept', iri: term.iri, broader: form.parent || null });
+    if (changed.includes('parent')) ops.push({ op: 'moveConcept', iri: term.iri, broader: form.parent || null, previous: { broader: baseline.parent || null } });
     if (deprecating) ops.push({ op: 'deprecateConcept', iri: term.iri, reason: deprecationReason.trim(), replacedBy: replacement || undefined });
     const cr = await api.proposeCodeListEdit(id, { ops, submit, reason: reason.trim() || undefined });
     if (alive.current) onProposed(cr);

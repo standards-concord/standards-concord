@@ -823,14 +823,14 @@ export type TermEditInput = {
 /**
  * POST /api/ontologies/:id/code-list-edits. Up to 50 operations, applied in order
  * to a dry-run draft, then proposed as one governed editorial change request.
- * For updates, send `previous` for the fields edited; the server checks it
+ * For updates and moves, send `previous` for the fields edited; the server checks it
  * against the draft (409 when stale) and records `expect` itself for merge safety.
- * Strings have a 4,000-character limit, lists at most 50 entries.
+ * New values have a 4,000-character limit, lists at most 50 entries; baselines are not size-limited.
  */
-export type CodeListEditOp = Exclude<CodeListOp, { op: 'updateConcept' }> | {
+export type CodeListEditOp = Exclude<CodeListOp, { op: 'updateConcept' | 'moveConcept' }> | {
   op: 'updateConcept'; iri: string; set: ConceptAnnotations; previous?: ConceptAnnotations;
   definitionIntent?: 'same-meaning' | 'new-meaning';
-};
+} | { op: 'moveConcept'; iri: string; broader: string | null; previous?: { broader: string | null } };
 export interface CodeListEditInput {
   ops: CodeListEditOp[];
   reason?: string;

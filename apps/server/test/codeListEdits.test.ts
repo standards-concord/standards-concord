@@ -25,6 +25,32 @@ beforeEach(() => {
 });
 
 describe('code list proposal service', () => {
+  // Imported baseline text/items used to be rejected by the limits intended for new values.
+  it('allows shortening oversized existing annotations while limiting replacement values', async () => {
+    const definition = 'x'.repeat(4001);
+    const altLabels = Array.from({ length: 51 }, (_, i) => i === 0 ? 'a'.repeat(4001) : `Alternative ${i}`);
+    const g = applyChangeOps(empty(), [scheme, { ...code, definition, altLabels }]).graph;
+    mocks.working.mockResolvedValue(g);
+    const cr = await run({ ops: [{ op: 'updateConcept', iri: ns + 'garden', set: { definition: 'Growing plants', altLabels: ['Gardening'] }, previous: { definition, altLabels }, definitionIntent: 'same-meaning' }] });
+    expect(cr.ops[0]).toMatchObject({ set: { definition: 'Growing plants', altLabels: ['Gardening'] }, expect: { definition, altLabels: [...altLabels].sort() } });
+    expect(applyChangeOps(g, cr.ops).graph.term(ns + 'garden')?.definition).toBe('Growing plants');
+    await expect(run({ ops: [{ op: 'updateConcept', iri: ns + 'garden', set: { definition } }] })).rejects.toMatchObject({ status: 400 });
+    await expect(run({ ops: [{ op: 'updateConcept', iri: ns + 'garden', set: { altLabels } }] })).rejects.toMatchObject({ status: 400 });
+  });
+  // A stale parent selection used to be accepted and overwrite a newer move.
+  it('returns 409 for stale parent baselines and records the working parent itself', async () => {
+    const g = applyChangeOps(empty(), [scheme, code, { ...code, localName: 'outdoor', notation: 'OUT' }, { ...code, localName: 'indoor', notation: 'IN' }, { op: 'moveConcept', iri: ns + 'garden', broader: ns + 'outdoor' }]).graph;
+    mocks.working.mockResolvedValue(g);
+    const move = { op: 'moveConcept', iri: ns + 'garden', broader: ns + 'indoor' };
+    await expect(run({ ops: [{ ...move, previous: { broader: null } }] })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/parent.*changed since/) });
+    expect(mocks.create).not.toHaveBeenCalled();
+    const cr = await run({ ops: [{ ...move, previous: { broader: 'ex:outdoor' } }] });
+    expect(cr.ops[0]).toEqual({ ...move, expect: { broader: ns + 'outdoor' } });
+    const withoutBaseline = await run({ ops: [move] });
+    expect(withoutBaseline.ops[0]).toEqual({ ...move, expect: { broader: ns + 'outdoor' } });
+    const sequential = await run({ ops: [{ ...move, broader: null }, { ...move, previous: { broader: null } }] });
+    expect(sequential.ops[1]).toEqual({ ...move, expect: { broader: null } });
+  });
   it('dry runs dependent operations and creates one editorial request, enrolling contributors', async () => {
     const g = empty();
     mocks.working.mockResolvedValue(g);
@@ -77,6 +103,8 @@ describe('code list proposal service', () => {
     { ops: [{ op: 'setCodeList', property: ns + 'activity', scheme: [] }] },
     { ops: [{ op: 'updateConcept', iri: ns + 'garden', set: {} }] },
     { ops: [{ op: 'updateConcept', iri: ns + 'garden', set: { label: 'x' }, expect: {} }] },
+    { ops: [{ op: 'moveConcept', iri: ns + 'garden', broader: null, expect: { broader: null } }] },
+    { ops: [{ op: 'moveConcept', iri: ns + 'garden', broader: null, previous: {} }] },
   ])('rejects invalid input before creating a request %#', async (input) => {
     await expect(run(input)).rejects.toMatchObject({ status: 400 });
     expect(mocks.create).not.toHaveBeenCalled();

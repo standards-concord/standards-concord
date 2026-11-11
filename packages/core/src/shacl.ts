@@ -123,7 +123,8 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       if (p.deprecated || !domainMembers(graph, p.iri).includes(k.iri)) continue;
       const ps = get(p.iri);
       const r = p.range[0];
-      if (r && p.range.length === 1) {
+      // Membership supplies the code-list range; independent restrictions still apply below.
+      if (r && p.range.length === 1 && !p.codeList) {
         if (isDatatype(graph, r)) ps.datatype = r;
         else ps.cls = r;
         ps.fromRange = true;
@@ -135,9 +136,6 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       const codeList = props.get(ps.path)?.codeList;
       if (codeList) {
         ps.in = v.concepts.filter((c) => c.inScheme.includes(codeList)).map((c) => c.iri).sort();
-        delete ps.cls;
-        delete ps.datatype;
-        delete ps.alsoTypes;
         ps.codeType = { datatype: NS.xsd + 'anyURI' };
       }
       combineDatatypes(k.iri, ps, defs, notes);

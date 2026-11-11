@@ -128,7 +128,7 @@ export type CodeListOp =
   | ({ op: 'addConceptScheme' } & Pick<NewTermFields, 'localName' | 'label' | 'definition' | 'altLabels' | 'editorialNote' | 'source'>)
   | ({ op: 'addConcept'; scheme: IRI; notation?: string; broader?: IRI } & Pick<NewTermFields, 'localName' | 'label' | 'definition' | 'altLabels' | 'examples' | 'editorialNote' | 'source'>)
   | { op: 'updateConcept'; iri: IRI; set: ConceptAnnotations; expect?: ConceptAnnotations }
-  | { op: 'moveConcept'; iri: IRI; broader: IRI | null }
+  | { op: 'moveConcept'; iri: IRI; broader: IRI | null; expect?: { broader: IRI | null } }
   | { op: 'deprecateConcept'; iri: IRI; reason: string; replacedBy?: IRI }
   | { op: 'setCodeList'; property: IRI; scheme: IRI | null };
 

@@ -177,9 +177,17 @@ export function toLinkML(graph: OntologyGraph): string {
 
   const enums: Obj = {};
   for (const scheme of v.conceptSchemes.filter((t) => isLocal(t.iri))) {
+    const keys = new Set<string>();
+    const permissibleValues = v.concepts.filter((c) => c.inScheme.includes(scheme.iri)).map((code) => {
+      const base = code.notation ?? name(code.iri);
+      let key = base;
+      for (let suffix = 2; keys.has(key); suffix++) key = `${base}-${suffix}`;
+      keys.add(key);
+      return [key, clean({ meaning: code.iri, description: code.definition })];
+    });
     enums[name(scheme.iri)] = clean({
       enum_uri: curie(scheme.iri), description: scheme.definition,
-      permissible_values: Object.fromEntries(v.concepts.filter((c) => c.inScheme.includes(scheme.iri)).map((code) => [code.notation ?? name(code.iri), clean({ meaning: code.iri, description: code.definition })])),
+      permissible_values: Object.fromEntries(permissibleValues),
     });
   }
   for (const [iri, members] of enumMembers) {

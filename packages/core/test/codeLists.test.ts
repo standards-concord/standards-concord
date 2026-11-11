@@ -163,6 +163,19 @@ describe('governed code list operations', () => {
     expect(() => apply(two, codeOp('bad', { broader: I('active') }))).toThrow(/same scheme/);
   });
 
+  // Parent edits used to overwrite an intervening move without checking their baseline.
+  it('checks the expected parent against each sequential move, including roots and CURIEs', () => {
+    const g = governed();
+    const moved = apply(g, { op: 'moveConcept', iri: I('indoor'), broader: I('outdoor'), expect: { broader: null } });
+    expect(() => apply(moved, { op: 'moveConcept', iri: I('indoor'), broader: I('gardening'), expect: { broader: null } })).toThrow(/parent.*changed since/);
+    const root = apply(moved, { op: 'moveConcept', iri: I('indoor'), broader: null, expect: { broader: 'ex:outdoor' } });
+    expect(root.term(I('indoor'))).toMatchObject({ broader: [] });
+    expect(() => apply(g,
+      { op: 'moveConcept', iri: I('indoor'), broader: I('outdoor'), expect: { broader: null } },
+      { op: 'moveConcept', iri: I('indoor'), broader: I('gardening'), expect: { broader: null } },
+    )).toThrow(/parent.*changed since/);
+  });
+
   it('deprecates without losing scheme membership; replacement must be a different code in the same scheme', () => {
     const g = governed();
     expect(apply(g, { op: 'deprecateConcept', iri: I('gardening'), reason: 'Use the broader code', replacedBy: I('outdoor') }).term(I('gardening'))).toMatchObject({ deprecated: true, replacedBy: I('outdoor'), inScheme: [I('ActivityTypes')] });
@@ -206,6 +219,16 @@ describe('governed code list operations', () => {
 });
 
 describe('code list classification', () => {
+  // Deprecating a code used to hide simultaneous breaking notation and parent edits.
+  it('reports notation changes and moves even when the same request deprecates the code', () => {
+    const result = rules(governed(),
+      { op: 'updateConcept', iri: I('gardening'), set: { notation: 'NEW' } },
+      { op: 'moveConcept', iri: I('gardening'), broader: I('indoor') },
+      { op: 'deprecateConcept', iri: I('gardening'), reason: 'Retired', replacedBy: I('outdoor') },
+    );
+    expect(result.level).toBe('major');
+    expect(result.reasons.map((r) => r.rule)).toEqual(expect.arrayContaining(['code-notation-changed', 'code-moved', 'term-deprecated']));
+  });
   it('uses dedicated minor addition rules, including widening a used list', () => {
     expect(rules(empty(), schemeOp).reasons.map((r) => r.rule)).toEqual(['code-list-added']);
     expect(rules(governed(), codeOp('new')).reasons.map((r) => r.rule)).toEqual(['code-added']);
@@ -223,15 +246,26 @@ describe('code list classification', () => {
     expect(c.level).toBe(level);
     expect(c.reasons.map((r) => r.rule)).toEqual([rule]);
   });
-  // Creating a list and its first property association used to classify as major,
-  // unlike other axioms that only relate an existing term to newly added terms.
-  it('classifies a newly created list and its first property association as minor', () => {
-    const before = apply(empty(), { op: 'addClass', localName: 'Activity', label: 'activity', definition: 'An activity' }, { op: 'addObjectProperty', localName: 'activity', label: 'activity', definition: 'Activity', range: [I('Activity')] });
-    const result = rules(before, schemeOp, codeOp('outdoor'), { op: 'setCodeList', property: I('activity'), scheme: I('ActivityTypes') });
-    expect(result.level).toBe('minor');
-    expect(result.reasons.map((r) => r.rule)).toContain('axiom-relates-new-term');
+  // A new list used to receive minor governance even when it rejected existing data.
+  it('makes a new list on an existing property major because previously valid data can fail', async () => {
+    const before = apply(empty(), { op: 'addClass', localName: 'Event', label: 'event', definition: 'An event' }, { op: 'addObjectProperty', localName: 'activity', label: 'activity', definition: 'Activity', domain: [I('Event')] });
+    const after = apply(before, schemeOp, codeOp('outdoor'), { op: 'setCodeList', property: I('activity'), scheme: I('ActivityTypes') });
+    const data = `<https://data.example/event> a <${I('Event')}> ; <${I('activity')}> <https://other.example/activity> .`;
+    const opts = { baseIRI: 'https://data.example/', maxTriples: 100 };
+    expect((await checkData(await prepareOntology(before, await toShacl(before)), data, 'turtle', opts)).valid).toBe(true);
+    expect((await checkData(await prepareOntology(after, await toShacl(after)), data, 'turtle', opts)).valid).toBe(false);
+    const result = classifyChange(diffOntologies(before, after), before, after);
+    expect(result.level).toBe('major');
+    expect(result.reasons.map((r) => r.rule)).toContain('code-list-set');
     // Replacing an existing controlled list still changes what data is accepted.
     expect(rules(governed(), { ...schemeOp, localName: 'NewActivities' }, { op: 'setCodeList', property: I('activity'), scheme: I('NewActivities') }).level).toBe('major');
+  });
+  it('keeps a code-list association minor when the property is created in the same change', () => {
+    for (const before of [empty(), apply(empty(), schemeOp)]) {
+      const ops: ChangeOp[] = before.term(I('ActivityTypes')) ? [] : [schemeOp];
+      ops.push({ op: 'addObjectProperty', localName: 'activity', label: 'activity', definition: 'Activity' }, { op: 'setCodeList', property: I('activity'), scheme: I('ActivityTypes') });
+      expect(rules(before, ...ops).level).toBe('minor');
+    }
   });
   it('classifies scheme removal and property code-list additions/changes', () => {
     expect(rules(apply(empty(), schemeOp), { op: 'removeTerm', iri: I('ActivityTypes') }).reasons.map((r) => r.rule)).toEqual(['code-list-removed']);
@@ -312,6 +346,33 @@ describe('SKOS lint', () => {
 });
 
 describe('code list exports and data checking', () => {
+  // Enumeration derivation used to erase explicit only restrictions as well as the range type.
+  it('requires both list membership and independent class restrictions in checkData', async () => {
+    const g = apply(governed(),
+      { op: 'addClass', localName: 'Special', label: 'special', definition: 'Special activities' },
+      { op: 'addClass', localName: 'Approved', label: 'approved', definition: 'Approved activities' },
+      { op: 'addRestriction', classIri: I('Event'), restriction: { kind: 'only', property: I('activity'), filler: I('Special') } },
+      { op: 'addRestriction', classIri: I('Event'), restriction: { kind: 'only', property: I('activity'), filler: I('Approved') } },
+    );
+    const prepared = await prepareOntology(g, await toShacl(g));
+    const opts = { baseIRI: 'https://data.example/', maxTriples: 100 };
+    const data = (value: string, types: string[] = []) => `<https://data.example/event> a <${I('Event')}> ; <${I('activity')}> <${value}> . ${types.map((t) => `<${value}> a <${I(t)}> .`).join(' ')}`;
+    expect((await checkData(prepared, data(I('gardening')), 'turtle', opts)).valid).toBe(false);
+    expect((await checkData(prepared, data(I('gardening'), ['Special']), 'turtle', opts)).valid).toBe(false);
+    expect((await checkData(prepared, data(I('gardening'), ['Special', 'Approved']), 'turtle', opts)).valid).toBe(true);
+    expect((await checkData(prepared, data('https://other.example/unknown', ['Special', 'Approved']), 'turtle', opts)).valid).toBe(false);
+  });
+
+  // Notation/fallback key collisions used to silently drop one concept from the enum.
+  it('preserves every code meaning when LinkML enum notations and local names collide', () => {
+    const g = apply(empty(), schemeOp, codeOp('foo'), codeOp('bar', { notation: 'foo' }), codeOp('foo-2'), codeOp('baz', { notation: 'bar' }));
+    // Imported codes can also have the same local name in different namespaces.
+    g.store.addQuads(g.store.getQuads(nn(I('foo')), null, null, null).map((q) => DataFactory.quad(nn('https://other.example/foo'), q.predicate, q.object)));
+    expect(lint(g, { strict: true }).filter((i) => i.severity === 'error')).toEqual([]);
+    const values = YAML.parse(toLinkML(g)).enums.ActivityTypes.permissible_values;
+    expect(Object.keys(values)).toHaveLength(5);
+    expect(Object.values(values).map((v: any) => v.meaning).sort()).toEqual([I('foo'), I('bar'), I('foo-2'), I('baz'), 'https://other.example/foo'].sort());
+  });
   it('derives sh:in with all codes, including deprecated codes, without sh:class', async () => {
     const g = apply(governed(), { op: 'deprecateConcept', iri: I('gardening'), reason: 'retired' });
     const derived = deriveShapes(g).shapes.find((s) => s.targetClass === I('Event'))!;

@@ -4,7 +4,7 @@ import { afterAll, beforeAll, expect, it, vi } from 'vitest';
 const priorStore = vi.hoisted(() => { const prior = process.env.ONTOLOGY_STORE; process.env.ONTOLOGY_STORE = 'db'; return prior; });
 import { openDb } from '../src/db.js';
 import { clock, DAY_MS } from '../src/clock.js';
-import { createProject, rolesFor, setRoles } from '../src/services/ontologies.js';
+import { createProject, rolesFor, setGovernance, setRoles } from '../src/services/ontologies.js';
 import { createUser } from '../src/services/users.js';
 import { proposeCodeListEdit } from '../src/services/codeListEdits.js';
 import { addReview, advance, getCR, merge } from '../src/services/changeRequests.js';
@@ -14,6 +14,45 @@ import { renderOntologyPage } from '../src/public/render.js';
 
 beforeAll(() => openDb());
 afterAll(() => { if (priorStore === undefined) delete process.env.ONTOLOGY_STORE; else process.env.ONTOLOGY_STORE = priorStore; });
+
+// Competing parent moves are a service race: a browser cannot control merge ordering reliably.
+// The second move used to silently overwrite the first after both were approved.
+it('sends a competing parent move back for revision after the first move merges', async () => clock.withShift(0, async () => {
+  const person = (name: string) => createUser({ name, provider: 'demo', subject: name });
+  const [owner, author, steward] = await Promise.all(['Move owner', 'Move author', 'Move steward'].map(person));
+  const project = await createProject({ title: 'Competing code moves', prefix: 'cm', description: 'Parent move conflicts', governanceTemplate: 'working-group' }, owner);
+  await setRoles(project.id, steward.id, ['steward']);
+  // Keep real approval rounds and auto-merges, with one steward deciding each level.
+  const policy = structuredClone(project.governance);
+  for (const level of ['patch', 'minor', 'major'] as const) {
+    Object.assign(policy.changes[level], { approverRoles: ['steward'], minApprovals: 1, reviewPeriodDays: 1 });
+    delete policy.changes[level].vote;
+  }
+  await setGovernance(project, policy, owner);
+  const ns = project.namespace;
+  const seed = await proposeCodeListEdit(project, author, { submit: true, ops: [
+    { op: 'addConceptScheme', localName: 'Codes', label: 'codes', definition: 'Controlled codes' },
+    ...['child', 'first', 'second'].map((localName) => ({ op: 'addConcept' as const, scheme: ns + 'Codes', localName, label: localName, definition: `The ${localName} code` })),
+  ] });
+  await addReview(seed, steward, 'approve', undefined, seed.round ?? 1);
+  clock.advance(2 * DAY_MS);
+  expect((await advance(await getCR(seed.id), steward)).status).toBe('merged');
+
+  const move = (parent: string) => proposeCodeListEdit(project, author, { submit: true, ops: [{ op: 'moveConcept', iri: ns + 'child', broader: ns + parent }] });
+  const first = await move('first');
+  const second = await move('second');
+  expect(first.classification?.level).toBe('major');
+  expect(second.validation?.passed).toBe(true);
+  await addReview(first, steward, 'approve', undefined, first.round ?? 1);
+  await addReview(second, steward, 'approve', undefined, second.round ?? 1);
+  clock.advance(2 * DAY_MS);
+  expect((await advance(await getCR(first.id), steward)).status).toBe('merged');
+  const failed = await advance(await getCR(second.id), steward);
+  expect(failed.status).toBe('needs-work');
+  expect(failed.validation?.lint).toContainEqual(expect.objectContaining({ code: 'change-not-applicable', message: expect.stringMatching(/parent.*changed since/) }));
+  expect((await ontologyStore.working(project)).term(ns + 'child')).toMatchObject({ broader: [ns + 'first'] });
+  await expect(proposeCodeListEdit(project, author, { ops: [{ op: 'moveConcept', iri: ns + 'child', broader: ns + 'second', previous: { broader: null } }] })).rejects.toMatchObject({ status: 409 });
+}));
 
 it('governs contributor code proposals through genuine review rounds and merges, and guards later stale edits', async () => clock.withShift(0, async () => {
   const person = (name: string) => createUser({ name, provider: 'demo', subject: name });

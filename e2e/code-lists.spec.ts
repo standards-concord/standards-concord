@@ -100,11 +100,11 @@ test('codes are proposed, reviewed and merged, then used in Browse, data checks 
   await form.getByLabel('Why this change? (optional)').fill('Keep event data consistent.');
   await form.getByRole('button', { name: 'Propose change' }).click();
   const firstId = await proposedId(page);
-  await expect(notice(page)).toContainText('Minor');
+  await expect(notice(page)).toContainText('Major');
   await expect(page.getByRole('button', { name: /^Code lists \(/ })).toHaveCount(0);
   await notice(page).getByRole('link', { name: /change request #/ }).click();
   await expect(page.getByRole('heading', { name: new RegExp(`Create the code list “${listName}”$`) })).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Level: minor/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Level: major/ })).toBeVisible();
   await expect(page.getByText(/Your approval is recorded but only/)).toBeVisible();
   await page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Approve', exact: true }).click();
   await expect(page.getByRole('button', { name: /^Status: In review/ })).toBeVisible();
@@ -311,5 +311,5 @@ test('code list forms validate IRIs, keep filtered ancestors, and recover confli
   await codeEdit.getByRole('button', { name: 'Save as draft' }).click();
   const major = await json(await page.request.get(`/api/change-requests/${await proposedId(page)}`));
   expect(major.classification.level).toBe('major');
-  expect(major.ops).toContainEqual({ op: 'moveConcept', iri: ns + 'status-1', broader: null });
+  expect(major.ops).toContainEqual({ op: 'moveConcept', iri: ns + 'status-1', broader: null, expect: { broader: ns + 'category' } });
 });
