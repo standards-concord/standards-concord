@@ -5,6 +5,7 @@ import type { Labeler } from '../../lib/ontology';
 import { cardText, isDatatype, slotCard, type OntologyModel, type Slot } from '../../lib/ontologyModel';
 import { downloadPng, downloadSvg } from '../../lib/exportSvg';
 import { datatypeName } from '../../lib/format';
+import { subclassEdgeKey, type ProposalPreview } from '../../lib/diagramProposals';
 import { clearTextWidths, svgTextWidth as textWidth } from '../../lib/measureText';
 import { wrapRows } from '../../lib/wrapText';
 import { cx } from '../ui';
@@ -32,6 +33,7 @@ interface BoxLine {
   rows: string[];
   inherited?: boolean;
   conflict?: boolean;
+  proposed?: boolean;
   iri: string;
 }
 
@@ -42,6 +44,7 @@ interface DNode {
   head: number;
   lines: BoxLine[];
   deprecated?: boolean;
+  proposed?: boolean;
   width: number;
   height: number;
   x: number;
@@ -56,6 +59,7 @@ interface DEdge {
   label?: string;
   property?: string;
   conflict?: boolean;
+  proposed?: boolean;
   points: { x: number; y: number }[];
   lx?: number;
   ly?: number;
@@ -125,7 +129,7 @@ export function neighbourhood(model: OntologyModel, focus: string, hops: number,
   return seen;
 }
 
-export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: DiagramOptions, label: Labeler) {
+export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: DiagramOptions, label: Labeler, preview?: ProposalPreview) {
   const g = new dagre.graphlib.Graph({ multigraph: true });
   g.setGraph({ rankdir: 'TB', nodesep: 48, ranksep: 64, edgesep: 16, marginx: 8, marginy: 8 });
   g.setDefaultEdgeLabel(() => ({}));
@@ -140,10 +144,11 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
       for (const grp of groups)
         for (const s of grp.slots)
           if (s.property.kind === 'datatypeProperty' || s.range.every(isDatatype) && s.range.length)
-            lines.push({ text: slotLine(s, label), rows: [], inherited: grp.from !== iri, conflict: !!s.conflict, iri: s.property.iri });
+            lines.push({ text: slotLine(s, label) + (preview?.terms.has(s.property.iri) ? ' (proposed)' : ''), proposed: preview?.terms.has(s.property.iri), rows: [], inherited: grp.from !== iri, conflict: !!s.conflict, iri: s.property.iri });
     }
-    const shown = lines.slice(0, MAX_ATTRS);
-    if (lines.length > MAX_ATTRS) shown.push({ text: `+ ${lines.length - MAX_ATTRS} more`, rows: [], iri: '' });
+    // Always show pending attributes, even on a class whose existing rows are capped.
+    const shown = preview ? [...lines.filter((l) => !l.proposed).slice(0, MAX_ATTRS), ...lines.filter((l) => l.proposed)] : lines.slice(0, MAX_ATTRS);
+    if (lines.length > shown.length) shown.push({ text: `+ ${lines.length - shown.length} more`, rows: [], iri: '' });
     const title = c.label ?? label(iri);
     const indent = textWidth(UP, ATTR_FONT);
     const inset = (l: BoxLine) => PADX * 2 + SLACK + (l.inherited ? indent : 0);
@@ -151,10 +156,11 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
     const width = Math.ceil(Math.min(MAX_WIDTH, Math.max(120, textWidth(title, TITLE_FONT) + PADX * 2 + SLACK, ...shown.map((l) => textWidth(l.text, ATTR_FONT) + inset(l)))));
     const titleRows = wrapText(title, TITLE_FONT, width - PADX * 2 - SLACK, 3);
     for (const l of shown) l.rows = wrapText(l.text, ATTR_FONT, width - inset(l), 3);
-    const head = HEAD + (titleRows.length - 1) * TITLE_ROW;
+    const proposed = preview?.classes.has(iri);
+    const head = HEAD + (titleRows.length - 1) * TITLE_ROW + (proposed ? TITLE_ROW : 0);
     const rowCount = shown.reduce((n, l) => n + l.rows.length, 0);
     const height = head + (shown.length ? rowCount * ROW + 10 : 0);
-    nodes.set(iri, { iri, title, titleRows, head, lines: shown, deprecated: c.deprecated, width, height, x: 0, y: 0 });
+    nodes.set(iri, { iri, title, titleRows, head, lines: shown, proposed, deprecated: c.deprecated, width, height, x: 0, y: 0 });
     g.setNode(iri, { width, height });
   }
 
@@ -165,7 +171,7 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
       for (const p of model.parents.get(iri) ?? [])
         if (nodes.has(p)) {
           const id = `sub:${iri}:${p}`;
-          edges.push({ id, kind: 'sub', source: iri, target: p, points: [] });
+          edges.push({ id, kind: 'sub', source: iri, target: p, proposed: preview?.subclassEdges.has(subclassEdgeKey(iri, p)), points: [] });
           // Parent above child: rank along parent → child, with a strong pull.
           g.setEdge(p, iri, { weight: 4, minlen: 1 }, id);
         }
@@ -174,9 +180,10 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
       for (const s of model.ownSlots(iri)) {
         for (const { target: r, card } of slotTargets(model, s)) {
           if (!nodes.has(r)) continue;
-          const text = `${s.property.label ?? label(s.property.iri)}  ${card === 'conflict' ? '⚠ conflict' : card}`;
+          const proposed = preview?.terms.has(s.property.iri);
+          const text = `${s.property.label ?? label(s.property.iri)}${proposed ? ' (proposed)' : ''}  ${card === 'conflict' ? '⚠ conflict' : card}`;
           const id = `assoc:${iri}:${s.property.iri}:${r}`;
-          const e: DEdge = { id, kind: 'assoc', source: iri, target: r, label: text, property: s.property.iri, conflict: card === 'conflict', points: [] };
+          const e: DEdge = { id, kind: 'assoc', source: iri, target: r, label: text, proposed, property: s.property.iri, conflict: card === 'conflict', points: [] };
           if (r === iri) {
             loops.push(e);
             continue;
@@ -249,9 +256,11 @@ function nearestInDirection(from: DNode, all: DNode[], key: string) {
 
 export function ClassDiagram({
   view,
-  model,
-  label,
-  scope,
+  model: baseModel,
+  label: baseLabel,
+  scope: baseScope,
+  preview,
+  onPick,
   options,
   selected,
   focus,
@@ -264,6 +273,8 @@ export function ClassDiagram({
 }: {
   view: OntologyView;
   model: OntologyModel;
+  preview?: ProposalPreview;
+  onPick?: (iri: string) => void;
   label: Labeler;
   scope: Set<string>;
   options: DiagramOptions;
@@ -278,6 +289,14 @@ export function ClassDiagram({
   /** Show the relationships as a text list under the drawing. */
   textList?: boolean;
 }) {
+  const model = preview?.model ?? baseModel;
+  const scope = useMemo(() => preview ? new Set([...baseScope, ...preview.scope]) : baseScope, [baseScope, preview]);
+  const label = useMemo<Labeler>(() => preview ? (iri) => model.classes.get(iri)?.label ?? model.properties.get(iri)?.label ?? baseLabel(iri) : baseLabel, [preview, model, baseLabel]);
+  const pickClass = onPick ?? (onSelect ? (iri: string) => { if (!preview?.terms.has(iri)) onSelect(iri); } : undefined);
+  const pickTerm = onPick || onSelect ? (iri: string) => {
+    if (model.classes.has(iri)) pickClass?.(iri);
+    else if (!preview?.terms.has(iri)) onSelect?.(iri);
+  } : undefined;
   const box = useRef<HTMLDivElement>(null);
   const svg = useRef<SVGSVGElement>(null);
   // Safe in url(#…) references and ids.
@@ -308,12 +327,12 @@ export function ClassDiagram({
   // person has moved.
   const last = useRef<{ key: string; layout: ReturnType<typeof layoutDiagram> }>(undefined);
   const layout = useMemo(() => {
-    const next = layoutDiagram(model, scope, options, label);
+    const next = layoutDiagram(model, scope, options, label, preview);
     const key = JSON.stringify(next);
     if (last.current?.key === key) return last.current.layout;
     last.current = { key, layout: next };
     return next;
-  }, [model, scope, options, label, fonts]);
+  }, [model, scope, options, label, fonts, preview]);
   const colours = useMemo(() => themeColours(), [view]);
   const pz = usePanZoom(box, layout, layout);
   const nodeRefs = useRef(new Map<string, SVGGElement>());
@@ -337,7 +356,7 @@ export function ClassDiagram({
   const onNodeKey = (n: DNode) => (e: KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      onSelect?.(n.iri);
+      pickClass?.(n.iri);
     } else if (e.key.startsWith('Arrow')) {
       e.preventDefault();
       const next = nearestInDirection(n, layout.nodes, e.key);
@@ -360,17 +379,17 @@ export function ClassDiagram({
       setExportError(`Couldn't save the diagram as ${ext.toUpperCase()}. ${err instanceof Error ? err.message : ''}`.trim());
     });
   };
-  const name = (iri: string) => byIri.get(iri)?.title ?? label(iri);
+  const name = (iri: string) => `${byIri.get(iri)?.title ?? label(iri)}${preview?.terms.has(iri) ? ' (proposed)' : ''}`;
   const summaryId = `${uid}-summary`;
   const listId = `${uid}-list`;
-  const summary = `${layout.nodes.length} classes, ${subs.length} subclass links and ${assocs.length} relationships. Press Tab to reach the classes, the arrow keys to move between them and Enter to open one.${textList && layout.edges.length ? ' The same relationships are listed as text after the diagram.' : ''}`;
+  const summary = `${layout.nodes.length} classes, ${subs.length} subclass links and ${assocs.length} relationships. Press Tab to reach the classes, the arrow keys to move between them and Enter to ${onPick ? 'pick' : 'open'} one.${textList && layout.edges.length ? ' The same relationships are listed as text after the diagram.' : ''}`;
 
   const nodeLabel = (n: DNode) => {
     const parents = model.parents.get(n.iri)?.filter((p) => model.classes.has(p)).map(label) ?? [];
     const attrs = n.lines.filter((l) => l.iri).map((l) => l.text);
     const rels = assocs.filter((e) => e.source === n.iri).map((e) => `${e.label} ${name(e.target)}`);
     return [
-      `${n.title}${n.deprecated ? ' (deprecated)' : ''}`,
+      `${n.title}${n.proposed ? ' (proposed)' : ''}${n.deprecated ? ' (deprecated)' : ''}`,
       parents.length ? `subclass of ${parents.join(' and ')}` : '',
       attrs.length ? `attributes: ${attrs.join('; ')}` : '',
       rels.length ? `relationships: ${rels.join('; ')}` : '',
@@ -427,6 +446,9 @@ export function ClassDiagram({
             <marker id={`${uid}-tri-on`} viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
               <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.fg} strokeWidth="1.6" />
             </marker>
+            <marker id={`${uid}-tri-proposed`} viewBox="0 0 12 12" refX="11" refY="6" markerWidth="12" markerHeight="12" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+              <path d="M1,1 L11,6 L1,11 z" fill={c.surface} stroke={c.accent} strokeWidth="1.3" />
+            </marker>
             <marker id={`${uid}-arrow`} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">
               <path d="M1,1 L9,5 L1,9" fill="none" stroke={c.accent} strokeWidth="1.4" />
             </marker>
@@ -436,19 +458,19 @@ export function ClassDiagram({
               const on = touches(e);
               const sub = e.kind === 'sub';
               return (
-                <g key={e.id} data-edge={e.kind} data-source={e.source} data-target={e.target} data-on={on || undefined} aria-hidden>
+                <g key={e.id} data-edge={e.kind} data-source={e.source} data-target={e.target} data-on={on || undefined} data-proposed={e.proposed || undefined} aria-hidden>
                   <path
                     d={curve(e.points)}
                     fill="none"
-                    stroke={sub ? (on ? c.fg : c.muted) : c.accent}
+                    stroke={e.proposed ? c.accent : sub ? (on ? c.fg : c.muted) : c.accent}
                     strokeWidth={on ? 2.5 : 1.3}
-                    strokeDasharray={sub ? undefined : on ? '7 3' : '5 4'}
-                    markerEnd={sub ? `url(#${uid}-${on ? 'tri-on' : 'tri'})` : `url(#${uid}-arrow)`}
+                    strokeDasharray={e.proposed ? '5 4' : sub ? undefined : on ? '7 3' : '5 4'}
+                    markerEnd={sub ? `url(#${uid}-${e.proposed ? 'tri-proposed' : on ? 'tri-on' : 'tri'})` : `url(#${uid}-arrow)`}
                   />
                   {e.label && e.lx !== undefined && (
                     <g transform={`translate(${e.lx},${e.ly})`}>
                       <rect x={-(e.lw ?? 0) / 2} y={-9} width={e.lw} height={18} rx={4} fill={on ? c.accentSoft : c.surface} stroke={on ? c.accent : c.line} strokeWidth={on ? 1.5 : 1} />
-                      <text textAnchor="middle" dy="4" fontSize="11" fill={e.conflict ? c.danger : on ? c.fg : c.muted} fontWeight={on ? 600 : 400}>
+                      <text textAnchor="middle" dy="4" fontSize="11" fill={e.proposed ? c.accent : e.conflict ? c.danger : on ? c.fg : c.muted} fontWeight={on ? 600 : 400}>
                         {e.label}
                       </text>
                     </g>
@@ -462,7 +484,7 @@ export function ClassDiagram({
               const isActive = n.iri === active;
               const isNear = near.has(n.iri);
               const filled = isFocus || isSel;
-              const border = isSel || isActive ? c.accent : isNear ? c.accent : c.lineStrong;
+              const border = n.proposed ? c.accent : isSel || isActive ? c.accent : isNear ? c.accent : c.lineStrong;
               const bw = isSel || isActive ? 2.5 : isNear ? 1.8 : 1.2;
               return (
                 <g
@@ -472,6 +494,7 @@ export function ClassDiagram({
                     else nodeRefs.current.delete(n.iri);
                   }}
                   data-node={n.iri}
+                  data-proposed={n.proposed || undefined}
                   data-near={isNear || undefined}
                   transform={`translate(${n.x},${n.y})`}
                   role="button"
@@ -479,7 +502,7 @@ export function ClassDiagram({
                   aria-pressed={isSel}
                   aria-label={nodeLabel(n)}
                   className="cursor-pointer outline-none"
-                  onClick={() => onSelect?.(n.iri)}
+                  onClick={() => pickClass?.(n.iri)}
                   onKeyDown={onNodeKey(n)}
                   onMouseEnter={() => setHover(n.iri)}
                   onMouseLeave={() => setHover(undefined)}
@@ -492,13 +515,14 @@ export function ClassDiagram({
                 >
                   <title>{n.title}</title>
                   {focused === n.iri && <rect data-focus-ring x={-5} y={-5} width={n.width + 10} height={n.height + 10} rx={11} fill="none" stroke={c.accent} strokeWidth={2.5} />}
-                  <rect width={n.width} height={n.height} rx={8} fill={c.surface} stroke={border} strokeWidth={bw} strokeDasharray={n.deprecated ? '5 3' : undefined} />
+                  <rect width={n.width} height={n.height} rx={8} fill={c.surface} stroke={border} strokeWidth={bw} strokeDasharray={n.proposed || n.deprecated ? '5 3' : undefined} />
                   {n.lines.length ? (
                     <path d={`M0,8 a8,8 0 0 1 8,-8 h${n.width - 16} a8,8 0 0 1 8,8 v${n.head - 8} h${-n.width} z`} fill={filled ? c.accent : c.accentSoft} />
                   ) : (
                     <rect width={n.width} height={n.height} rx={8} fill={filled ? c.accent : c.accentSoft} />
                   )}
-                  {!n.lines.length && <rect width={n.width} height={n.height} rx={8} fill="none" stroke={border} strokeWidth={bw} strokeDasharray={n.deprecated ? '5 3' : undefined} />}
+                  {!n.lines.length && <rect width={n.width} height={n.height} rx={8} fill="none" stroke={border} strokeWidth={bw} strokeDasharray={n.proposed || n.deprecated ? '5 3' : undefined} />}
+                  {n.proposed && n.lines.length > 0 && <rect width={n.width} height={n.height} rx={8} fill="none" stroke={c.accent} strokeWidth={bw} strokeDasharray="5 3" />}
                   <text data-title textAnchor="middle" fontSize="13" fontWeight="600" fill={filled ? c.accentFg : c.fg} textDecoration={n.deprecated ? 'line-through' : undefined}>
                     {n.titleRows.map((t, i) => (
                       <tspan key={i} x={n.width / 2} y={19.5 + i * TITLE_ROW}>
@@ -506,12 +530,13 @@ export function ClassDiagram({
                       </tspan>
                     ))}
                   </text>
+                  {n.proposed && <text x={n.width / 2} y={n.head - 7} textAnchor="middle" fontSize="11" fill={filled ? c.accentFg : c.accent}>proposed</text>}
                   {n.lines.length > 0 && <line x1={0} x2={n.width} y1={n.head} y2={n.head} stroke={c.line} />}
                   {n.lines.map((l, i) => {
                     const first = n.lines.slice(0, i).reduce((k, x) => k + x.rows.length, 0);
                     const x0 = PADX + (l.inherited ? textWidth(UP, ATTR_FONT) : 0);
                     return (
-                      <text key={i} data-attr fontSize="12" fill={l.conflict ? c.danger : l.inherited ? c.subtle : c.fg} fontStyle={l.iri ? undefined : 'italic'}>
+                      <text key={i} data-attr fontSize="12" fill={l.proposed ? c.accent : l.conflict ? c.danger : l.inherited ? c.subtle : c.fg} fontStyle={l.iri ? undefined : 'italic'}>
                         {l.rows.length > 1 || l.rows[0] !== l.text ? <title>{l.text}</title> : null}
                         {l.inherited && (
                           <tspan x={PADX} y={n.head + 18 + first * ROW} fill={c.subtle}>
@@ -534,11 +559,12 @@ export function ClassDiagram({
         <Legend />
         {!layout.nodes.length && <p className="absolute inset-0 flex items-center justify-center text-sm text-muted">Nothing to draw with these settings.</p>}
       </div>
-      {textList && layout.edges.length > 0 && (
+      {textList && (layout.edges.length > 0 || !!preview?.terms.size) && (
         <details className="group rounded-lg border border-line px-3 py-2 text-sm" data-testid="diagram-text">
           <summary className="cursor-pointer text-sm font-medium text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-accent">
             Relationships as text ({assocs.length + subs.length})
           </summary>
+          {preview && preview.terms.size > 0 && <ul className="mt-2 space-y-1" aria-label="Proposed terms">{[...preview.terms].map((iri) => <li key={iri}><TextTerm iri={iri} name={name} onSelect={pickTerm} /></li>)}</ul>}
           <div id={listId} className="mt-2 grid gap-4 md:grid-cols-2">
             {assocs.length > 0 && (
               <div>
@@ -546,12 +572,12 @@ export function ClassDiagram({
                 <ul className="space-y-1">
                   {assocs.map((e) => (
                     <li key={e.id} className="flex flex-wrap items-baseline gap-x-1.5">
-                      <TextTerm iri={e.source} name={name} onSelect={onSelect} />
+                      <TextTerm iri={e.source} name={name} onSelect={pickTerm} />
                       <span className="text-muted">→</span>
-                      {e.property ? <TextTerm iri={e.property} name={(i) => model.properties.get(i)?.label ?? label(i)} onSelect={onSelect} /> : null}
+                      {e.property ? <TextTerm iri={e.property} name={name} onSelect={pickTerm} /> : null}
                       <span className={e.conflict ? 'text-xs text-danger' : 'font-mono text-xs text-muted'}>[{e.label?.split('  ').pop()}]</span>
                       <span className="text-muted">→</span>
-                      <TextTerm iri={e.target} name={name} onSelect={onSelect} />
+                      <TextTerm iri={e.target} name={name} onSelect={pickTerm} />
                     </li>
                   ))}
                 </ul>
@@ -563,9 +589,9 @@ export function ClassDiagram({
                 <ul className="space-y-1">
                   {subs.map((e) => (
                     <li key={e.id} className="flex flex-wrap items-baseline gap-x-1.5">
-                      <TextTerm iri={e.source} name={name} onSelect={onSelect} />
-                      <span className="text-muted">is a kind of</span>
-                      <TextTerm iri={e.target} name={name} onSelect={onSelect} />
+                      <TextTerm iri={e.source} name={name} onSelect={pickTerm} />
+                      <span className="text-muted">is a kind of{e.proposed ? ' (proposed)' : ''}</span>
+                      <TextTerm iri={e.target} name={name} onSelect={pickTerm} />
                     </li>
                   ))}
                 </ul>
