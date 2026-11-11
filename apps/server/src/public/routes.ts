@@ -6,7 +6,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, put, transaction } from '../db.js';
+import { get, HttpError, list, put, remove, transaction } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { releaseForViewer } from '../services/releases.js';
@@ -313,6 +313,23 @@ async function readPageState(): Promise<Record<string, string>> {
  * Changes are committed to the ontology's repository and go out with its next
  * push to GitHub. Tags still point at the original commits.
  */
+/**
+ * Has the next `release-pages` run re-render this ontology's release pages, through the same path as any
+ * renderer change (used when stored demo copy that the pages embed was corrected).
+ */
+export async function markReleasePagesStale(slug: string): Promise<void> {
+  await transaction(async () => {
+    const state = await readPageState();
+    if (slug in state) {
+      delete state[slug];
+      await put('kv', { id: PAGE_STATE, state });
+    }
+    // The task may already be recorded as done for this version (say, an earlier run of the caller failed part way):
+    // forget that, so it runs again.
+    await remove('kv', 'startup:release-pages');
+  });
+}
+
 export async function refreshReleasePages(): Promise<boolean> {
   const state = await readPageState();
   // Whether everything was refreshed and recorded: if not, the start-up task isn't recorded as done, so it is tried
@@ -326,12 +343,18 @@ export async function refreshReleasePages(): Promise<boolean> {
       complete = false;
       console.warn(`[public] could not check ${project.slug}: ${(err as Error).message}`);
     }
-    const versions = new Set(await ontologyStore.versions(project));
-    const releases = (await publishedReleases(project.id)).filter((r) => versions.has(r.version));
-    const pending: typeof releases = [];
-    for (const r of releases)
-      if (state[project.slug] !== PAGE_GENERATOR || (await readSnapshot(project, r.version)).state === 'absent' || (await ontologyStore.readReleaseFile(project, r.version, 'index.html')) === undefined)
-        pending.push(r);
+    const pending: Release[] = [];
+    // One ontology whose store can't be read (say, its repository is missing) mustn't stop the others' pages.
+    try {
+      const versions = new Set(await ontologyStore.versions(project));
+      for (const r of (await publishedReleases(project.id)).filter((r) => versions.has(r.version)))
+        if (state[project.slug] !== PAGE_GENERATOR || (await readSnapshot(project, r.version)).state === 'absent' || (await ontologyStore.readReleaseFile(project, r.version, 'index.html')) === undefined)
+          pending.push(r);
+    } catch (err) {
+      complete = false;
+      console.warn(`[public] could not read ${project.slug} releases: ${(err as Error).message}`);
+      continue;
+    }
     if (!pending.length) {
       state[project.slug] = PAGE_GENERATOR;
       continue;

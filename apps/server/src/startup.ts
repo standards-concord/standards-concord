@@ -68,10 +68,11 @@ export async function unfinishedTasks(tasks: StartupTask[], appVersion = APP_VER
 
 /** The server's start-up tasks. */
 export async function defaultStartupTasks(): Promise<StartupTask[]> {
-  const [{ migrateClientSecrets }, { backfillDemoAvatars }, { seedDemo }, { refreshReleasePages }, { syncFeedbackSharing }] = await Promise.all([
+  const [{ migrateClientSecrets }, { backfillDemoAvatars }, { seedDemo }, { refreshDemoCopy }, { refreshReleasePages }, { syncFeedbackSharing }] = await Promise.all([
     import('./oauth.js'),
     import('./services/users.js'),
     import('./services/simulation.js'),
+    import('./services/demoCopy.js'),
     import('./public/routes.js'),
     import('./services/feedback.js'),
   ]);
@@ -95,6 +96,15 @@ export async function defaultStartupTasks(): Promise<StartupTask[]> {
             },
           },
           { name: 'demo-seed', run: async () => void (await seedDemo()) },
+          {
+            name: 'demo-copy',
+            run: async () => {
+              const counts = await refreshDemoCopy();
+              if (Object.values(counts).some(Boolean)) console.log(`[seed] refreshed demo copy: ${Object.entries(counts).map(([name, count]) => `${count} ${name}`).join(', ')}`);
+              // An ontology whose repository couldn't be read is tried again by the next start.
+              return counts.unreadable === 0;
+            },
+          },
         ]
       : []),
     // Release pages written by an older renderer (or without a use case snapshot) are regenerated.
