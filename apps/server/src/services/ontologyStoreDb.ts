@@ -141,7 +141,7 @@ export const dbStore = {
   },
 
   async readReleaseFile(project: Pick<OntologyProject, 'slug'>, version: string, name: string): Promise<string | undefined> {
-    if (!/^[\w.-]+$/.test(version) || !/^[\w.-]+$/.test(name)) return undefined;
+    if (!/^[\w.-]+$/.test(version) || !/^[\w.-]+(?:\/[\w.-]+)*$/.test(name) || name.split('/').some((part) => part === '.' || part === '..')) return undefined;
     return await readFile(await this.head(project), `releases/${version}/${name}`);
   },
 

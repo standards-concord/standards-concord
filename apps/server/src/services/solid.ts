@@ -1,6 +1,6 @@
 import type { User } from '@concord/shared';
 import { config } from '../config.js';
-import { get, HttpError, list, put, refuseWhenReadOnly } from '../db.js';
+import { get, HttpError, list, put, refuseWhenReadOnly, remove } from '../db.js';
 import { DataFactory, Parser, Writer, type Quad } from 'n3';
 import { slugify } from '../ids.js';
 import { localTag, PreconditionFailed, privateStore, type WriteCondition } from './privateStore.js';
@@ -131,6 +131,19 @@ async function podAccess(userId: string): Promise<PodAccess | undefined> {
   if (!config.solid.serverUrl) return undefined;
   const rec = await get<PodRecord>('kv', `pod:${userId}`);
   return rec ? { pod: rec.podUrl, webId: rec.webId, base: `${rec.podUrl}concord/`, request: () => ownerRequest({ ...rec, id: userId }) } : undefined;
+}
+
+/** The type a private document is written to a pod with, from its name (Concord names them by what they hold). */
+const typeOfPath = (rel: string) =>
+  rel.endsWith('.ttl') ? 'text/turtle' : rel.endsWith('.jsonld') ? 'application/ld+json' : rel.endsWith('.json') ? 'application/json' : rel.endsWith('.md') ? 'text/markdown' : 'application/octet-stream';
+
+/** Whether the document at `relPath` in their pod holds exactly `bytes`. */
+async function sameAt(access: PodAccess, relPath: string, bytes: Buffer): Promise<boolean> {
+  const url = urlIn(access.base, relPath);
+  const res = await (await access.request())('GET', url);
+  if (res.status === 404 || res.status === 410) return false;
+  if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
+  return Buffer.from(await res.arrayBuffer()).equals(bytes);
 }
 
 /** A failed write to someone's own pod, as the person sees it (the sign-in and configuration messages pass through). */
@@ -361,6 +374,42 @@ export const solid = {
     if (res.status === 412) throw new PreconditionFailed(`PUT ${url} → 412`);
     if (!res.ok) throw new Error(`PUT ${url} → ${res.status}`);
     return { kind: 'solid', url };
+  },
+
+  /**
+   * Moves a Solid account's private data from this server's store into their own pod, where it belongs (step 5e):
+   * what the cutover brought over from the pod the VM made for them (migrate `--pods`), or anything else kept here.
+   * Each document is created in their pod (never over one already there: if that path is taken, it goes beside it
+   * as `<name>.from-concord-<n><ext>`), and only then removed here. Stops at the first failure and is tried again at
+   * their next Solid sign-in. Returns how many it moved.
+   */
+  async carryIntoOwnPod(userId: string): Promise<number> {
+    if (config.privateStore !== 'db') return 0;
+    const access = await podAccess(userId);
+    if (!access?.own) return 0;
+    const prefix = `${userId}/`;
+    let moved = 0;
+    for (const row of await list<{ id: string; data: string }>('privateFiles', userId)) {
+      if (!row.id.startsWith(prefix)) continue;
+      const rel = row.id.slice(prefix.length);
+      const bytes = Buffer.from(row.data, 'base64');
+      const body = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      for (let n = 0; ; n++) {
+        if (n >= 5) throw new Error(`no free name in your pod to put ${rel} beside what is there`);
+        const at = n === 0 ? rel : rel.replace(/(\.[^./]+)?$/, (ext) => `.from-concord-${n}${ext}`);
+        try {
+          await this.writeExisting(userId, at, body, typeOfPath(rel), { ifNoneMatch: '*' });
+          break;
+        } catch (err) {
+          if (!(err instanceof PreconditionFailed)) throw err;
+        }
+        // Taken: by this very document, if an earlier try wrote it there and then couldn't remove it here.
+        if (await sameAt(access, at, bytes)) break;
+      }
+      await remove('privateFiles', row.id);
+      moved++;
+    }
+    return moved;
   },
 
   /** A minimal WebID profile document for locally-hosted WebIDs. */
