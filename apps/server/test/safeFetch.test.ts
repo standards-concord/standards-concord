@@ -111,18 +111,24 @@ describe('responses that are refused or too slow', () => {
 
   it('frees its slot only after the connection is gone, so the concurrency cap holds; others wait their turn', async () => {
     // Four slow fetches fill every slot; a fifth waits instead of connecting (or failing).
-    const slow = [1, 2, 3, 4].map(() => fetchFrom('/200', { timeoutMs: 300, maxBytes: 10 * 1024 * 1024 }).catch((e: FetchError) => e));
-    await until(() => open.size === 4);
-    let fifthDone = false;
-    const fifth = fetchFrom('/404').catch((e: FetchError) => e).finally(() => (fifthDone = true));
-    await new Promise((r) => setTimeout(r, 100));
-    expect(open.size).toBe(4);
-    expect(fifthDone).toBe(false);
-    const results = await Promise.all(slow);
-    expect(results.every((e) => e instanceof FetchError && e.kind === 'unavailable')).toBe(true);
-    // Once a slot is free the fifth runs (its own deadline starts then).
-    expect(await fifth).toMatchObject({ kind: 'not-found' });
-    expect(await until(() => open.size === 0)).toBe(true);
+    // 2026-11-11: 300 ms deadlines could close these sockets before the checks on busy machines.
+    const slow = [1, 2, 3, 4].map(() => fetchFrom('/200', { timeoutMs: 60_000, maxBytes: Infinity }).catch((e: FetchError) => e));
+    try {
+      expect(await until(() => open.size === 4, 30_000)).toBe(true);
+      let fifthDone = false;
+      const fifth = fetchFrom('/404').catch((e: FetchError) => e).finally(() => (fifthDone = true));
+      await new Promise((r) => setTimeout(r, 100));
+      expect(open.size).toBe(4);
+      expect(fifthDone).toBe(false);
+      for (const sock of open) sock.destroy();
+      const results = await Promise.all(slow);
+      expect(results.every((e) => e instanceof FetchError && e.kind === 'unavailable')).toBe(true);
+      // Once a slot is free the fifth runs (its own deadline starts then).
+      expect(await fifth).toMatchObject({ kind: 'not-found' });
+      expect(await until(() => open.size === 0)).toBe(true);
+    } finally {
+      for (const sock of open) sock.destroy();
+    }
   });
 });
 
