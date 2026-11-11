@@ -6,6 +6,7 @@
     ".": "./src/index.ts",
     "./names": "./src/ns.ts",
     "./types": "./src/types.ts",
+    "./term-rules": "./src/termRules.ts",
     "./sparql-guard": "./src/sparqlGuard.ts",
     "./reasoner": "./src/reasonTurtle.ts",
     "./data-formats": "./src/dataFormats.ts",

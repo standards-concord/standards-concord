@@ -1,4 +1,4 @@
-import { compactIRI, localName } from '@concord/core';
+import { compactIRI, localName, type WorkedExample } from '@concord/core';
 import type { ClassView, IndividualView, OntologyView, PropertyView, Restriction, TermView } from '@concord/core/types';
 import type { ChangeLevel } from '@concord/shared';
 import { escapeHtml as esc, renderMarkdown, safeHref } from './markdown.js';
@@ -70,6 +70,9 @@ export interface OntologyPageInput {
   /** report: the public report form for this ontology; site: the app's origin (for member sign-in). */
   links: { latest: string; draft: string; app?: string; versionBase: string; report?: string; site?: string };
   requirements: PublishedRequirements;
+  examples?: WorkedExample[];
+  /** Prefix for example downloads; empty in the stored release page. */
+  exampleBase?: string;
   persistentId?: { service: string; file: string; rules: string };
   generatedAt: string;
 }
@@ -347,6 +350,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const tabs = [
     { key: 'spec' as const, id: id('tab-spec'), tabId: id('tab-spec-tab'), label: 'Specification' },
     { key: 'useCasesPanel' as const, id: id('tab-use-cases'), tabId: id('tab-use-cases-tab'), label: 'Use cases and requirements', count: reqs.useCases.length },
+    ...(input.examples?.length ? [{ key: 'examplesPanel' as const, id: id('tab-examples'), tabId: id('tab-examples-tab'), label: 'Examples' }] : []),
     { key: 'changes' as const, id: id('tab-changes'), tabId: id('tab-changes-tab'), label: 'Changes' },
     { key: 'download' as const, id: id('tab-download'), tabId: id('tab-download-tab'), label: 'Download and cite' },
   ];
@@ -430,6 +434,28 @@ ${reportDialog}`;
 </section>`;
 
   const exampleTarget = input.kind === 'release' ? meta.versionIRI ?? input.pageUrl : input.pageUrl;
+  const examples = input.examples ?? [];
+  const exampleHref = (file: string) => `${input.exampleBase ?? ''}${file}`;
+  const exampleDownloads: PageDownload[] = examples.length ? [
+    { label: 'Worked examples', mediaType: 'application/json', extension: 'json', href: exampleHref('examples.json') },
+    { label: 'Example data', mediaType: 'text/turtle', extension: 'ttl', href: exampleHref('examples/data.ttl') },
+  ] : [];
+  const examplesPanel = `<h2>Examples</h2><p class="muted">Questions this version was designed to answer, each with example data, the query that answers it and the answer.</p>${examples.map((e) => {
+    const source = reqs.useCases.find((u) => u.id === e.source);
+    // Answers use the prefixes the example data and query declare (ex:parkCleanUp rather than the full IRI); the full IRI is on hover.
+    const queryPrefixes = Object.fromEntries([...`${e.exampleData}\n${e.sparql}`.matchAll(/@?PREFIX\s+([A-Za-z][\w.-]*)?:\s*<([^>]*)>/gi)].map((m) => [m[1] ?? '', m[2]]));
+    const cell = (v: string) => (/^[a-z][a-z0-9+.-]*:\/\//i.test(v) ? `<code title="${esc(v)}">${esc(compactIRI(v, { ...prefixes, ...queryPrefixes }))}</code>` : esc(v));
+    const answer = e.result.error ? '<p>Could not answer this question.</p>' : e.result.boolean !== undefined ? `<p>${e.result.boolean ? 'Yes' : 'No'}</p>` : e.result.totalCount === 0 ? '<p>No answers found.</p>' :
+      `<div class="example-answer"><table class="table"><thead><tr>${e.result.variables.map((v) => `<th scope="col">${esc(v)}</th>`).join('')}</tr></thead><tbody>${e.result.rows.map((r) => `<tr>${e.result.variables.map((v) => `<td>${cell(r[v] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div><p class="muted">${e.result.totalCount > e.result.rows.length ? `First ${e.result.rows.length} of ${e.result.totalCount} answers.` : `${e.result.totalCount} answer${e.result.totalCount === 1 ? '' : 's'}.`}</p>`;
+    const code = (label: string, text: string, file: string, download: string) => `<details><summary>${label}</summary><p class="example-actions"><button type="button" class="btn btn-ghost copy" data-copy="${esc(text)}" aria-label="Copy ${label.toLowerCase()}">${COPY_ICON} Copy</button> <a class="btn btn-ghost" href="${esc(exampleHref(file))}" download>${download}</a></p><pre class="code"><code>${esc(text)}</code></pre></details>`;
+    const anchor = id(e.id);
+    return `<section class="block" aria-label="${esc(e.question)}"><h3 id="${esc(anchor)}"><a class="permalink" href="#${esc(fragment(anchor))}" aria-label="Link to this question">#</a>${esc(e.question)}</h3>
+      ${source ? `<p>From <a href="#${esc(fragment(id(`uc-${anchorSafe(source.id)}`)))}">${esc(source.ref)}: ${esc(source.title)}</a></p>` : ''}
+      ${answer}${e.exampleAnswer ? `<p>Example answer: ${esc(e.exampleAnswer)}</p>` : ''}
+      ${code('Query', e.sparql, e.queryFile, 'Download query')}
+      ${code('Example data', e.exampleData, 'examples/data.ttl', 'Download all example data')}
+    </section>`;
+  }).join('')}`;
   const turtle = input.downloads.find((d) => d.mediaType === 'text/turtle');
   const citeAuthors = meta.creators.length ? meta.creators.filter((c) => !isIri(c)).join(', ') : meta.publisher && !isIri(meta.publisher) ? meta.publisher : '';
   const citeDate = input.release?.publishedAt ?? meta.issued;
@@ -438,7 +464,7 @@ ${reportDialog}`;
 <section class="block">
   <h2>Formats</h2>
   <table class="table"><thead><tr><th>Format</th><th>Media type</th><th></th></tr></thead><tbody>
-  ${input.downloads.map((d) => `<tr><td>${esc(d.label)}</td><td><code>${esc(d.mediaType)}</code></td><td><a href="${esc(d.href)}" type="${esc(d.mediaType)}" download>Download</a> · <a href="${esc(d.href)}" type="${esc(d.mediaType)}">View</a></td></tr>`).join('')}
+  ${[...input.downloads, ...exampleDownloads].map((d) => `<tr><td>${esc(d.label)}</td><td><code>${esc(d.mediaType)}</code></td><td><a href="${esc(d.href)}" type="${esc(d.mediaType)}" download>Download</a> · <a href="${esc(d.href)}" type="${esc(d.mediaType)}">View</a></td></tr>`).join('')}
   </tbody></table>
 </section>
 <section class="block">
@@ -531,7 +557,7 @@ ${input.downloads.map((d) => `<link rel="alternate" type="${esc(d.mediaType)}" h
   </nav>
 </div>
 <main id="${id('main')}" class="wrap">
-  ${tabs.map((t) => `<section id="${t.id}" role="tabpanel" aria-labelledby="${t.tabId}" class="panel" tabindex="0">${{ spec, useCasesPanel, changes, download }[t.key]}</section>`).join('\n  ')}
+  ${tabs.map((t) => `<section id="${t.id}" role="tabpanel" aria-labelledby="${t.tabId}" class="panel" tabindex="0">${{ spec, useCasesPanel, examplesPanel, changes, download }[t.key]}</section>`).join('\n  ')}
 </main>
 <footer class="foot wrap">
   <p>${esc(meta.title ?? project.title)} · ${esc(versionLabel)} · Published with Concord${input.links.app ? ` · <a href="${esc(input.links.app)}">Take part in developing this standard</a>` : ''}</p>

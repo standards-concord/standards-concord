@@ -1,6 +1,7 @@
 import { needsPublicationApproval } from './changeRequests.js';
 import {
   bumpVersion,
+  exampleFiles,
   diffOntologies,
   FORMAT_INFO,
   migrationSparql,
@@ -14,6 +15,7 @@ import { clock } from '../clock.js';
 import { config } from '../config.js';
 import { get, HttpError, list, mustGet, put, transaction } from '../db.js';
 import { releasePageFiles, releaseRequirements, REQUIREMENTS_SNAPSHOT, snapshotFile } from '../public/routes.js';
+import { liveExamples } from '../public/examples.js';
 import { anyHeld, historyApproved, holdReleaseIfDraftHeld } from '../public/holds.js';
 import { newId } from '../ids.js';
 import { markReleased, withOntologyLocks } from './changeRequests.js';
@@ -311,10 +313,12 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   // a rendering failure only costs the stored page (served pages render on request).
   const requirements = await releaseRequirements(project, r.version);
   files[REQUIREMENTS_SNAPSHOT] = snapshotFile(requirements);
+  const examples = await liveExamples(project, stamped);
+  Object.assign(files, exampleFiles(examples, stamped.ontologyIRI));
   // Every use case the snapshot shows or cites, checked again where the release commits.
-  const represented = [...new Set([...requirements.useCases.map((u) => u.id), ...(requirements.document?.requirements ?? []).flatMap((q) => q.useCaseIds), ...(requirements.document?.sections ?? []).flatMap((x) => x.useCaseIds ?? [])])];
+  const represented = [...new Set([...requirements.useCases.map((u) => u.id), ...examples.map((e) => e.source), ...(requirements.document?.requirements ?? []).flatMap((q) => q.useCaseIds), ...(requirements.document?.sections ?? []).flatMap((x) => x.useCaseIds ?? [])])];
   try {
-    Object.assign(files, await releasePageFiles(project, { ...r, notes: publicNotes, publishedAt: clock.iso() }, stamped, requirements));
+    Object.assign(files, await releasePageFiles(project, { ...r, notes: publicNotes, publishedAt: clock.iso() }, stamped, requirements, examples));
   } catch (err) {
     console.warn(`[release] public page: ${(err as Error).message}`);
   }

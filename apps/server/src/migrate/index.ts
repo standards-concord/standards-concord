@@ -23,7 +23,11 @@ import type { DocStore, StoredRow } from '../store/types.js';
  *   imported database.
  * - `exportHistories` writes the database's histories back into git repositories, for rolling back to the VM.
  * - `importPrivateFiles` / `exportPrivateFiles` move the server's own private files (data dir `private/`, for
- *   accounts with no pod) into `privateFiles` rows and back; `verifyImport` checks them byte for byte.
+ *   accounts with no pod) into `privateFiles` rows and back; `verifyImport` checks them byte for byte. With the
+ *   VM's Solid server's data directory (`podsDir`), the import also takes what Concord kept in the pods it made for
+ *   people (each pod's `concord/` folder), where Concord read it first: on Vercel there is no such server, so
+ *   Google and GitHub accounts' data stays in the database, and Solid accounts' moves into their own pod at their
+ *   next Solid sign-in (services/solid.ts `carryIntoOwnPod`).
  */
 
 /** Recorded once an import is verified (or a database store started with nothing to import). */
@@ -43,7 +47,7 @@ const TARGET_ONLY: Collection[] = ['gitObjects', 'gitRefs'];
 const FROM_FILES: Collection[] = ['privateFiles'];
 
 /** Every private file under `dataDir/private/<user id>/`, as its owner and path within that folder. */
-function* privateFilesIn(dataDir: string): Generator<{ userId: string; relPath: string; file: string }> {
+function* privateFilesIn(dataDir: string): Generator<PrivateSourceFile> {
   const root = path.join(dataDir, 'private');
   if (!fs.existsSync(root)) return;
   for (const userId of fs.readdirSync(root)) {
@@ -58,14 +62,75 @@ function* privateFilesIn(dataDir: string): Generator<{ userId: string; relPath: 
   }
 }
 
+interface PrivateSourceFile {
+  userId: string;
+  relPath: string;
+  file: string;
+}
+
+/** A pod this server made for someone on its Solid server (services/solid.ts `provision`). */
+interface PodRecord {
+  id: string;
+  podUrl: string;
+}
+
+/**
+ * What Concord kept in the pods it made on the VM's Solid server, read from that server's data directory (the
+ * Community Solid Server's file backend: a pod's resources are files under a folder named by the pod's path). A
+ * resource whose name doesn't give its type is stored as `<name>$.<ext>`, which is taken back off; access control and
+ * metadata files (`.acl`, `.meta`) aren't data.
+ */
+async function* podFilesIn(podsDir: string): AsyncGenerator<PrivateSourceFile> {
+  // Compared as real paths: a pod folder, or its concord/ folder, that links elsewhere would otherwise bring in
+  // files that aren't that pod's (another person's, even).
+  const root = fs.realpathSync(path.resolve(podsDir));
+  const pods = (await (await rawStore()).rows())
+    .filter((r) => r.collection === 'kv' && r.id.startsWith('pod:'))
+    .map((r) => JSON.parse(r.data) as PodRecord)
+    .filter((r) => typeof r.podUrl === 'string');
+  for (const rec of pods) {
+    const userId = rec.id.slice('pod:'.length);
+    const folder = path.resolve(root, ...new URL(rec.podUrl).pathname.split('/').filter(Boolean).map(decodeURIComponent));
+    if (!folder.startsWith(root + path.sep)) throw new Error(`${rec.id}: its pod ${rec.podUrl} isn't a folder of ${root}`);
+    if (!fs.existsSync(folder)) throw new Error(`${rec.id}: its pod ${rec.podUrl} isn't in ${root} (is that the Solid server's data directory?)`);
+    const base = path.join(folder, 'concord');
+    if (!fs.existsSync(base)) continue; // nothing kept there yet
+    if (fs.realpathSync(base) !== base) throw new Error(`${rec.id}: its pod ${rec.podUrl} isn't a folder of ${root} (it links elsewhere)`);
+    for (const rel of fs.readdirSync(base, { recursive: true, encoding: 'utf8' })) {
+      const file = path.join(base, rel);
+      const name = path.basename(file);
+      if (!fs.lstatSync(file).isFile() || /(^|\.)(acl|meta)$/.test(name)) continue;
+      // Listing follows links to folders, so a file is only taken where it really is.
+      if (fs.realpathSync(file) !== file) throw new Error(`${rec.id}: ${file} is reached through a link, so it may not be this pod's`);
+      yield { userId, relPath: rel.split(path.sep).join('/').replace(/\$\.[^/]*$/, ''), file };
+    }
+  }
+}
+
+/**
+ * Every private file to import: the data directory's, and with `podsDir` what the pods held, which wins over a
+ * file kept for the same path on disk (the server read the pod first). Refuses when the database names pods this
+ * server made and `podsDir` isn't given: their data would be left behind.
+ */
+async function privateSources(dataDir: string, podsDir: string | undefined): Promise<Map<string, PrivateSourceFile>> {
+  const all = new Map<string, PrivateSourceFile>();
+  for (const f of privateFilesIn(dataDir)) all.set(privateRowId(f.userId, f.relPath), f);
+  if (podsDir) for await (const f of podFilesIn(podsDir)) all.set(privateRowId(f.userId, f.relPath), f);
+  else {
+    const pods = (await (await rawStore()).rows()).filter((r) => r.collection === 'kv' && r.id.startsWith('pod:')).length;
+    if (pods) throw new Error(`${pods} account(s) have pods on the VM's Solid server: give its data directory (--pods) so what Concord kept there comes too`);
+  }
+  return all;
+}
+
 const privateRowId = (userId: string, relPath: string) => `${userId}/${relPath}`;
 
-/** Stores every private file in the data directory as a `privateFiles` row (replacing the rows there). */
-export async function importPrivateFiles(dataDir: string): Promise<{ files: number }> {
+/** Stores every private file (see privateSources) as a `privateFiles` row (replacing the rows there). */
+export async function importPrivateFiles(dataDir: string, podsDir?: string): Promise<{ files: number }> {
   await unverify();
   const target = await rawStore();
   const now = new Date().toISOString();
-  const rows: StoredRow[] = [...privateFilesIn(dataDir)].map((f) => ({
+  const rows: StoredRow[] = [...(await privateSources(dataDir, podsDir)).values()].map((f) => ({
     collection: 'privateFiles',
     id: privateRowId(f.userId, f.relPath),
     parent: f.userId,
@@ -284,7 +349,7 @@ function writeRepository(dir: string, objects: Map<string, { type: ObjectType; b
   for (const [name, sha] of refs) execFileSync('git', ['--git-dir', dir, 'update-ref', name, sha]);
 }
 
-export async function verifyImport(source: DocStore | undefined, dataDir: string | undefined): Promise<ImportMarker> {
+export async function verifyImport(source: DocStore | undefined, dataDir: string | undefined, podsDir?: string): Promise<ImportMarker> {
   const notes: string[] = [];
   // Whatever was verified before no longer counts: only a verification that finishes leaves a marker.
   await unverify();
@@ -314,11 +379,10 @@ export async function verifyImport(source: DocStore | undefined, dataDir: string
     const i = want.findIndex((r, n) => key(r) !== got[n]);
     if (i >= 0) throw new Error(`the documents aren't in their source's order, from ${key(want[i])}`);
   }
-  // Private files, byte for byte against the data directory.
+  // Private files, byte for byte against the data directory (and the pods' data directory).
   if (dataDir) {
     const stored = new Map((await (await rawStore()).rows()).filter((r) => r.collection === 'privateFiles').map((r) => [r.id, (JSON.parse(r.data) as { data: string }).data]));
-    for (const f of privateFilesIn(dataDir)) {
-      const id = privateRowId(f.userId, f.relPath);
+    for (const [id, f] of await privateSources(dataDir, podsDir)) {
       if (stored.get(id) !== fs.readFileSync(f.file).toString('base64')) throw new Error(`private file ${id} wasn't imported as it is on disk`);
       stored.delete(id);
     }

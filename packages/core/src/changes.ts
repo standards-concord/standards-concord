@@ -400,7 +400,9 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     case 'setSuperClasses': {
       const iri = requireTerm(ex(op.iri));
       if (!g.isClassIri(iri)) fail(`<${iri}> is not a class`);
-      const supers = op.superClasses.map(ex).map(requireClass);
+      // Retaining an asserted parent must not require declaring its external vocabulary.
+      const asserted = new Set(objects(s, iri, P.subClassOf).filter((t) => t.termType === 'NamedNode').map((t) => t.value));
+      const supers = op.superClasses.map(ex).map((parent) => asserted.has(parent) ? parent : requireClass(parent));
       if (supers.includes(iri)) fail('a class cannot be its own superclass');
       removeAll(iri, P.subClassOf, (t) => t.termType === 'NamedNode');
       for (const sc of supers) add(iri, P.subClassOf, nn(sc));

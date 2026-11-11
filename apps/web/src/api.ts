@@ -200,6 +200,7 @@ export type NewOntologyInput = {
   creditCreator?: boolean;
 };
 export type NewChangeRequestInput = {
+  submit?: boolean;
   title: string;
   description: string;
   kind: ChangeRequestKind;
@@ -243,6 +244,8 @@ export interface PublicationNeedingAdmin {
 export interface MediaIndex {
   release: { tag: string; name?: string; publishedAt?: string; url: string } | null;
   files: { name: string; size: number; url: string }[];
+  /** The server couldn't look the videos up and had none kept from before. */
+  unavailable?: boolean;
 }
 
 /** The feature clips' playlist (concord-clips.json, written by walkthrough/record.ts). */

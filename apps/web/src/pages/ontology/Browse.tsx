@@ -18,6 +18,7 @@ import { ProposedEditNotice, TermEditForm } from '../../components/TermEdit';
 import type { ChangeRequestDetail } from '@concord/shared';
 import { Badge, Button, Card, Chip, CopyButton, EmptyState, ErrorCard, Input, Loading, Select, cx } from '../../components/ui';
 import { useOntology } from './Layout';
+import { DiagramProposals, type ProposalRenderState } from '../../components/ontology-viz/DiagramProposals';
 
 function TermLink({ iri, label, onSelect }: { iri: string; label: Labeler; onSelect: (iri: string) => void }) {
   // Datatypes (xsd:boolean and friends) aren't terms of this ontology, so there's nothing to open.
@@ -480,6 +481,7 @@ function DiagramView({
   hops,
   onSelect,
   onCentre,
+  proposals,
 }: {
   model: OntologyModel;
   selected?: string;
@@ -487,8 +489,10 @@ function DiagramView({
   hops: number;
   onSelect: (iri: string) => void;
   onCentre: (iri: string) => void;
+  proposals: ProposalRenderState;
 }) {
   const { view, label } = useOntology();
+  const { toggle: proposeToggle, notice, preview, onPick } = proposals;
   const [opts, setOpts] = useState<DiagramOptions>(DEFAULT_DIAGRAM_OPTIONS);
   const [drawAll, setDrawAll] = useState(false);
   const large = !focus && model.classes.size > LARGE_DIAGRAM && !drawAll;
@@ -496,53 +500,70 @@ function DiagramView({
   const starts = useMemo(() => (large ? hubs(model, 8) : []), [large, model]);
   const toggle = (k: keyof DiagramOptions) => setOpts((o) => ({ ...o, [k]: !o[k] }));
   if (!view.data) return null;
-  if (large)
-    return (
-      <section data-testid="large-diagram" aria-labelledby="large-diagram-title">
-        <Card className="p-6">
-          <h3 id="large-diagram-title" className="font-semibold">
-            Where would you like to start?
-          </h3>
-          <p className="mt-1 max-w-prose text-sm text-muted">
-            This ontology has {model.classes.size} classes, too many to read in one diagram. Pick a class to see it and its direct links, or choose one from the Terms panel.
-          </p>
-          <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Start from a class">
-            {starts.map((iri) => (
-              <Button key={iri} size="sm" variant="secondary" onClick={() => onCentre(iri)}>
-                {label(iri)}
-              </Button>
-            ))}
-          </div>
-          <Button size="sm" variant="ghost" className="mt-4" onClick={() => setDrawAll(true)}>
-            Draw all {model.classes.size} classes anyway
-          </Button>
-        </Card>
-      </section>
-    );
+  const diagramView = view.data;
+  const largeDiagram = (
+    <section data-testid="large-diagram" aria-labelledby="large-diagram-title">
+      <Card className="p-6">
+        <h3 id="large-diagram-title" className="font-semibold">
+          Where would you like to start?
+        </h3>
+        <p className="mt-1 max-w-prose text-sm text-muted">
+          This ontology has {model.classes.size} classes, too many to read in one diagram. Pick a class to see it and its direct links, or choose one from the Terms panel.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Start from a class">
+          {starts.map((iri) => (
+            <Button key={iri} size="sm" variant="secondary" onClick={() => onCentre(iri)}>
+              {label(iri)}
+            </Button>
+          ))}
+        </div>
+        <Button size="sm" variant="ghost" className="mt-4" onClick={() => setDrawAll(true)}>
+          Draw all {model.classes.size} classes anyway
+        </Button>
+      </Card>
+    </section>
+  );
   return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Diagram options">
-        <Chip active={opts.attributes} onClick={() => toggle('attributes')}>
-          Attributes
-        </Chip>
-        <Chip active={opts.inherited} onClick={() => toggle('inherited')} disabled={!opts.attributes}>
-          Inherited attributes
-        </Chip>
-        <Chip active={opts.associations} onClick={() => toggle('associations')}>
-          Relationships
-        </Chip>
-        <Chip active={opts.subclasses} onClick={() => toggle('subclasses')}>
-          Subclasses
-        </Chip>
-      </div>
-      <ClassDiagram view={view.data} model={model} label={label} scope={scope} options={opts} selected={selected} focus={focus} onSelect={onSelect} height={640} detailsId="term-details" />
-    </div>
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Diagram options">
+            <Chip active={opts.attributes} onClick={() => toggle('attributes')}>
+              Attributes
+            </Chip>
+            <Chip active={opts.inherited} onClick={() => toggle('inherited')} disabled={!opts.attributes}>
+              Inherited attributes
+            </Chip>
+            <Chip active={opts.associations} onClick={() => toggle('associations')}>
+              Relationships
+            </Chip>
+            <Chip active={opts.subclasses} onClick={() => toggle('subclasses')}>
+              Subclasses
+            </Chip>
+            {proposeToggle}
+          </div>
+          {notice}
+          {large && !preview?.scope.size ? largeDiagram : (
+            <ClassDiagram
+              view={diagramView}
+              model={model}
+              preview={preview}
+              onPick={onPick}
+              label={label}
+              scope={large && preview ? preview.scope : scope}
+              options={opts}
+              selected={selected}
+              focus={focus}
+              onSelect={onSelect}
+              height={640}
+              detailsId="term-details"
+            />
+          )}
+        </div>
   );
 }
 
 export function BrowseTab() {
+  const { id, ontology, view, label } = useOntology();
   const { session } = useSession();
-  const { id, view, label } = useOntology();
   const [params, setParams] = useSearchParams();
   const selected = params.get('term') ?? undefined;
   const newCodeList = params.get('new') === 'code-list';
@@ -751,25 +772,34 @@ export function BrowseTab() {
           </div>
         </div>
       ) : (
-        <div className={cx('grid gap-4', showNav ? 'lg:grid-cols-[280px_1fr]' : 'grid-cols-1')}>
-          {showNav && <div id="browse-nav">{nav}</div>}
-          <div className={cx('grid min-w-0 gap-4', selected && 'xl:grid-cols-[1fr_380px]')}>
-            <div className="min-w-0 space-y-2">
-              <ScopeControl hops={hops} setHops={setHops} anchor={anchor} centreOn={centreOn} onCentre={centre} />
-              <DiagramView model={model} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} onCentre={centre} />
+        <DiagramProposals key={`${session?.user?.id ?? 'guest'}:${id}`} userId={session?.user?.id} ontologyId={id} view={view.data!} label={label} selected={selected} onSelect={selectOnCanvas}>
+          {(proposals) => (
+            <div className={cx('grid gap-4', showNav ? 'lg:grid-cols-[280px_1fr]' : 'grid-cols-1')}>
+              {showNav && <div id="browse-nav">{nav}</div>}
+              <div className={cx('grid min-w-0 gap-4', (!!selected || !!proposals.panel) && 'xl:grid-cols-[1fr_380px]')}>
+                <div className="min-w-0 space-y-2">
+                  <ScopeControl hops={hops} setHops={setHops} anchor={anchor} centreOn={centreOn} onCentre={centre} />
+                  <DiagramView model={model} selected={selected} focus={focus} hops={hops} onSelect={selectOnCanvas} onCentre={centre} proposals={proposals} />
+                </div>
+                {/* While proposing, the proposal panel takes the details column, so the diagram stays in view to click classes into the form. */}
+                {proposals.panel ? (
+                  <div className="min-w-0 xl:sticky xl:top-4 xl:max-h-[calc(100vh-2rem)] xl:self-start xl:overflow-y-auto">{proposals.panel}</div>
+                ) : (
+                  selected && (
+                    <aside
+                      id="term-details"
+                      tabIndex={-1}
+                      className="min-w-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto"
+                      aria-label="Term details"
+                    >
+                      <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood={false} compact onClose={clear} />
+                    </aside>
+                  )
+                )}
+              </div>
             </div>
-            {selected && (
-              <aside
-                id="term-details"
-                tabIndex={-1}
-                className="min-w-0 rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-accent xl:max-h-[calc(100vh-6rem)] xl:overflow-y-auto"
-                aria-label="Term details"
-              >
-                <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood={false} compact onClose={clear} />
-              </aside>
-            )}
-          </div>
-        </div>
+          )}
+        </DiagramProposals>
       )}
     </div>
   );

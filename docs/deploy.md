@@ -33,7 +33,7 @@ If the server is slow during reasoning checks, move it to `Standard_B2als_v2` (4
 
 6. **Add the Claude key.** `./deploy/azure/set-key.sh ANTHROPIC_API_KEY` asks for the value without showing it, so the interviewer, triage, meeting analysis, persona simulation and feedback chat use Claude.
 
-7. **Check it.** `./deploy/smoke.sh https://<vercel-url>` signs in as a demo tester and exercises the API, validation with the OWL reasoner, SPARQL, an interview, a change request and the MCP endpoint through Vercel. Then send testers `https://<vercel-url>/alpha`.
+7. **Check it.** `./deploy/smoke.sh https://<vercel-url>` signs in as a demo tester and exercises the API, validation with the OWL reasoner, SPARQL, an interview, a change request and the MCP endpoint through Vercel, and checks that the welcome page's videos are there and play (`scripts/check-media.mjs`; see [walkthrough/README.md](../walkthrough/README.md#releases)). Then send testers `https://<vercel-url>/alpha`.
 
 ## Adding keys later
 

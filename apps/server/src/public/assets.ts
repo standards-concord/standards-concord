@@ -183,6 +183,8 @@ dl.facts ul{margin:0;padding-left:1.1em}
 .example{font-style:italic}
 .sep{color:var(--muted)}
 .pill{background:var(--bg-soft);color:var(--muted);border:1px solid var(--line)}
+.example-answer{overflow-x:auto}
+.example-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .table{width:100%;border-collapse:collapse;font-size:.95rem}
 .table th,.table td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
 .table th{font-size:.78rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
@@ -324,11 +326,14 @@ export const PAGE_SCRIPT = `
     },400);
   });}
 
-  // Copy a term's IRI.
-  document.querySelectorAll('[data-copy]').forEach(function(b){b.addEventListener('click',function(){
-    var done=function(){b.classList.add('copied');b.setAttribute('aria-label','Copied');setTimeout(function(){b.classList.remove('copied');b.setAttribute('aria-label','Copy IRI');},1500);};
-    if(navigator.clipboard)navigator.clipboard.writeText(b.getAttribute('data-copy')).then(done,function(){});
-  });});
+  // Copy text, keeping each button's label.
+  document.querySelectorAll('[data-copy]').forEach(function(b){
+    var label=b.getAttribute('aria-label');
+    b.addEventListener('click',function(){
+      var done=function(){b.classList.add('copied');b.setAttribute('aria-label','Copied');setTimeout(function(){b.classList.remove('copied');b.setAttribute('aria-label',label);},1500);};
+      if(navigator.clipboard)navigator.clipboard.writeText(b.getAttribute('data-copy')).then(done,function(){});
+    });
+  });
 
   // Report a problem: a dialog on this site, the report page anywhere else (e.g. a copy on GitHub).
   var dialog=document.querySelector('.report-dialog');
