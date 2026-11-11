@@ -26,7 +26,7 @@ const IN_PROGRESS: ChangeRequestStatus[] = ['voting', 'review', 'triage', 'needs
  * waiting for you, what is changing, and how healthy the draft is. People and activity sit beside it.
  */
 export function OverviewTab() {
-  const { id, ontology: o, label, myRoles, hasRole } = useOntology();
+  const { id, ontology: o, view, label, myRoles, hasRole } = useOntology();
   const { session, now } = useSession();
   const me = session?.user?.id;
   const validation = useAsync(() => api.validation(id, 'working'), [id], { keep: `validation|${id}|working` });
@@ -86,6 +86,7 @@ export function OverviewTab() {
                 <Link to={`/o/${id}/browse`} className={proseLink}>
                   {plural(o.stats.properties, 'property', 'properties')}
                 </Link>
+                {!!view.data?.conceptSchemes?.length && <>{' · '}<Link to={`/o/${id}/browse`} className={proseLink}>{plural(view.data.conceptSchemes.length, 'code list')}</Link></>}
                 {o.stats.useCases !== undefined && (
                   <>
                     {' · '}

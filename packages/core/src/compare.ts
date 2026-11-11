@@ -49,7 +49,8 @@ export interface GraphComparison {
 /** Predicates that describe a term for people (or record its history) rather than constrain its meaning. */
 const ANNOTATION_NS = [NS.skos, NS.dcterms, NS.dc, NS.prov, NS.vann, NS.schema, 'http://www.w3.org/ns/adms#'];
 const ANNOTATION_P = new Set([NS.rdfs + 'label', NS.rdfs + 'comment', NS.rdfs + 'seeAlso', NS.rdfs + 'isDefinedBy', NS.owl + 'versionInfo', NS.owl + 'deprecated']);
-const isAnnotation = (p: string) => ANNOTATION_P.has(p) || ANNOTATION_NS.some((ns) => p.startsWith(ns));
+const SKOS_LOGICAL = new Set(['inScheme', 'broader', 'topConceptOf', 'notation'].map((p) => NS.skos + p));
+const isAnnotation = (p: string) => !SKOS_LOGICAL.has(p) && (ANNOTATION_P.has(p) || ANNOTATION_NS.some((ns) => p.startsWith(ns)));
 const SUBCLASS = NS.rdfs + 'subClassOf';
 
 interface TermFacts {
@@ -86,7 +87,7 @@ async function factsOf(g: OntologyGraph, reasoner?: ReasonerResult): Promise<Map
   };
 
   const out = new Map<string, TermFacts>();
-  const terms = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.annotationProperties, ...v.individuals];
+  const terms = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.annotationProperties, ...v.individuals, ...v.concepts, ...v.conceptSchemes];
   for (const t of terms) {
     if (t.iri === g.ontologyIRI || out.has(t.iri)) continue;
     const all: string[] = [];

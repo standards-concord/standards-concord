@@ -225,7 +225,7 @@ function crossSite(req: Request): boolean {
 
 /* ------------------------------- the form ------------------------------- */
 
-const KIND: Record<TermView['kind'], string> = { class: 'Class', objectProperty: 'Object property', datatypeProperty: 'Datatype property', annotationProperty: 'Annotation property', individual: 'Individual' };
+const KIND: Record<TermView['kind'], string> = { class: 'Class', objectProperty: 'Object property', datatypeProperty: 'Datatype property', annotationProperty: 'Annotation property', individual: 'Individual', conceptScheme: 'Code list', concept: 'Code' };
 const nameOf = (t: TermView) => t.label?.trim() || t.iri.replace(/^.*[#/]/, '') || t.iri;
 
 

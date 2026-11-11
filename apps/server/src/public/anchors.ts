@@ -15,7 +15,7 @@ const UI_ID = /^(main|(tab|sec|uc|req)-.*)$/;
  * their local name, prefixed or numbered when it would clash.
  */
 export function termAnchors(view: OntologyView, namespace: string): Map<string, string> {
-  const all: TermView[] = [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals];
+  const all: TermView[] = [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals, ...(view.conceptSchemes ?? []), ...(view.concepts ?? [])];
   const own = (t: TermView) => namespace.length > 0 && t.iri.startsWith(namespace) && t.iri.length > namespace.length;
   // Own terms first, so they win their exact fragment. Among them, a name
   // already holding "%" goes last: browsers rewrite #Café as #Caf%C3%A9, so

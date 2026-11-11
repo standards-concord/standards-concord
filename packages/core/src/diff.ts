@@ -50,9 +50,12 @@ function fieldValues(t: TermView): Partial<Record<FieldName, string[]>> {
       types: i.types,
       facts: Object.entries(i.facts).flatMap(([p, vs]) => vs.map((v) => `<${p}> ${JSON.stringify(v)}`)),
     });
-  } else {
+  } else if (t.kind === 'concept') {
+    Object.assign(base, { notation: one(t.notation), inScheme: t.inScheme, broader: t.broader, topConceptOf: t.topConceptOf });
+  } else if (t.kind !== 'conceptScheme') {
     const p = t as PropertyView;
     Object.assign(base, {
+      codeList: one(p.codeList),
       domain: [...p.domain, ...(p.domainExpressions ?? []).map((e) => `{${e}}`)],
       range: [...p.range, ...(p.rangeExpressions ?? []).map((e) => `{${e}}`)],
       superProperties: p.superProperties,
@@ -66,7 +69,7 @@ function fieldValues(t: TermView): Partial<Record<FieldName, string[]>> {
 function allTerms(g: OntologyGraph): Map<string, TermView> {
   const v = g.view();
   const m = new Map<string, TermView>();
-  for (const t of [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.annotationProperties, ...v.individuals]) {
+  for (const t of [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.annotationProperties, ...v.individuals, ...v.concepts, ...v.conceptSchemes]) {
     m.set(`${t.kind} ${t.iri}`, t);
   }
   return m;
@@ -81,6 +84,10 @@ function pretty(v: string, prefixes: Record<string, string>): string {
 function compareFields(before: TermView | undefined, after: TermView | undefined): FieldChange[] {
   const a = before ? fieldValues(before) : {};
   const b = after ? fieldValues(after) : {};
+  if (before && after && 'codeList' in after && after.codeList) { delete a.range; delete b.range; }
+  // Clearing to no range loosens; replacing a list with an ordinary range must
+  // still classify that new constraint (it may narrow the data).
+  else if (before && after && 'codeList' in before && before.codeList) delete a.range;
   const out: FieldChange[] = [];
   const names = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<FieldName>;
   for (const f of names) {
@@ -193,7 +200,8 @@ export function diffOntologies(before: OntologyGraph, after: OntologyGraph): Ont
     else if (tb.deprecated && !ta.deprecated) change = 'undeprecated';
     else if (fields.length) change = 'modified';
     else continue;
-    const details = change === 'added' ? [`added ${t.kind}`] : change === 'removed' ? [`removed ${t.kind}`] : describe(fields, prefixes);
+    const kind = t.kind === 'concept' ? 'code' : t.kind === 'conceptScheme' ? 'code list' : t.kind;
+    const details = change === 'added' ? [`added ${kind}`] : change === 'removed' ? [`removed ${kind}`] : describe(fields, prefixes);
     terms.push({ iri: t.iri, label: ta?.label ?? tb?.label, kind: t.kind, change, details, fields });
   }
 

@@ -9,7 +9,7 @@ import type { OntologyView, TermView } from './types.js';
 
 /** Every term in the view, in the order OntologyGraph.term() prefers a kind for a punned IRI. */
 export function allTerms(v: OntologyView): TermView[] {
-  return [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.annotationProperties, ...v.individuals];
+  return [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.annotationProperties, ...v.individuals, ...(v.conceptSchemes ?? []), ...(v.concepts ?? [])];
 }
 
 /** The term with this IRI, as OntologyGraph.term() would give it (a class before a property before an individual). */
@@ -35,7 +35,10 @@ export function usedBy(all: TermView[], iri: string, compact: (i: string) => str
       for (const r of t.restrictions) if (r.property === iri || r.filler === iri) out.push({ iri: t.iri, label: t.label, via: `restriction ${compact(r.property)} ${r.kind}` });
     } else if (t.kind === 'individual') {
       if (t.types.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'instance of' });
-    } else {
+    } else if (t.kind === 'concept') {
+      if (t.inScheme.includes(iri) || t.broader.includes(iri) || t.topConceptOf.includes(iri)) out.push({ iri: t.iri, label: t.label, via: t.inScheme.includes(iri) ? 'in code list' : 'broader code' });
+    } else if ('domain' in t) {
+      if (t.codeList === iri) out.push({ iri: t.iri, label: t.label, via: 'code list' });
       if (t.domain.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'domain' });
       if (t.range.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'range' });
       if (t.superProperties.includes(iri)) out.push({ iri: t.iri, label: t.label, via: 'subproperty of' });
@@ -75,16 +78,17 @@ export function searchTerms(all: TermView[], query: string, limit = 20): TermVie
     seen.add(t.iri);
     const label = (t.label ?? '').toLowerCase();
     const ln = localName(t.iri).toLowerCase();
+    const notation = t.kind === 'concept' ? t.notation?.toLowerCase() : undefined;
     const alts = (t.altLabels ?? []).map((a) => a.toLowerCase());
     const def = (t.definition ?? '').toLowerCase();
     let score = 0;
-    if (label === q || ln === squashed) score = 100;
+    if (label === q || ln === squashed || notation === q) score = 100;
     else if (alts.includes(q)) score = 90;
-    else if (label.startsWith(q) || ln.startsWith(squashed)) score = 80;
+    else if (label.startsWith(q) || ln.startsWith(squashed) || notation?.startsWith(q)) score = 80;
     else if (label.includes(q) || ln.includes(squashed)) score = 70;
     else if (alts.some((a) => a.includes(q))) score = 60;
     else {
-      const hay = [label, ln, ...alts].join(' ');
+      const hay = [label, ln, notation ?? '', ...alts].join(' ');
       const hits = tokens.filter((tok) => hay.includes(tok)).length;
       const defHits = tokens.filter((tok) => def.includes(tok)).length;
       if (hits === tokens.length) score = 50;

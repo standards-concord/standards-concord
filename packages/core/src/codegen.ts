@@ -268,6 +268,16 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
         .replaceAll(new RegExp(`(\\(this, ${escapeRe(iri)}, LiteralAs\\.\\w+, )LiteralFrom\\.\\w+\\)`, 'g'), (_m, head: string) => `${head}${writer})`);
       if (text !== before) needsWriter = true;
     }
+    // Code-list values are resources; keep a string API while writing RDF named nodes.
+    for (const p of model.byShape.get(c.shapeIRI)?.declared ?? []) {
+      if (!p.iri) continue;
+      const path = escapeRe(JSON.stringify(p.path));
+      text = text.replaceAll(new RegExp(`(subjectPredicate\\(this, ${path}, )LiteralAs\\.string`, 'g'), '$1NamedNodeAs.string')
+        .replaceAll(new RegExp(`(subjectPredicate\\(this, ${path}, NamedNodeAs\\.string, )LiteralFrom\\.string`, 'g'), '$1NamedNodeFrom.string')
+        .replaceAll(new RegExp(`(object\\(this, ${path}, value, )LiteralFrom\\.string`, 'g'), '$1NamedNodeFrom.string');
+      wrapperImports.add('NamedNodeAs');
+      wrapperImports.add('NamedNodeFrom');
+    }
     if (/\bILangString\b/.test(text)) needsLangString = true;
     const doc = c === thing
       ? `/** Any resource. Values whose class has no class of its own here are wrapped as ${c.name}. */`

@@ -23,6 +23,15 @@ export interface ClassificationRule {
 }
 
 export const CLASSIFICATION_RULES: ClassificationRule[] = [
+  { id: 'code-list-added', level: 'minor', description: 'A governed code list was added.' },
+  { id: 'code-added', level: 'minor', description: 'A code was added to a code list, widening the allowed values.' },
+  { id: 'code-notation-changed', level: 'major', description: 'An existing code notation changed or was removed: stored values may break.' },
+  { id: 'code-notation-added', level: 'minor', description: 'A notation was added to a code that had none.' },
+  { id: 'code-moved', level: 'major', description: 'A code changed its parent or scheme: rollups may change.' },
+  { id: 'code-removed', level: 'major', description: 'A code was removed from a code list.' },
+  { id: 'code-list-removed', level: 'major', description: 'A governed code list was removed.' },
+  { id: 'code-list-set', level: 'major', description: 'An existing property gained or changed its code list: existing data may fail validation.' },
+  { id: 'code-list-cleared', level: 'minor', description: 'A property code list was cleared, loosening its constraints.' },
   // PATCH
   { id: 'no-op', level: 'patch', description: 'No logical or annotation change.' },
   { id: 'annotation-changed', level: 'patch', description: 'Label, alt label, definition, comment, example, editorial note, source or translation changed on an existing term. Definition rewording must keep the same referents (OBO principle 19); a change of meaning needs a new term.' },
@@ -181,6 +190,7 @@ export function classifyChange(diff: OntologyDiff, before?: OntologyGraph, after
   const isNew = (v: string) => added.has(v.replace(/^<|>$/g, ''));
 
   for (const t of diff.terms) {
+    const kind = t.kind === 'concept' ? 'code' : t.kind === 'conceptScheme' ? 'code list' : t.kind;
     const label = t.label ? ` "${t.label}"` : '';
     const name = t.kind === 'ontology' ? 'ontology' : `${c(t.iri)}${label}`;
 
@@ -209,13 +219,13 @@ export function classifyChange(diff: OntologyDiff, before?: OntologyGraph, after
 
     if (t.change === 'added') {
       if (removed.has(t.iri)) emit('term-kind-changed', t.iri, `${name} changed from ${removed.get(t.iri)!.kind} to ${t.kind}`);
-      else if (!renameTargets.has(t.iri)) emit('term-added', t.iri, `new ${t.kind} ${name}`);
+      else if (!renameTargets.has(t.iri)) emit(t.kind === 'concept' ? 'code-added' : t.kind === 'conceptScheme' ? 'code-list-added' : 'term-added', t.iri, `new ${kind} ${name}`);
       continue;
     }
     if (t.change === 'removed') {
       if (!added.has(t.iri)) {
         const wasDeprecated = t.fields.some((f) => f.field === 'deprecated' && f.removed.includes('true'));
-        emit('term-removed', t.iri, `${t.kind} ${name} was removed${wasDeprecated ? ' (it was deprecated; final removal is still breaking)' : ''}`);
+        emit(t.kind === 'concept' ? 'code-removed' : t.kind === 'conceptScheme' ? 'code-list-removed' : 'term-removed', t.iri, `${kind} ${name} was removed${wasDeprecated ? ' (it was deprecated; final removal is still breaking)' : ''}`);
       }
       continue;
     }
@@ -266,6 +276,20 @@ export function classifyChange(diff: OntologyDiff, before?: OntologyGraph, after
       if (isDeprecation) continue; // OBO obsoletion strips logical axioms from the old term; that is part of the deprecation.
 
       switch (f.field) {
+        case 'notation':
+          emit(f.removed.length ? 'code-notation-changed' : 'code-notation-added', t.iri, `notation of ${name}: ${list(f.removed) || '∅'} → ${list(f.added) || '∅'}`);
+          break;
+        case 'broader': case 'inScheme': case 'topConceptOf':
+          // A move changes both broader and topConceptOf; report one reason per code.
+          if (!reasons.some((r) => r.rule === 'code-moved' && r.iri === t.iri)) emit('code-moved', t.iri, `code ${name} moved: ${t.details.filter((d) => /^(broader|inScheme|topConceptOf):/.test(d)).join('; ')}`);
+          break;
+        case 'codeList':
+          if (!f.removed.length && f.added.length && f.added.every(isNew)) {
+            emit('axiom-relates-new-term', t.iri, `${name} takes codes from new code list ${list(f.added)}`);
+          } else {
+            emit(f.added.length ? 'code-list-set' : 'code-list-cleared', t.iri, `code list of ${name}: ${list(f.removed) || '∅'} → ${list(f.added) || '∅'}`);
+          }
+          break;
         case 'superClasses':
           for (const r of f.removed) emit('superclass-removed', t.iri, `${name} is no longer a subclass of ${c(r)}`);
           for (const a of f.added) {

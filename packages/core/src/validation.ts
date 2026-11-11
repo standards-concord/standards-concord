@@ -395,7 +395,7 @@ export interface ValidateOptions {
 const SHAPE_ANNOTATIONS = ['name', 'description', 'order', 'group', 'severity', 'message', 'deactivated'];
 const ALLOWED: Record<'node' | 'property' | 'value', Set<string>> = {
   node: new Set(['targetClass', 'property', ...SHAPE_ANNOTATIONS].map((k) => SH + k)),
-  property: new Set(['path', 'datatype', 'class', 'minCount', 'maxCount', 'hasValue', 'qualifiedValueShape', 'qualifiedMinCount', 'qualifiedMaxCount', ...SHAPE_ANNOTATIONS].map((k) => SH + k)),
+  property: new Set(['path', 'datatype', 'class', 'minCount', 'maxCount', 'hasValue', 'in', 'qualifiedValueShape', 'qualifiedMinCount', 'qualifiedMaxCount', ...SHAPE_ANNOTATIONS].map((k) => SH + k)),
   value: new Set(['class', 'datatype'].map((k) => SH + k)),
 };
 

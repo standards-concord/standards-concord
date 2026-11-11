@@ -16,6 +16,7 @@ import type {
   OAuthConnection,
   OAuthRequestInfo,
   ChangeOp,
+  CodeListEditInput,
   ChangeRequest,
   ChangeRequestDetail,
   ChangeRequestKind,
@@ -348,6 +349,7 @@ export const api = {
   createChangeRequest: (id: string, body: NewChangeRequestInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/change-requests`, body),
   reportBug: (id: string, body: { title: string; description: string; termIri?: string }) =>
     post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/bug-reports`, body),
+  proposeCodeListEdit: (id: string, body: CodeListEditInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/code-list-edits`, { ...body }),
   proposeTermEdit: (id: string, body: TermEditInput) => post<ChangeRequestDetail>(`/api/ontologies/${e(id)}/term-edits`, body),
   changeRequest: (id: string) => get<ChangeRequestDetail>(`/api/change-requests/${e(id)}`),
   turtleDiff: (id: string) => get<{ before: string; after: string } | { error: string }>(`/api/change-requests/${e(id)}/turtle-diff`),

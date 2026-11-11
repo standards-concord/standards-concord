@@ -79,3 +79,65 @@ Classification rules: see `src/classify.ts` CLASSIFICATION_RULES. Default semant
 - minor: adding new terms; deprecating a term (with replacement); adding `some`/min restriction to new class only; broadening domain/range (to a superclass) ; adding altLabels/examples to terms *does* = patch.
 - patch: annotation-only changes to existing terms (label wording, definition clarification, comment, examples, altLabels, editorial notes), metadata changes.
 Overall level = max of reasons. Empty diff = patch with reason "no-op".
+
+## Governed code lists
+
+`OntologyView.conceptSchemes` and `.concepts` contain `ConceptSchemeView` and
+`ConceptView`. Their `kind` values are `conceptScheme` and `concept`. They do
+not also occur in `individuals`. SKOS declarations are hidden from UI-facing
+class/property arrays, but retained in serialised RDF and Manchester syntax.
+`allTerms`, `termDetail` and search include both kinds. Their display label
+uses `skos:prefLabel`, falling back to `rdfs:label` for legacy graphs.
+
+`CodeListOp` (a subset of `ChangeOp`) supports:
+
+- `addConceptScheme { localName, label, definition, altLabels?, editorialNote?, source? }`
+- `addConcept { scheme, localName, label, definition, notation?, broader?, altLabels?, examples?, editorialNote?, source? }`
+- `updateConcept { iri, set, expect? }`: codes or schemes; `set`/`expect` fields are
+  `label`, `definition`, `notation`, `altLabels`, `examples`, `editorialNote`.
+  Schemes have no notation or examples. Empty text/list clears a field, except
+  label. Other-language annotations are retained. Expected values compare as
+  trimmed text or sets, exactly like `updateAnnotations`.
+- `moveConcept { iri, broader: IRI | null }`: null makes a top-level code.
+- `deprecateConcept { iri, reason, replacedBy? }`: replacement is a different
+  code in the same scheme. Deprecation retains membership and data validity.
+- `setCodeList { property, scheme: IRI | null }`: object properties only;
+  replaces the entire range. Null removes it. `addObjectProperty.codeList`
+  provides the same encoding at creation and is mutually exclusive with range.
+
+Code names follow individual naming; scheme names use UpperCamelCase. Notation
+is a plain literal unique within each scheme. Broader links must remain within
+a scheme and acyclic. Removal refuses schemes containing codes and codes with
+narrower codes. Rename rewrites all references and leaves the old IRI deprecated.
+
+A new list and its first property association in the same request are minor
+(`axiom-relates-new-term`). Assigning an existing list, or replacing a property’s
+existing list, is major because the accepted values change.
+
+The range is `skos:Concept and (skos:inScheme value :Scheme)` in OWL (an anonymous
+intersection class). `PropertyView.codeList` exposes the scheme IRI, suppressing
+the opaque range expression. Concord declares the small SKOS vocabulary subset
+locally, without `owl:imports`. Top codes use only `skos:topConceptOf`; inverse
+`topConcepts`/`narrower` fields are computed.
+
+SHACL derives `sh:in` with every code IRI, including deprecated codes, and no
+`sh:class` for the code-list range. Referenced codes need no type triples in data.
+LinkML exports schemes as enums, keyed by notation or code local name, with full
+code IRIs as `meaning`. Generated TypeScript/JavaScript uses IRI strings for now.
+Manchester is an export format; Concord has no Manchester input parser.
+
+The server endpoint `POST /api/ontologies/:id/code-list-edits` accepts
+`CodeListEditInput` from `@concord/shared`: `{ ops, reason?, submit? }`. It requires
+sign-in (401), validates strict operation shapes (400), limits requests to 50 ops,
+text to 4,000 characters and lists to 50 items, then dry-runs the operations in
+order (400 with the engine message on failure). It creates an editorial change
+request; the draft changes only after review and merge. The origin is
+`{ type: 'code-list-edit', scheme }`, naming the first affected scheme when several
+lists are edited in one request.
+
+For `updateConcept`, clients send `previous` rather than `expect`. Stale values
+for edited fields return 409. The server records all edited fields' current values
+as `expect`, protecting the later merge too. `definitionIntent: 'new-meaning'`
+optionally declares a major meaning change; wording changes retain the existing
+independent definition-review requirements. Other changes follow the dedicated
+rules documented in `CLASSIFICATION_RULES`.

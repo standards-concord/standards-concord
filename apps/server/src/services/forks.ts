@@ -346,6 +346,20 @@ export function termsOf(ops: ChangeOp[], namespace: string): { iri: string; kind
   const touch = (iri: string, kind: string, label?: string) => out.set(iri, { iri, kind: out.get(iri)?.kind ?? kind, label: label ?? out.get(iri)?.label });
   for (const op of ops) {
     switch (op.op) {
+      case 'addConceptScheme':
+        touch(namespace + op.localName, 'conceptScheme', op.label);
+        break;
+      case 'addConcept':
+        touch(namespace + op.localName, 'concept', op.label);
+        break;
+      case 'setCodeList':
+        touch(op.property, 'objectProperty');
+        break;
+      case 'updateConcept':
+      case 'moveConcept':
+      case 'deprecateConcept':
+        touch(op.iri, 'concept');
+        break;
       case 'addClass':
         touch(namespace + op.localName, 'class', op.label);
         break;

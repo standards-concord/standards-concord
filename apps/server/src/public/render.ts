@@ -79,7 +79,7 @@ const KIND_LABEL: Record<TermView['kind'], string> = {
   objectProperty: 'Object property',
   datatypeProperty: 'Datatype property',
   annotationProperty: 'Annotation property',
-  individual: 'Individual',
+  individual: 'Individual', conceptScheme: 'Code list', concept: 'Code',
 };
 const LEVEL_LABEL: Record<ChangeLevel, string> = { major: 'Major', minor: 'Minor', patch: 'Patch' };
 const CHARACTERISTIC_LABEL: Record<string, string> = {
@@ -121,7 +121,7 @@ const anchorSafe = (s: string) => s.replace(/[^A-Za-z0-9_.-]/g, '-');
  * pages already written to disk: refreshReleasePages regenerates any page
  * that doesn't carry the current value.
  */
-export const PAGE_GENERATOR = 'Concord public page 4';
+export const PAGE_GENERATOR = 'Concord public page 5';
 
 const BUG_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88M14.12 3.88 16 2M9 7.13v-1a3 3 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
 const COPY_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
@@ -142,10 +142,13 @@ export function renderOntologyPage(input: OntologyPageInput): string {
     { id: id('sec-datatype-properties'), title: 'Datatype properties', terms: view.datatypeProperties },
     { id: id('sec-annotation-properties'), title: 'Annotation properties', terms: view.annotationProperties },
     { id: id('sec-individuals'), title: 'Individuals', terms: view.individuals },
+    { id: id('sec-code-lists'), title: 'Code lists', terms: view.conceptSchemes ?? [] },
   ].map((g) => ({ ...g, terms: [...g.terms].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'en', { sensitivity: 'base' })) }));
 
   const index = new Map<string, Indexed>();
   for (const g of groups) for (const t of g.terms) index.set(t.iri, { term: t, anchor: anchors.get(t.iri)!, name: nameOf(t) });
+
+  for (const t of view.concepts ?? []) index.set(t.iri, { term: t, anchor: anchors.get(t.iri)!, name: nameOf(t) });
 
   const ref = (iri: string) => {
     const hit = index.get(iri);
@@ -206,7 +209,9 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const propertyRows = (p: PropertyView) =>
     [
       row('Domain', list([...p.domain.map(ref), ...(p.domainExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">Any (unconstrained)</span>'),
-      row('Range', list([...p.range.map(ref), ...(p.rangeExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">Any (unconstrained)</span>'),
+      p.codeList
+        ? row('Values from code list', ref(p.codeList))
+        : row('Range', list([...p.range.map(ref), ...(p.rangeExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">Any (unconstrained)</span>'),
       row('Subproperty of', refs(p.superProperties)),
       row('Superproperty of', refs(byName(subProperties.get(p.iri)))),
       row('Inverse of', p.inverseOf ? ref(p.inverseOf) : ''),
@@ -221,7 +226,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const card = (t: TermView) => {
     const { anchor, name } = index.get(t.iri)!;
     const rows =
-      t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : propertyRows(t as PropertyView);
+      t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : 'domain' in t ? propertyRows(t) : '';
     const report = reportHref(t);
     return `<article class="term${t.deprecated ? ' is-deprecated' : ''}" id="${esc(anchor)}" data-kind="${t.kind}">
   <header class="term-head">
@@ -237,6 +242,25 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   ${t.comment && t.comment !== t.definition ? `<p class="comment muted">${esc(t.comment)}</p>` : ''}
   ${rows || annotationRows(t) ? `<dl class="facts">${rows}${annotationRows(t)}</dl>` : ''}
 </article>`;
+  };
+
+  const anchoredCodes = new Set<string>();
+  const codeList = (scheme: TermView): string => {
+    const codes = (view.concepts ?? []).filter((c) => c.inScheme.includes(scheme.iri));
+    const codeIris = new Set(codes.map((c) => c.iri));
+    const rendered = new Set<string>();
+    const branch = (code: typeof codes[number]): string => {
+      if (rendered.has(code.iri)) return '';
+      rendered.add(code.iri);
+      const anchor = anchors.get(code.iri)!;
+      const anchorAttribute = anchoredCodes.has(code.iri) ? '' : ` id="${esc(anchor)}"`;
+      anchoredCodes.add(code.iri);
+      const children = codes.filter((c) => c.broader.includes(code.iri)).map(branch).join('');
+      return `<li${anchorAttribute} data-kind="concept"><a href="#${esc(fragment(anchor))}"><code>${esc(code.notation ?? localName(code.iri))}</code></a> — ${esc(nameOf(code))}${code.deprecated ? ' <strong>Deprecated</strong>' : ''}${code.definition ? `<p>${esc(code.definition)}</p>` : ''}${children ? `<ul>${children}</ul>` : ''}</li>`;
+    };
+    const roots = codes.filter((c) => !c.broader.some((iri) => codeIris.has(iri)));
+    const body = roots.map(branch).join('') + codes.filter((c) => !rendered.has(c.iri)).map(branch).join('');
+    return card(scheme).replace('</article>', `<ul class="code-list" aria-label="Codes in ${esc(nameOf(scheme))}">${body}</ul></article>`);
   };
 
   /* ------------------------- class hierarchy ------------------------- */
@@ -373,7 +397,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
         .join('')}
       </tbody></table></details>
     </section>
-    ${nonEmpty.map((g) => `<section id="${g.id}" class="term-group" aria-label="${esc(g.title)}"><h2 class="group-title">${esc(g.title)} <span class="count">${g.terms.length}</span></h2>${g.terms.map(card).join('')}</section>`).join('')}
+    ${nonEmpty.map((g) => `<section id="${g.id}" class="term-group" aria-label="${esc(g.title)}"><h2 class="group-title">${esc(g.title)} <span class="count">${g.terms.length}</span></h2>${g.terms.map((t) => t.kind === 'conceptScheme' ? codeList(t) : card(t)).join('')}</section>`).join('')}
   </div>
 </div>
 ${reportDialog}`;

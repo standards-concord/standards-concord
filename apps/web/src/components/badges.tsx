@@ -59,6 +59,8 @@ export function originInfo(origin?: ChangeRequestOrigin): { icon: LucideIcon; la
       return { icon: Users, label: 'From a meeting' };
     case 'agent':
       return { icon: Bot, label: origin.agentName ? `From agent ${origin.agentName}` : 'From a coding agent' };
+    case 'code-list-edit':
+      return { icon: PenLine, label: 'Code list edit' };
     case 'term-edit':
       return { icon: PenLine, label: 'Edited on the term page' };
     case 'bug-report':

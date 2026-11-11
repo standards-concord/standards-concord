@@ -303,7 +303,7 @@ function linkCitations(md: string, refToId: Map<string, string>, reqIds: Set<str
 
 function termIndex(graph: OntologyGraph) {
   const v = graph.view();
-  const all: TermView[] = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.individuals];
+  const all: TermView[] = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.individuals, ...v.concepts, ...v.conceptSchemes];
   const byLabel = new Map<string, string>();
   for (const t of all) {
     if (t.label) byLabel.set(t.label.toLowerCase(), t.iri);
@@ -326,7 +326,7 @@ function termIndex(graph: OntologyGraph) {
 /** The IRIs of every term in a graph. */
 const termIris = (graph: OntologyGraph) => {
   const v = graph.view();
-  return new Set([...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.individuals].map((t) => t.iri));
+  return new Set([...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.individuals, ...v.concepts, ...v.conceptSchemes].map((t) => t.iri));
 };
 
 /**

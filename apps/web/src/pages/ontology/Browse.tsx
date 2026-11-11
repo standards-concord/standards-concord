@@ -1,7 +1,9 @@
 import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
-import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, PanelLeftClose, PanelLeftOpen, PenLine, Search, X } from 'lucide-react';
+import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, PanelLeftClose, PanelLeftOpen, PenLine, Plus, Search, X } from 'lucide-react';
+import { CodeEditForm, CodeListContents, NewCodeListPanel } from '../../components/CodeLists';
+import { useSession } from '../../lib/session';
 import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, allTerms, restrictionText, type Labeler } from '../../lib/ontology';
@@ -113,26 +115,27 @@ function TermDetailPanel({
   const t: TermDetail = term.data.detail;
   const current = term.data.for === `${id}|${iri}` && !term.loading;
   const prefixes = view.data?.prefixes;
-  if (editing && current)
+  if (editing && current) {
+    const onCancel = () => {
+      refocusEdit.current = true;
+      setEditing(false);
+    };
+    const onProposed = (cr: ChangeRequestDetail) => {
+      // Editors ignore a save finishing after their selected term has unmounted.
+      if (cr.origin.type === 'term-edit' ? cr.origin.termIri !== t.iri : cr.origin.type !== 'code-list-edit') return;
+      setEditing(false);
+      setProposed(cr);
+    };
     return (
       <Card className="p-5">
-        <TermEditForm
-          key={`${id}|${t.iri}`}
-          term={t}
-          termLabel={t.label ?? label(t.iri)}
-          onCancel={() => {
-            refocusEdit.current = true;
-            setEditing(false);
-          }}
-          onProposed={(cr) => {
-            // Only for the term on screen: a late response for another term is ignored.
-            if (cr.origin.type !== 'term-edit' || cr.origin.termIri !== t.iri) return;
-            setEditing(false);
-            setProposed(cr);
-          }}
-        />
+        {t.kind === 'concept' || t.kind === 'conceptScheme' ? (
+          <CodeEditForm key={`${id}|${t.iri}`} term={t} onCancel={onCancel} onProposed={onProposed} />
+        ) : (
+          <TermEditForm key={`${id}|${t.iri}`} term={t} termLabel={t.label ?? label(t.iri)} onCancel={onCancel} onProposed={onProposed} />
+        )}
       </Card>
     );
+  }
   const isClass = t.kind === 'class' && model.classes.has(t.iri);
   const isProp = t.kind === 'objectProperty' || t.kind === 'datatypeProperty' || t.kind === 'annotationProperty';
   const slotCount = isClass ? model.allSlots(t.iri).reduce((n, g) => n + g.slots.length, 0) : 0;
@@ -183,9 +186,9 @@ function TermDetailPanel({
       </div>
       {proposed && <ProposedEditNotice cr={proposed} onDismiss={() => setProposed(undefined)} />}
 
-      {t.deprecated && t.replacedBy && (
+      {t.deprecated && (
         <p className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-sm">
-          Deprecated — use <TermLink iri={t.replacedBy} label={label} onSelect={onSelect} /> instead.
+          Deprecated{t.replacedBy && <> — use <TermLink iri={t.replacedBy} label={label} onSelect={onSelect} /> instead</>}.
         </p>
       )}
 
@@ -216,10 +219,16 @@ function TermDetailPanel({
               <IriList iris={t.domain} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
             </Row>
             <Row k="Range">
-              <IriList iris={t.range} label={label} onSelect={onSelect} empty="Any (unconstrained)" />
+              {t.codeList ? <>Codes from <TermLink iri={t.codeList} label={label} onSelect={onSelect} /></> : <IriList iris={t.range} label={label} onSelect={onSelect} empty="Any (unconstrained)" />}
             </Row>
           </>
         )}
+        {t.kind === 'concept' && <>
+          <Row k="Code">{t.notation || '—'}</Row>
+          <Row k="In list"><IriList iris={t.inScheme} label={label} onSelect={onSelect} /></Row>
+          <Row k="Broader"><IriList iris={t.broader} label={label} onSelect={onSelect} empty="Top level" /></Row>
+          <Row k="Narrower"><IriList iris={t.narrower} label={label} onSelect={onSelect} /></Row>
+        </>}
         {t.kind === 'individual' && (
           <Row k="Instance of">
             <IriList iris={t.types} label={label} onSelect={onSelect} />
@@ -227,6 +236,7 @@ function TermDetailPanel({
         )}
       </dl>
 
+      {t.kind === 'conceptScheme' && <CodeListContents key={`${id}|${t.iri}`} scheme={t} onSelect={onSelect} onProposed={setProposed} refreshKey={proposed?.id} />}
       {isClass && (
         <Section title="Properties" count={slotCount} defaultOpen>
           <PropertyTable iri={t.iri} model={model} label={label} onSelect={onSelect} compact={compact} />
@@ -359,7 +369,7 @@ function TermDetailPanel({
   );
 }
 
-function PropList({ title, items, selected, onSelect, label }: { title: string; items: TermView[]; selected?: string; onSelect: (i: string) => void; label: Labeler }) {
+function PropList({ title, items, selected, onSelect, label, counts }: { counts?: Map<string, number>; title: string; items: TermView[]; selected?: string; onSelect: (i: string) => void; label: Labeler }) {
   // Collapsed until asked for, or until the selected term is in this list.
   const has = !!selected && items.some((i) => i.iri === selected);
   const [open, setOpen] = useState(has);
@@ -386,7 +396,7 @@ function PropList({ title, items, selected, onSelect, label }: { title: string; 
                     p.deprecated && 'line-through opacity-70',
                   )}
                 >
-                  {p.label ?? label(p.iri)}
+                  {p.label ?? label(p.iri)}{counts && <span className="ml-2 text-xs text-muted">({counts.get(p.iri) ?? 0})</span>}
                 </button>
               </li>
             ))}
@@ -531,9 +541,11 @@ function DiagramView({
 }
 
 export function BrowseTab() {
+  const { session } = useSession();
   const { id, view, label } = useOntology();
   const [params, setParams] = useSearchParams();
   const selected = params.get('term') ?? undefined;
+  const newCodeList = params.get('new') === 'code-list';
   const raw = params.get('view');
   // The Graph view was removed (the Diagram shows the same model, with each class's data): old links open the Diagram.
   const mode: Mode = raw === 'graph' || raw === 'diagram' ? 'diagram' : 'tree';
@@ -575,6 +587,7 @@ export function BrowseTab() {
   };
   const centre = (iri: string) =>
     update((p) => {
+      p.delete('new');
       p.set('term', iri);
       p.set('around', iri);
       p.set('hops', String(hops || 1));
@@ -584,6 +597,7 @@ export function BrowseTab() {
   const select = (iri: string) => {
     if (canvas && scope && isClass(iri) && !scope.has(iri)) return centre(iri);
     update((p) => {
+      p.delete('new');
       p.set('term', iri);
       if (canvas) pin(p);
     });
@@ -591,6 +605,7 @@ export function BrowseTab() {
   // Picking on the canvas only changes the details.
   const selectOnCanvas = (iri: string) =>
     update((p) => {
+      p.delete('new');
       p.set('term', iri);
       pin(p);
     });
@@ -612,6 +627,7 @@ export function BrowseTab() {
     }, true);
   const clear = () =>
     update((p) => {
+      p.delete('new');
       p.delete('term');
       if (canvas) pin(p);
     });
@@ -621,7 +637,8 @@ export function BrowseTab() {
   if (view.error && !view.data) return <ErrorCard error={view.error} onRetry={view.reload} />;
   if (!view.data || !model) return <Loading label="Loading ontology…" />;
   const v = view.data;
-  const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length;
+  const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length && !v.conceptSchemes?.length && !session?.user;
+  const codeCounts = new Map((v.conceptSchemes ?? []).map((s) => [s.iri, (v.concepts ?? []).filter((c) => c.inScheme.includes(s.iri)).length]));
   // In the canvas views the navigation folds away so the drawing gets the room.
   const showNav = navOpen ?? !canvas;
 
@@ -654,8 +671,10 @@ export function BrowseTab() {
           <PropList title="Object properties" items={v.objectProperties} selected={selected} onSelect={select} label={label} />
           <PropList title="Datatype properties" items={v.datatypeProperties} selected={selected} onSelect={select} label={label} />
           <PropList title="Individuals" items={v.individuals} selected={selected} onSelect={select} label={label} />
+          <PropList title="Code lists" items={v.conceptSchemes ?? []} selected={selected} onSelect={select} label={label} counts={codeCounts} />
         </>
       )}
+      {session?.user && <Button size="sm" variant="ghost" icon={Plus} className="mt-3" onClick={() => update((p) => { p.delete('term'); p.delete('view'); p.set('new', 'code-list'); })}>New code list</Button>}
     </Card>
   );
 
@@ -722,11 +741,11 @@ export function BrowseTab() {
         <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
           <div id="browse-nav">{nav}</div>
           <div className="min-w-0 space-y-4">
-            {selected ? (
+            {newCodeList ? <NewCodeListPanel key={id} onCancel={clear} /> : selected ? (
               <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood />
             ) : (
               <EmptyState icon={ListTree} title="Pick a term">
-                Choose a class or property on the left to see its definition, properties and where it’s used. Use the Diagram to see what data each class has and how the classes connect.
+                Choose a class, property or code list on the left to see its definition, properties and where it’s used. Use the Diagram to see what data each class has and how the classes connect.
               </EmptyState>
             )}
           </div>

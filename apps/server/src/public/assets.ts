@@ -246,7 +246,7 @@ export const PAGE_SCRIPT = `
   // Browse: which term (or group of terms) the Specification tab shows.
   function focus(el){
     if(!browse)return;
-    var term=el&&el.classList.contains('term')&&browse.contains(el)?el:null;
+    var term=el&&browse.contains(el)?el.closest('.term'):null;
     var group=term?term.closest('.term-group'):(el&&el.classList.contains('term-group')?el:null);
     browse.classList.toggle('has-selection',!!term);
     browse.classList.toggle('focused',!!group);

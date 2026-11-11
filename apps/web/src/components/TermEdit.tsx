@@ -3,13 +3,13 @@ import { Link } from 'react-router';
 import type { ChangeRequest, ChangeRequestDetail, TermEditField, TermEditInput, TermEditValues } from '@concord/shared';
 import { TERM_EDIT_FIELDS } from '@concord/shared';
 import type { TermView } from '@concord/core/types';
-import { Plus, X } from 'lucide-react';
 import { api, ApiError } from '../api';
+import { ChangedMark, ListEditor, DefinitionMeaning, useEditRefresh } from './TermEditShared';
 import { useAction, useAsync } from '../lib/hooks';
 import { CR_STATUS_LABEL, LevelBadge } from './badges';
 import { ruleSummary } from './PolicyRules';
 import { useOntology } from '../pages/ontology/Layout';
-import { Button, Field, InlineError, Input, Textarea, cx } from './ui';
+import { Button, Field, InlineError, Input, Textarea } from './ui';
 
 /**
  * Inline editor for a term's annotations (label, definition, comment, alternative
@@ -27,7 +27,7 @@ type ListField = 'altLabels' | 'examples';
 type Values = Record<TextField, string> & Record<ListField, string[]>;
 type Intent = NonNullable<TermEditInput['definitionIntent']>;
 
-const OPEN_STATUSES = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'];
+export const OPEN_STATUSES = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'];
 const FIELD_LABEL: Record<TermEditField, string> = {
   label: 'Label',
   definition: 'Definition',
@@ -61,59 +61,11 @@ function same(f: TermEditField, a: Values, b: Values) {
 }
 
 /** Open change requests that already touch this term, so people don't propose the same edit twice. */
-function useOpenRequestsFor(ontologyId: string, iri: string) {
-  const all = useAsync(() => api.changeRequests(ontologyId), [ontologyId]);
+export function useOpenRequestsFor(ontologyId: string, iri: string, refreshKey?: string) {
+  const all = useAsync(() => api.changeRequests(ontologyId), [ontologyId, refreshKey]);
   return useMemo(
-    () => (all.data ?? []).filter((c) => OPEN_STATUSES.includes(c.status) && (JSON.stringify(c.ops).includes(JSON.stringify(iri)) || (c.origin.type === 'term-edit' && c.origin.termIri === iri))),
+    () => (all.data ?? []).filter((c) => OPEN_STATUSES.includes(c.status) && (JSON.stringify(c.ops).includes(JSON.stringify(iri)) || (c.origin.type === 'term-edit' && c.origin.termIri === iri) || (c.origin.type === 'code-list-edit' && c.origin.scheme === iri))),
     [all.data, iri],
-  );
-}
-
-function ChangedMark({ on }: { on: boolean }) {
-  return on ? (
-    <>
-      {' '}
-      <span className="ml-1 text-xs font-normal text-accent">changed</span>
-    </>
-  ) : null;
-}
-
-function ListEditor({ field, items, onChange, changed, multiline, noun }: { field: ListField; items: string[]; onChange: (v: string[]) => void; changed: boolean; multiline?: boolean; noun: string }) {
-  const listRef = useRef<HTMLDivElement>(null);
-  const focusLast = () => requestAnimationFrame(() => [...(listRef.current?.querySelectorAll<HTMLElement>('input,textarea') ?? [])].at(-1)?.focus());
-  return (
-    <fieldset>
-      <legend className="mb-1 block text-sm font-medium">
-        {FIELD_LABEL[field]}
-        <ChangedMark on={changed} />
-      </legend>
-      <div ref={listRef} className="space-y-2">
-        {items.map((v, i) => {
-          const name = `${noun} ${i + 1}`;
-          const set = (x: string) => onChange(items.map((y, j) => (j === i ? x : y)));
-          return (
-            <div key={i} className="flex items-start gap-1.5">
-              {multiline ? <Textarea rows={2} aria-label={name} value={v} onChange={(e) => set(e.target.value)} className="min-h-14" /> : <Input aria-label={name} value={v} onChange={(e) => set(e.target.value)} />}
-              <Button type="button" size="sm" variant="ghost" icon={X} aria-label={`Remove ${name}`} title={`Remove ${name}`} className="mt-0.5" onClick={() => onChange(items.filter((_, j) => j !== i))} />
-            </div>
-          );
-        })}
-      </div>
-      <Button
-        type="button"
-        size="sm"
-        variant="ghost"
-        icon={Plus}
-        className={cx(items.length > 0 && 'mt-1')}
-        onClick={() => {
-          onChange([...items, '']);
-          focusLast();
-        }}
-      >
-        Add {items.length ? 'another ' : ''}
-        {noun}
-      </Button>
-    </fieldset>
   );
 }
 
@@ -161,25 +113,8 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
   });
   const conflict = save.error instanceof ApiError && save.error.status === 409;
 
-  // After a conflict: take the latest values as the new starting point. Fields
-  // you edited keep your text; fields you didn't touch take the latest value (so
-  // the edit never reverts someone else's change); fields both of you changed
-  // must be resolved, one way or the other, before saving.
-  // The form as it is right now, for work that finishes after an await (text typed meanwhile counts).
-  const formNow = useRef(form);
-  formNow.current = form;
-  const loadLatest = useAction(async () => {
-    const latest = valuesFrom(await api.term(id, term.iri));
-    if (!alive.current) return;
-    const form = formNow.current;
-    const mine = TERM_EDIT_FIELDS.filter((f) => !same(f, form, baseline));
-    const theirs = TERM_EDIT_FIELDS.filter((f) => !same(f, latest, baseline));
-    const next = { ...latest };
-    for (const f of mine) (next as Record<string, unknown>)[f] = form[f];
-    setRefreshed({ theirs: theirs.map((f) => ({ field: f, now: latest[f] })), unresolved: theirs.filter((f) => mine.includes(f) && !same(f, form, latest)) });
-    setBaseline(latest);
-    setForm(next);
-    save.clearError();
+  const loadLatest = useEditRefresh({ form, baseline, fields: TERM_EDIT_FIELDS, same, fetchLatest: async () => valuesFrom(await api.term(id, term.iri)), alive,
+    apply: (latest, next, theirs, unresolved) => { setRefreshed({ theirs: theirs.map((field) => ({ field, now: latest[field] })), unresolved }); setBaseline(latest); setForm(next); save.clearError(); },
   });
   const resolve = (f: TermEditField, keep: 'mine' | 'theirs') => {
     if (keep === 'theirs') setForm({ ...form, [f]: baseline[f] });
@@ -271,25 +206,7 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
       {text('label', 1)}
       {labelEmpty && <p className="-mt-2 text-xs text-danger">A term needs a label.</p>}
       {text('definition', 3, 'Strict OWL practice: genus and differentia, e.g. “A person who …”.')}
-      {rewordsDefinition && (
-        <fieldset className="rounded-md border border-line px-3 py-2">
-          <legend className="px-1 text-sm font-medium">Does the new definition keep the term’s meaning?</legend>
-          <label className="flex items-start gap-2 py-1 text-sm">
-            <input type="radio" name={intentName} className="mt-1" checked={intent === 'same-meaning'} onChange={() => setIntent('same-meaning')} />
-            <span>
-              Yes, it is clearer wording for the same thing
-              <span className="block text-xs text-muted">Everything the old definition covered is still covered, and nothing else. Reviewed as a patch.</span>
-            </span>
-          </label>
-          <label className="flex items-start gap-2 py-1 text-sm">
-            <input type="radio" name={intentName} className="mt-1" checked={intent === 'new-meaning'} onChange={() => setIntent('new-meaning')} />
-            <span>
-              No, it changes what the term means
-              <span className="block text-xs text-muted">Data already using the term may no longer fit, so this is reviewed as a major change. A new term, with this one deprecated, is often better.</span>
-            </span>
-          </label>
-        </fieldset>
-      )}
+      {rewordsDefinition && <DefinitionMeaning name={intentName} intent={intent} onChange={setIntent} noun="term" />}
       {text('comment', 2)}
       <div className="grid gap-4 sm:grid-cols-2">
         <ListEditor field="altLabels" noun="alternative label" items={form.altLabels} changed={changed.includes('altLabels')} onChange={(v) => setForm({ ...form, altLabels: v })} />

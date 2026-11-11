@@ -1310,3 +1310,33 @@ describe('versions published before approval existed', () => {
     expect((await agent.get(`/people/${tester.id}`)).text).toContain('WebID Person');
   });
 });
+
+it('renders governed code lists with nested codes, escaped definitions, deprecated markers and allocated anchors', async () => {
+  const { applyChangeOps } = await import('@concord/core');
+  const project = (await findProject('volunteering'))!;
+  const ns = project.namespace;
+  const graph = applyChangeOps(await ontologyStore.working(project), [
+    { op: 'addConceptScheme', localName: 'PageActivities', label: 'page activities', definition: 'Permitted activities' },
+    { op: 'addConcept', scheme: ns + 'PageActivities', localName: 'page-outdoor', label: 'page outdoor', definition: 'Outside' },
+    { op: 'addConcept', scheme: ns + 'PageActivities', localName: 'page-gardening', label: 'page gardening', definition: '<Plants> & gardens', notation: 'GARD', broader: ns + 'page-outdoor' },
+    { op: 'deprecateConcept', iri: ns + 'page-gardening', reason: 'Retired' },
+    { op: 'addObjectProperty', localName: 'pageActivity', label: 'page activity', definition: 'The activity undertaken', domain: [ns + 'Session'], codeList: ns + 'PageActivities' },
+  ]).graph;
+  const input = await pageInput(project, 'draft', 'https://concord.example', { graph });
+  const html = renderOntologyPage(input);
+  expect(html).toContain('aria-label="Code lists"');
+  expect(html).toContain('id="PageActivities"');
+  expect(html).toContain('id="page-outdoor"');
+  expect(html).toMatch(/id="page-outdoor"[^]*?<ul><li id="page-gardening"/);
+  // Code fragments must live in their list's article, so public navigation can reveal them.
+  expect(html).toMatch(/<article[^>]*id="PageActivities"[^]*?id="page-gardening"[^]*?<\/article>/);
+  expect(html).toContain('aria-label="Codes in page activities"');
+  expect(html).toContain('<code>GARD</code>');
+  const property = html.match(/id="pageActivity"[^]*?<\/article>/)![0];
+  expect(property).toContain('Values from code list');
+  expect(property).not.toContain('Any (unconstrained)');
+  expect(html).toContain('&lt;Plants&gt; &amp; gardens');
+  expect(html).toMatch(/id="page-gardening"[^]*?<strong>Deprecated<\/strong>/);
+  const anchors = termAnchors(input.view, ns);
+  expect(anchors.get(ns + 'page-gardening')).toBe('page-gardening');
+});

@@ -151,7 +151,7 @@ export function toLinkML(graph: OntologyGraph): string {
   const slots: Obj = {};
   for (const p of props) {
     const functional = p.characteristics.includes('functional');
-    const range = p.range.length === 1 ? rangeOf(p.range[0]) : {};
+    const range = p.codeList ? { range: name(p.codeList) } : p.range.length === 1 ? rangeOf(p.range[0]) : {};
     const anyOf = (p.rangeExpressions ?? []).length || p.range.length > 1
       ? (() => {
           const members: string[] = [];
@@ -176,6 +176,12 @@ export function toLinkML(graph: OntologyGraph): string {
   }
 
   const enums: Obj = {};
+  for (const scheme of v.conceptSchemes.filter((t) => isLocal(t.iri))) {
+    enums[name(scheme.iri)] = clean({
+      enum_uri: curie(scheme.iri), description: scheme.definition,
+      permissible_values: Object.fromEntries(v.concepts.filter((c) => c.inScheme.includes(scheme.iri)).map((code) => [code.notation ?? name(code.iri), clean({ meaning: code.iri, description: code.definition })])),
+    });
+  }
   for (const [iri, members] of enumMembers) {
     const k = v.classes.find((c) => c.iri === iri)!;
     enums[name(iri)] = clean({

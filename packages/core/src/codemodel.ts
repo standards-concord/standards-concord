@@ -27,6 +27,8 @@ export interface CodeProperty {
   name: string;
   /** Class-valued: the shape IRI of the value's class, or THING when it has none. */
   node?: string;
+  /** Resource-valued primitive: the accessor reads and writes an IRI string. */
+  iri?: boolean;
   datatype?: string;
   minCount?: number;
   maxCount?: number;
@@ -111,7 +113,7 @@ function allocate(wanted: string, taken: Set<string>, reserved: Set<string>): st
 
 /** Same accessor type: same arity (set, required or optional) and same value type. */
 const typeKey = (p: Omit<CodeProperty, 'name' | 'path'>) =>
-  `${p.maxCount === 1 ? ((p.minCount ?? 0) >= 1 ? 'one' : 'opt') : 'set'}|${p.node ?? ''}|${p.datatype ?? ''}`;
+  `${p.maxCount === 1 ? ((p.minCount ?? 0) >= 1 ? 'one' : 'opt') : 'set'}|${p.node ?? ''}|${p.datatype ?? ''}|${p.iri ?? false}`;
 
 /** Whether datatype `a` is `b` or derived from it, through the ontology's own datatypes (`bases`) and XML Schema's. */
 export function derivesFrom(a: string, b: string, bases: Map<string, string[]> = new Map()): boolean {
@@ -142,10 +144,11 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
   for (const s of shapes) names.set(s.iri, allocate(identifierFrom(localName(s.targetClass), 'pascal'), taken, RESERVED_CLASSES));
 
   type Raw = Omit<CodeProperty, 'name'>;
-  type ValueType = Pick<CodeProperty, 'node' | 'datatype'>;
+  type ValueType = Pick<CodeProperty, 'node' | 'datatype' | 'iri'>;
 
   /** The value type a property shape states itself (sh:datatype, or a class from a restriction). */
   const statedType = (ps: PropShape): ValueType | undefined => {
+    if (ps.in) return { iri: true };
     const t = ps.datatype || ps.cls ? ps : ps.codeType;
     if (t?.datatype) return { datatype: t.datatype };
     if (t?.cls) return { node: byClass.get(t.cls)?.iri ?? THING };
@@ -182,6 +185,7 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
     if (preferred.node && other.node && preferred.node !== THING && other.node !== THING && isSub(other.node, preferred.node)) return other;
     if (preferred.node === THING && other.node) return other;
     if (preferred.datatype && other.datatype && derivesFrom(other.datatype, preferred.datatype, derived.datatypeBases)) return other;
+    if (preferred.iri) return preferred;
     if (!preferred.node && !preferred.datatype) return other;
     return preferred;
   };
@@ -195,8 +199,8 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
    */
   const merge = (preferred: Raw, other: Raw, where: string): Raw => {
     const max = Math.min(preferred.maxCount ?? Infinity, other.maxCount ?? Infinity);
-    const a = { node: preferred.node, datatype: preferred.datatype };
-    const b = { node: other.node, datatype: other.datatype };
+    const a = { node: preferred.node, datatype: preferred.datatype, iri: preferred.iri };
+    const b = { node: other.node, datatype: other.datatype, iri: other.iri };
     const t = narrower(a, b);
     const typed = (x: ValueType) => Boolean(x.datatype || (x.node && x.node !== THING));
     if (typed(a) && typed(b) && t === a && narrower(b, a) === b && typeName(a) !== typeName(b))
@@ -204,6 +208,7 @@ export function codeModel(derived: DerivedShapes, info: Map<string, PropertyInfo
     return {
       path: preferred.path,
       ...(t.node ? { node: t.node } : {}),
+      ...(t.iri ? { iri: true } : {}),
       ...(t.datatype ? { datatype: t.datatype } : {}),
       minCount: Math.max(preferred.minCount ?? 0, other.minCount ?? 0) || undefined,
       maxCount: max === Infinity ? undefined : max,

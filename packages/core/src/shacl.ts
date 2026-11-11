@@ -23,6 +23,8 @@ const SH = NS.sh;
 
 export interface PropShape {
   path: string;
+  /** Allowed code IRIs (including deprecated codes). Empty means no value is allowed. */
+  in?: string[];
   cls?: string;
   datatype?: string;
   minCount?: number;
@@ -129,7 +131,17 @@ export function deriveShapes(graph: OntologyGraph): DerivedShapes {
       if (p.characteristics.includes('functional')) ps.maxCount = 1;
     }
     for (const r of k.restrictions) applyRestriction(graph, get(r.property), r, props.get(r.property)?.range ?? [], narrowerOrEqual);
-    for (const ps of byPath.values()) combineDatatypes(k.iri, ps, defs, notes);
+    for (const ps of byPath.values()) {
+      const codeList = props.get(ps.path)?.codeList;
+      if (codeList) {
+        ps.in = v.concepts.filter((c) => c.inScheme.includes(codeList)).map((c) => c.iri).sort();
+        delete ps.cls;
+        delete ps.datatype;
+        delete ps.alsoTypes;
+        ps.codeType = { datatype: NS.xsd + 'anyURI' };
+      }
+      combineDatatypes(k.iri, ps, defs, notes);
+    }
     shapes.push({
       iri: `${shapesNs}${localName(k.iri)}Shape`,
       targetClass: k.iri,
@@ -186,6 +198,7 @@ export function shaclStore(derived: DerivedShapes, opts: { codeIdentifiers?: boo
       add(b, SH + 'path', nn(ps.path));
       const accessor = cls?.effective.get(ps.path)?.name;
       if (accessor) add(b, SH + 'codeIdentifier', literal(accessor));
+      if (ps.in) add(b, SH + 'in', writeList(out, ps.in.map(nn)));
       if (ps.datatype) add(b, SH + 'datatype', nn(ps.datatype));
       if (ps.cls) add(b, SH + 'class', nn(ps.cls));
       if (ps.values) {

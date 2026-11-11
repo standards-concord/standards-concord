@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./names": "./src/ns.ts",
     "./types": "./src/types.ts",
     "./sparql-guard": "./src/sparqlGuard.ts",
     "./reasoner": "./src/reasonTurtle.ts",

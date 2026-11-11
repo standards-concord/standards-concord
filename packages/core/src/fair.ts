@@ -98,7 +98,7 @@ export function fairCheck(graph: OntologyGraph, ctx: FairContext = {}): FairRepo
 
   const v = graph.view();
   const ns = graph.namespace;
-  const terms = [...v.classes, ...v.objectProperties, ...v.datatypeProperties].filter((t) => ns && t.iri.startsWith(ns) && !t.deprecated);
+  const terms = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.concepts, ...v.conceptSchemes].filter((t) => ns && t.iri.startsWith(ns) && !t.deprecated);
   const labelled = terms.filter((t) => t.label).length;
   const defined = terms.filter((t) => t.definition).length;
   const cov = terms.length ? Math.min(labelled, defined) / terms.length : 1;

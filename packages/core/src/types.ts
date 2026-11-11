@@ -97,6 +97,8 @@ export interface PropertyView extends TermBase {
   /** Addition: anonymous domain/range expressions (e.g. unions), in Manchester syntax. */
   domainExpressions?: string[];
   rangeExpressions?: string[];
+  /** Controlled values from this SKOS concept scheme; replaces the property range. */
+  codeList?: IRI;
 }
 
 export interface IndividualView extends TermBase {
@@ -106,7 +108,31 @@ export interface IndividualView extends TermBase {
   facts: Record<IRI, string[]>;
 }
 
-export type TermView = ClassView | PropertyView | IndividualView;
+export interface ConceptSchemeView extends TermBase {
+  kind: 'conceptScheme';
+  topConcepts: IRI[];
+}
+
+export interface ConceptView extends TermBase {
+  kind: 'concept';
+  notation?: string;
+  inScheme: IRI[];
+  broader: IRI[];
+  /** Inverse of skos:broader, computed without storing redundant triples. */
+  narrower: IRI[];
+  topConceptOf: IRI[];
+}
+
+export type ConceptAnnotations = Pick<TermAnnotations, 'label' | 'definition' | 'altLabels' | 'examples' | 'editorialNote'> & { notation?: string };
+export type CodeListOp =
+  | ({ op: 'addConceptScheme' } & Pick<NewTermFields, 'localName' | 'label' | 'definition' | 'altLabels' | 'editorialNote' | 'source'>)
+  | ({ op: 'addConcept'; scheme: IRI; notation?: string; broader?: IRI } & Pick<NewTermFields, 'localName' | 'label' | 'definition' | 'altLabels' | 'examples' | 'editorialNote' | 'source'>)
+  | { op: 'updateConcept'; iri: IRI; set: ConceptAnnotations; expect?: ConceptAnnotations }
+  | { op: 'moveConcept'; iri: IRI; broader: IRI | null }
+  | { op: 'deprecateConcept'; iri: IRI; reason: string; replacedBy?: IRI }
+  | { op: 'setCodeList'; property: IRI; scheme: IRI | null };
+
+export type TermView = ClassView | PropertyView | IndividualView | ConceptSchemeView | ConceptView;
 
 export interface OntologyMetadata {
   iri: IRI;
@@ -136,6 +162,8 @@ export interface OntologyView {
   datatypeProperties: PropertyView[];
   annotationProperties: PropertyView[];
   individuals: IndividualView[];
+  conceptSchemes: ConceptSchemeView[];
+  concepts: ConceptView[];
   prefixes: Record<string, string>;
   tripleCount: number;
 }
@@ -152,6 +180,7 @@ interface NewTermFields extends TermAnnotations {
 }
 
 export type ChangeOp =
+  | CodeListOp
   | ({
       op: 'addClass';
       subClassOf?: IRI[];
@@ -161,6 +190,7 @@ export type ChangeOp =
     } & NewTermFields)
   | ({
       op: 'addObjectProperty';
+      codeList?: IRI;
       domain?: IRI[];
       range?: IRI[];
       subPropertyOf?: IRI[];
@@ -232,6 +262,11 @@ export interface TermChange {
 
 export interface FieldChange {
   field:
+    | 'notation'
+    | 'inScheme'
+    | 'broader'
+    | 'topConceptOf'
+    | 'codeList'
     | 'label'
     | 'definition'
     | 'comment'

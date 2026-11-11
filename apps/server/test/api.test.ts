@@ -2602,3 +2602,86 @@ describe('release approval provenance', () => {
     }
   });
 });
+
+describe('governed code list edit API', () => {
+  const V = 'https://w3id.org/odi/volunteering#';
+  const SCHEME = `${V}GovernedActivities`;
+  const CODE = `${V}governed-gardening`;
+  const base = { op: 'addConceptScheme', localName: 'GovernedActivities', label: 'governed activities', definition: 'Activities permitted by this standard.' };
+  const send = (a: Agent, body: object) => a.post(`/api/ontologies/${demoId}/code-list-edits`).send(body);
+  const term = (a: Agent, iri: string) => a.get(`/api/ontologies/${demoId}/terms/${encodeURIComponent(iri)}`);
+
+  it('proposes a scheme and nested codes as a contributor, approves for real, merges and exposes them in the draft and public page', async () => {
+    const contributor = await login('contributor', 'Code list contributor');
+    const reviewer = await login('reviewer', 'Code list reviewer');
+    const steward = await login('steward', 'Code list steward');
+    const created = await send(contributor, { ops: [base,
+      { op: 'addConcept', scheme: SCHEME, localName: 'governed-outdoor', label: 'governed outdoor', definition: 'Activities undertaken outside.' },
+      { op: 'addConcept', scheme: SCHEME, localName: 'governed-gardening', label: 'governed gardening', definition: 'Growing and caring for plants.', notation: 'GARD', broader: `${V}governed-outdoor` },
+    ], reason: 'Use a controlled activity list.', submit: true });
+    expect(created.status).toBe(201);
+    expect(created.body.kind).toBe('editorial');
+    expect(created.body.origin).toEqual({ type: 'code-list-edit', scheme: SCHEME });
+    expect(created.body.title).toBe('Create the code list “governed activities”');
+    expect(created.body.classification.level).toBe('minor');
+    expect(created.body.validation.passed).toBe(true);
+    expect((await term(contributor, CODE)).status).toBe(404);
+    const id = created.body.id;
+    for (const agent of [reviewer, steward]) {
+      const approved = await agent.post(`/api/change-requests/${id}/reviews`).send({ round: await roundOf(agent, id), decision: 'approve' });
+      expect(approved.status).toBe(200);
+    }
+    await steward.post('/api/simulation/clock').send({ advanceDays: 8 });
+    expect((await steward.get(`/api/change-requests/${id}`)).body.status).toBe('merged');
+    expect((await term(contributor, CODE)).body).toMatchObject({ kind: 'concept', notation: 'GARD', inScheme: [SCHEME], broader: [`${V}governed-outdoor`] });
+    const view = (await contributor.get(`/api/ontologies/${demoId}/view`)).body;
+    expect(view.conceptSchemes.some((s: { iri: string }) => s.iri === SCHEME)).toBe(true);
+    expect(view.concepts.some((s: { iri: string }) => s.iri === CODE)).toBe(true);
+    expect(view.individuals.some((s: { iri: string }) => s.iri === CODE)).toBe(false);
+    // The term index underlying HTTP search and MCP carries the dedicated kind.
+    expect((await ontologyStore.working(await getProject(demoId))).search('governed gardening')[0].kind).toBe('concept');
+    const page = await request(app).get('/def/volunteering/draft').set('Accept', 'text/html');
+    expect(page.status).toBe(200);
+    expect(page.text).toContain('Code lists');
+    expect(page.text).toContain('id="GovernedActivities"');
+    expect(page.text).toContain('id="governed-gardening"');
+    expect(page.text).toContain('Growing and caring for plants.');
+    const turtle = await request(app).get('/def/volunteering/draft').set('Accept', 'text/turtle');
+    expect(turtle.text).toContain('skos:Concept');
+  });
+
+  it('computes update expect server-side, rejects stale previous with 409, and leaves the draft unchanged', async () => {
+    const contributor = await login('contributor', 'Code label editor');
+    const current = (await term(contributor, CODE)).body;
+    const edit = await send(contributor, { ops: [{ op: 'updateConcept', iri: CODE, set: { label: 'governed horticulture' }, previous: { label: current.label } }] });
+    expect(edit.status).toBe(201);
+    expect(edit.body.title).toBe('Edit the code “governed gardening”');
+    expect(edit.body.ops[0].expect).toEqual({ label: current.label });
+    expect(edit.body.status).toBe('draft');
+    expect((await term(contributor, CODE)).body.label).toBe(current.label);
+    const stale = await send(contributor, { ops: [{ op: 'updateConcept', iri: CODE, set: { label: 'other label' }, previous: { label: 'old label' } }] });
+    expect(stale.status).toBe(409);
+    expect(stale.body.error).toMatch(/label.*changed since/);
+    expect((await send(contributor, { ops: [{ op: 'updateConcept', iri: CODE, set: { label: 'overwrite' }, expect: {} }] })).status).toBe(400);
+  });
+
+  it('rejects signed-out proposals and invalid, excessive or failed operations', async () => {
+    expect((await request(app).post(`/api/ontologies/${demoId}/code-list-edits`).send({ ops: [base] })).status).toBe(401);
+    const contributor = await login('contributor', 'Invalid code editor');
+    for (const body of [
+      { ops: [] }, { ops: Array.from({ length: 51 }, () => base) },
+      { ops: [{ op: 'removeTerm', iri: CODE }] },
+      { ops: [{ ...base, localName: 'bad_name' }] },
+      { ops: [{ ...base, localName: 'Oversize', definition: 'x'.repeat(4001) }] },
+      { ops: [{ ...base, localName: 'BadFields', unknown: true }] },
+      { ops: [{ ...base, localName: 'BadList', altLabels: Array.from({ length: 51 }, (_, i) => `label ${i}`) }] },
+      { ops: [{ op: 'addConcept', localName: 'bad-code', label: 'bad code', definition: 'Bad', scheme: `${V}Missing` }] },
+      { ops: [{ op: 'addConcept', localName: 'duplicate-code', label: 'duplicate code', definition: 'Duplicate', scheme: SCHEME, notation: 'GARD' }] },
+      { ops: [{ op: 'setCodeList', property: CODE, scheme: SCHEME }] },
+      { ops: [base], submit: 'true' },
+    ]) {
+      const response = await send(contributor, body);
+      expect(response.status, JSON.stringify(body).slice(0, 100)).toBe(400);
+    }
+  });
+});
