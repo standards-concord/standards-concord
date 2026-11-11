@@ -51,7 +51,10 @@ export type EndpointSample = {
 };
 
 /** Parse RDF, then serialize terms: blank labels inside literals and IRIs are never touched. */
-export function responseTriples(text: string, queryIndex: number, base: string, partial = false, maxChars = Infinity): string[] {
+/** The lines, and whether writing them out stopped at `maxChars` before the end of the response. */
+export type ResponseLines = string[] & { truncated?: true };
+
+export function responseTriples(text: string, queryIndex: number, base: string, partial = false, maxChars = Infinity): ResponseLines {
   const doc = parseTurtle(text, { base });
   if (doc.error && !partial) throw new Error(`The endpoint returned RDF that could not be read: ${doc.error.message}`);
   const blanks = new Map<string, string>();
@@ -66,14 +69,17 @@ export function responseTriples(text: string, queryIndex: number, base: string, 
   };
   // Prefixed names expand when written out, so stop writing once the output passes the budget,
   // rather than first building every line of a response that expands far beyond its own size.
-  const out: string[] = [];
+  const out: ResponseLines = [];
   let chars = 0;
   for (const t of doc.triples) {
     const line = `${term(t.s.term)} ${term(t.p.term)} ${term(t.o.term)} .\n`;
     chars += line.length;
     // The line that passes the budget is kept, so the caller sees the sample is full.
     out.push(line);
-    if (chars > maxChars) break;
+    if (chars > maxChars) {
+      if (out.length < doc.triples.length) out.truncated = true;
+      break;
+    }
   }
   return out;
 }
@@ -106,7 +112,7 @@ export async function fetchEndpointSample({ endpoint, graph = '', limit, classes
   // from both queries; its blank-node values get new labels in each response, so taking both
   // descriptions would double those values (two addresses where there is one). Only the first is kept.
   const describedBy = new Map<string, number>();
-  const add = (triples: string[], index: number) => {
+  const add = (triples: ResponseLines, index: number) => {
     for (const line of triples) {
       const subject = line.startsWith('<') ? line.slice(0, line.indexOf('>') + 1) : '';
       if (subject) {
@@ -123,6 +129,9 @@ export async function fetchEndpointSample({ endpoint, graph = '', limit, classes
       written += size;
       if (lines.size >= budgets.triples) cutShort = 'triples';
     }
+    // Writing the response out stopped at the budget: whatever came after it is missing, so the sample is cut short,
+    // even when the lines before were all skipped as already described.
+    if (triples.truncated) cutShort ??= 'bytes';
   };
   const query = async (index: number) => {
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]);

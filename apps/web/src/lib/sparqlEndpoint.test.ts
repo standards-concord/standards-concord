@@ -165,6 +165,19 @@ describe('bounded CORS transport', () => {
     // Both classes still count as having instances.
     expect(endpointDrift([], ns, sample.counts).emptyClasses).toEqual([]);
   });
+  it('says the sample was cut short when writing a response out stops at the budget, even if every line before was already described', async () => {
+    // Used to go wrong (Sol r2): the cap was applied before already-described resources were skipped, so a
+    // response whose first lines were all skipped lost its later resources with no "cut short".
+    // Prefixed names keep the wire size small while the written-out lines are long.
+    const shared = `@prefix ex: <https://example.test/${'n'.repeat(200)}/> .\n` + Array.from({ length: 10 }, (_, i) => `<urn:shared> ex:p${i} "v" .`).join('\n');
+    const first = shared, second = `${shared}\n<urn:unique> <${type}> <${classes[1]}> .`;
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => response(String(init.body).includes(encodeURIComponent(classes[0])) ? first : second, 'text/turtle')));
+    // Room for the first response written out (~2.4 KB) and a little more, so the second, all
+    // duplicates at first, reaches the cap before its unique resource.
+    const sample = await fetchEndpointSample({ ...options(), classes: classes.slice(0, 2), budgets: { triples: 1000, bytes: 3000 } });
+    expect(sample.text).toContain('urn:shared');
+    if (!sample.text.includes('urn:unique')) expect(sample.cutShort).toBe('bytes');
+  });
   it('leaves out a Turtle response cut short, which could end inside a statement', async () => {
     // Used to go wrong: a cut after "12" in "12"^^xsd:integer kept "12" as a plain string.
     const body = `<urn:s> <urn:n> "12"^^<http://www.w3.org/2001/XMLSchema#integer> .`;
