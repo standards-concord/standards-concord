@@ -671,12 +671,24 @@ export const gitStore = {
     return commit;
   },
 
-  /** Rewrites one file at the root of the repository (e.g. CHANGELOG.md) in its own commit. */
-  async updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): Promise<string> {
+  /** A root file as committed, optionally at a particular commit rather than the working draft. */
+  async readRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, commit?: string): Promise<string | undefined> {
+    if (!/^[\w.-]+$/.test(name)) return undefined;
+    await this.ensureSynced(project);
+    const head = commit ?? await this.head(project);
+    try {
+      return await git(repoDir(project), ['show', `${head}:${name}`], {}, { raw: true });
+    } catch {
+      return undefined;
+    }
+  },
+
+  /** Rewrites one root file in its own commit, only if the draft is still `base` when given. */
+  async updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string, base?: string): Promise<string> {
     if (!/^[\w.-]+$/.test(name) || name === FILE) throw new Error(`Not a repository file Concord rewrites: ${name}`);
-    const parent = await this.head(project);
+    const parent = base ?? await this.head(project);
     const commit = await buildCommit(repoDir(project), parent, { [name]: content }, message, { name: 'Concord', email: 'steward@concord' });
-    if (commit !== parent) await this.advanceTo(project, parent, commit);
+    if (commit !== parent || base !== undefined) await this.advanceTo(project, parent, commit);
     return commit;
   },
 
@@ -955,7 +967,8 @@ export interface OntologyStoreApi {
     record?: (commit: string) => Promise<void> | void,
   ): Promise<string>;
   updateReleaseFiles(project: Pick<OntologyProject, 'slug'>, files: Record<string, Record<string, string | null>>, message: string): Promise<string>;
-  updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): Promise<string>;
+  readRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, commit?: string): Promise<string | undefined>;
+  updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string, base?: string): Promise<string>;
   forgetReleases(project: Pick<OntologyProject, 'slug'>): void;
   forget(project: Pick<OntologyProject, 'slug'>): Promise<void>;
   versions(project: Pick<OntologyProject, 'slug'>): Promise<string[]>;

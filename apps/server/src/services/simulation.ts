@@ -34,6 +34,7 @@ import { withLease } from '../lease.js';
 const FIXTURE = path.join(config.repoRoot, 'packages/core/fixtures/volunteering.ttl');
 const VOL = 'https://w3id.org/odi/volunteering#';
 export const DEMO_SLUG = 'volunteering';
+export const DEMO_REVIEW_COMMENT = 'Checked against the ODI quality bar: FAIR metadata and licence are fine.';
 
 async function ensurePersonas(): Promise<Map<string, User>> {
   const byKey = new Map<string, User>();
@@ -433,7 +434,7 @@ function scriptedReaction(p: PersonaSpec, cr: ChangeRequest): { decision: 'appro
     case 'priya':
       return { decision: 'approve', comment: 'Thanks all. Approving from the chair.', vote: 'yes' };
     case 'daniel':
-      return { decision: 'comment', comment: 'Checked against the ODI quality bar: FAIR metadata and licence are fine.', vote: 'abstain' };
+      return { decision: 'comment', comment: DEMO_REVIEW_COMMENT, vote: 'abstain' };
     default:
       return { decision: 'comment', comment: 'Looks reasonable.', vote: 'abstain' };
   }
