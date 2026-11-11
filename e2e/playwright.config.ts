@@ -4,6 +4,7 @@ import path from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { defineConfig, devices } from '@playwright/test';
+import { API_PORT, API_URL_B } from './api-servers';
 
 /**
  * End-to-end tests for Concord.
@@ -12,13 +13,13 @@ import { defineConfig, devices } from '@playwright/test';
  *   E2E_MODE=preview pnpm test:e2e   same, but against the production build (what Vercel serves)
  *   E2E_API=vercel E2E_DATABASE_URL=postgres://… pnpm test:e2e
  *                              the API as the Vercel function (scripts/vercel-build.mjs), on that Postgres
+ *   E2E_TWO_SERVERS=1          with E2E_API=vercel: also serve the same package on E2E_API_PORT_B (A + 3)
  *   pnpm test:e2e:live         read-only smoke tests against the deployed site (LIVE_URL)
  *
  * The local servers use their own ports and a throwaway data directory, so a `pnpm dev`
  * you already have running (and its data) is left alone.
  */
 const mode = process.env.E2E_MODE === 'preview' ? 'preview' : 'dev';
-const API_PORT = Number(process.env.E2E_API_PORT ?? 8797);
 const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 5183);
 /** Stand-in for GitHub's issues API, so tester feedback can be filed as issues offline. */
 export const GITHUB_STUB_PORT = Number(process.env.E2E_GITHUB_STUB_PORT ?? 8799);
@@ -41,6 +42,47 @@ const githubAppKeys = generateKeyPairSync('rsa', { modulusLength: 2048, publicKe
 const githubApp = { id: '424242', clientId: 'Iv1.e2e-concord', clientSecret: 'e2e-only-github-app-client-secret' };
 const live = process.env.LIVE_URL ?? 'https://standards-concord.vercel.app';
 const runningLive = process.argv.some((a) => a === '--project=live' || a === 'live');
+
+// Both function processes use the same database, secrets and offline services.
+const apiEnv = {
+  ...(vercelApi ? { VERCEL: '1', DATABASE_URL: process.env.E2E_DATABASE_URL! } : {}),
+  CONCORD_DATA_DIR: dataDir,
+  WEB_URL: `http://localhost:${WEB_PORT}`,
+  DEMO_MODE: 'true',
+  // Public reporting needs its own secret; this one is only for the test server.
+  REPORT_SECRET: 'e2e-only-public-report-secret-0123456789abcdef',
+  // Keep the tests deterministic and offline: no real LLM, pods or GitHub.
+  LLM_PROVIDER: 'simulated',
+  ANTHROPIC_API_KEY: '',
+  SOLID_SERVER_URL: '',
+  GOOGLE_CLIENT_ID: '',
+  GITHUB_CLIENT_ID: '',
+  // Every test validates from the same address.
+  VALIDATE_RATE_LIMIT: '1000',
+  VALIDATE_PER_CLIENT: '100',
+  VALIDATE_QUEUE: '32',
+  VALIDATE_JSONLD_QUEUE: '32',
+  // Invite-by-email, with the bot's calendar read from a local file and no Recall.ai key.
+  MEET_BOT_EMAIL: 'concord.bot@example.org',
+  MEET_BOT_ICS_URL: pathToFileURL(botCalendar).href,
+  RECALL_API_KEY: '',
+  // Feedback is filed as GitHub issues, to the local stand-in.
+  FEEDBACK_GITHUB_TOKEN: 'e2e-feedback-token',
+  FEEDBACK_GITHUB_API: `http://localhost:${GITHUB_STUB_PORT}`,
+  FEEDBACK_GITHUB_REPO: 'standards-concord/standards-concord',
+  // The Concord GitHub App and GitHub Actions' run tokens, both from the stand-in.
+  GITHUB_APP_ID: githubApp.id,
+  GITHUB_APP_SLUG: 'concord-e2e',
+  GITHUB_APP_PRIVATE_KEY: githubAppKeys.privateKey,
+  GITHUB_APP_WEBHOOK_SECRET,
+  GITHUB_APP_CLIENT_ID: githubApp.clientId,
+  GITHUB_APP_CLIENT_SECRET: githubApp.clientSecret,
+  GITHUB_APP_API_URL: `http://localhost:${GITHUB_STUB_PORT}`,
+  GITHUB_APP_WEB_URL: `http://localhost:${GITHUB_STUB_PORT}`,
+  GITHUB_OIDC_ISSUER: `http://localhost:${GITHUB_STUB_PORT}`,
+  // The welcome page's videos come from this folder, not a GitHub release.
+  MEDIA_DIR: path.join(root, 'e2e', 'fixtures', 'media'),
+};
 
 export default defineConfig({
   testDir: '.',
@@ -108,49 +150,22 @@ export default defineConfig({
           url: `http://localhost:${API_PORT}/healthz`,
           reuseExistingServer: !process.env.CI,
           timeout: 120_000,
-          env: {
-            ...(vercelApi ? { VERCEL: '1', DATABASE_URL: process.env.E2E_DATABASE_URL! } : {}),
-            PORT: String(API_PORT),
-            CONCORD_DATA_DIR: dataDir,
-            WEB_URL: `http://localhost:${WEB_PORT}`,
-            DEMO_MODE: 'true',
-            // Public reporting needs its own secret; this one is only for the test server.
-            REPORT_SECRET: 'e2e-only-public-report-secret-0123456789abcdef',
-            // Keep the tests deterministic and offline: no real LLM, pods or GitHub.
-            LLM_PROVIDER: 'simulated',
-            ANTHROPIC_API_KEY: '',
-            SOLID_SERVER_URL: '',
-            GOOGLE_CLIENT_ID: '',
-            GITHUB_CLIENT_ID: '',
-            // Every test validates from the same address.
-            VALIDATE_RATE_LIMIT: '1000',
-            VALIDATE_PER_CLIENT: '100',
-            VALIDATE_QUEUE: '32',
-            VALIDATE_JSONLD_QUEUE: '32',
-            // Invite-by-email, with the bot's calendar read from a local file and no Recall.ai key.
-            MEET_BOT_EMAIL: 'concord.bot@example.org',
-            MEET_BOT_ICS_URL: pathToFileURL(botCalendar).href,
-            RECALL_API_KEY: '',
-            // Feedback is filed as GitHub issues, to the local stand-in.
-            FEEDBACK_GITHUB_TOKEN: 'e2e-feedback-token',
-            FEEDBACK_GITHUB_API: `http://localhost:${GITHUB_STUB_PORT}`,
-            FEEDBACK_GITHUB_REPO: 'standards-concord/standards-concord',
-            // The Concord GitHub App and GitHub Actions' run tokens, both from the stand-in.
-            GITHUB_APP_ID: githubApp.id,
-            GITHUB_APP_SLUG: 'concord-e2e',
-            GITHUB_APP_PRIVATE_KEY: githubAppKeys.privateKey,
-            GITHUB_APP_WEBHOOK_SECRET,
-            GITHUB_APP_CLIENT_ID: githubApp.clientId,
-            GITHUB_APP_CLIENT_SECRET: githubApp.clientSecret,
-            GITHUB_APP_API_URL: `http://localhost:${GITHUB_STUB_PORT}`,
-            GITHUB_APP_WEB_URL: `http://localhost:${GITHUB_STUB_PORT}`,
-            GITHUB_OIDC_ISSUER: `http://localhost:${GITHUB_STUB_PORT}`,
-            // The welcome page's videos come from this folder, not a GitHub release.
-            MEDIA_DIR: path.join(root, 'e2e', 'fixtures', 'media'),
-          },
+          env: { ...apiEnv, PORT: String(API_PORT) },
           stdout: 'ignore',
           stderr: 'pipe',
         },
+        // Playwright starts webServers in order: A builds once and becomes healthy before B
+        // serves that same package. No second build can replace files under the running A.
+        ...(API_URL_B ? [{
+          command: `node scripts/vercel-serve.mjs ${new URL(API_URL_B).port}`,
+          cwd: root,
+          url: `${API_URL_B}/healthz`,
+          reuseExistingServer: !process.env.CI,
+          timeout: 120_000,
+          env: { ...apiEnv, PORT: new URL(API_URL_B).port },
+          stdout: 'ignore' as const,
+          stderr: 'pipe' as const,
+        }] : []),
         {
           command:
             mode === 'preview'

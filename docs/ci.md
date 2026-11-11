@@ -8,7 +8,7 @@ GitHub Actions minutes are free and unlimited on a public repository, but metere
 | --- | --- | --- |
 | Push to a branch with no PR | nothing | 0 min |
 | Push to a draft PR | `test` (typecheck, unit tests, build, listing checks) | 14 min |
-| PR marked ready for review, and every push after | `test`, `e2e` (preview: everything; dev: smoke test), `walkthrough` | 25 min |
+| PR marked ready for review, and every push after | `test`, `e2e` (preview: everything; dev: smoke test), `e2e-vercel` (two packaged API servers on Postgres), `walkthrough` | 25 min |
 | Push to `main` | all of the above, then `image` (backend deploy) | 30 min |
 | Vercel production deploy | `Live site` smoke test | 2 min |
 | Only `docs/`, `deploy/` or Markdown changed (outside `walkthrough/`) | nothing | 0 min |
@@ -25,7 +25,7 @@ Other savings:
 
 ## Working with it
 
-- Open PRs as drafts while iterating. Mark the PR **ready for review** when you want the browser tests, and wait for `e2e` and `walkthrough` to pass before merging. A draft's green tick only covers `test`.
+- Open PRs as drafts while iterating. Mark the PR **ready for review** when you want the browser tests, and wait for `e2e`, `e2e-vercel` and `walkthrough` to pass before merging. A draft's green tick only covers `test`.
 - A PR that only touches docs gets no checks at all. That is expected; it can be merged without waiting.
 - To run everything on any branch, use **Actions → CI → Run workflow**.
 
@@ -35,15 +35,16 @@ When Actions has no minutes (every job fails within seconds, with an annotation 
 
 ```sh
 git merge origin/main             # test what main will look like after the merge
-scripts/ci-local.sh --report      # test, e2e-dev, e2e-preview, e2e-solid, walkthrough
+scripts/ci-local.sh --report      # test, e2e-dev, e2e-preview, e2e-vercel, e2e-solid, walkthrough
 scripts/ci-local.sh e2e-dev       # or just some jobs, without posting anything
 ```
 
-The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test`, and writes each job's log to `ci-local-logs/<commit>/`. A full run takes about 10 minutes in a 4-CPU Claude sandbox (it took an hour before these changes), with the CPUs about 93% busy, so on that machine it is now limited by the total work rather than by waiting:
+The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), starts a throwaway Postgres for `test` and `e2e-vercel`, and writes each job's log to `ci-local-logs/<commit>/`. A full run takes about 10 minutes in a 4-CPU Claude sandbox (it took an hour before these changes), with the CPUs about 93% busy, so on that machine it is now limited by the total work rather than by waiting:
 
 - Jobs run side by side (`--parallel`, one and a half per CPU by default), and the browser suite is split into six shards (`--shards`) of similar length, using the times in [e2e/timings.json](../e2e/timings.json) (`--update-timings` refreshes them). Each shard has its own API server, web server, data directory and ports, so no two share state. More than one and a half pieces per CPU starves the unit tests, whose timing checks then fail.
 - The unit tests start first and keep normal priority, one package's test runner at a time; the browser pieces run at low priority and use the CPU left over. The summary shows each piece's CPU time.
 - The web app is built once, up front.
+- `e2e-vercel` runs `e2e/meetings.spec.ts` and `e2e/two-servers.spec.ts` against that production build, with its own empty Postgres database (`E2E_DATABASE_URL`, never exported as the unit tests' `TEST_DATABASE_URL`). `E2E_API=vercel E2E_TWO_SERVERS=1` starts A, which builds the function once, then B from the same package. Both use the same database and environment. The browser uses A through the web proxy; the spec sends authenticated requests directly to B. B defaults to A's port + 3 (`E2E_API_PORT_B` overrides it), inside the piece's block of ten ports after the last preview shard. The extra spec skips with a reason outside this mode. Run just this piece with `scripts/ci-local.sh e2e-vercel`; it disables Playwright retries. Actions mirrors it with a Postgres 16 service when a PR is ready for review.
 - As in CI, the production build gets the whole browser suite and the Vite dev server a smoke test (`pnpm test:e2e:smoke`: the pages, the alpha walkthrough, the reasoner and Validate data). Running all ~490 tests against both took 24 minutes more and caught little: what breaks in only one of them almost always breaks the build.
 - The server's test files run in parallel, each worker with its own Postgres database (apps/server/test/setup.ts).
 - `settle()` in the browser tests waits until the page has no request in flight for 150 ms, instead of Playwright's `networkidle`, which always waits out 500 ms and took about 40% of a typical test. Requests the previous page still had in flight stop counting when a new page loads (Playwright doesn't always report their end, and each one used to cost every later page 10 s).
@@ -51,10 +52,10 @@ The script runs each job's steps from [ci.yml](../.github/workflows/ci.yml), sta
 
 With `--report` it records the result for the commit it tested, and refuses to run with uncommitted changes, so the record always describes exactly that commit:
 
-- **Commit statuses** `local/test`, `local/e2e-dev`, `local/e2e-preview`, `local/e2e-solid` and `local/walkthrough`, shown on the pull request, wherever `gh` may post them (your own machine, the Mac).
+- **Commit statuses** `local/test`, `local/e2e-dev`, `local/e2e-preview`, `local/e2e-vercel`, `local/e2e-solid` and `local/walkthrough`, shown on the pull request, wherever `gh` may post them (your own machine, the Mac).
 - **`ci-local-logs/<commit>/summary.md`**, a table of the same results. A Claude thread's GitHub access can't post statuses, so the thread posts this summary on the pull request as a comment instead.
 
-Merge a pull request only when its head commit, after merging current `main`, has all five jobs passing in one of those records (and the external review has approved). Push nothing after the run, or run again.
+Merge a pull request only when its head commit, after merging current `main`, has all six jobs passing in one of those records (and the external review has approved). Push nothing after the run, or run again.
 
 A private repository on GitHub's free plan has no branch protection, so GitHub doesn't enforce any of this: it is the rule we follow.
 
