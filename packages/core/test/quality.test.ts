@@ -298,20 +298,36 @@ describe('owlReasoner (sparq OWL 2 DL)', () => {
     expect(report.passed).toBe(false);
     expect((await validate(g, { reasoner: 'owl' })).reasoner.checked).toBe('complete');
   });
-  it('reduces a long hierarchy to direct relations quickly', () => {
+  it('reduces a long hierarchy to direct relations with constant work per pair', () => {
     // A 1,000-class chain: sparq reports every entailed, non-asserted pair (about half a million).
     // The first version recomputed closures and took about 20 s here.
+    // On 2026-11-11, Vitest's 5 s timeout fired under load before the old time bound was checked.
     const n = 1000;
     const ops = Array.from({ length: n }, (_, i) => ({ op: 'addClass' as const, localName: `C${i}`, label: `c ${i}`, definition: `Class number ${i}.`, subClassOf: i ? [X(`C${i - 1}`)] : [] }));
     const g = applyChangeOps(baseOntology(), ops).graph;
     const entailed: [string, string][] = [];
     for (let i = 2; i < n; i++) for (let j = 0; j < i - 1; j++) entailed.push([X(`C${i}`), X(`C${j}`)]);
     entailed.push([X('Extra'), X('C5')]);
-    const t0 = performance.now();
-    expect(directInferred(g, entailed, new Set())).toEqual([[X('Extra'), X('C5')]]);
-    // Well under a second alone; the bound leaves room for CI running every package's tests at
-    // once (it took 5.5 s then), and still catches the old quadratic version by a wide margin.
-    expect(performance.now() - t0).toBeLessThan(10_000);
+    const work = { steps: 0 };
+    expect(directInferred(g, entailed, new Set(), work)).toEqual([[X('Extra'), X('C5')]]);
+    // Measured: 997,004 steps for 498,502 pairs (2 per pair); 4 leaves clear headroom.
+    // A per-pair closure walk would do roughly n times more work; avoid wall-clock bounds.
+    expect(work.steps).toBeLessThan(4 * entailed.length);
+    // The work count is the real check; allow setup time on a heavily loaded machine.
+  }, 60_000);
+  it('keeps reduction work linear in the number of entailed pairs', () => {
+    const measure = (n: number) => {
+      const g = baseOntology();
+      for (let i = 1; i < n; i++) g.store.addQuad(namedNode(X(`C${i}`)), namedNode(NS.rdfs + 'subClassOf'), namedNode(X(`C${i - 1}`)));
+      const entailed: [string, string][] = [];
+      for (let i = 2; i < n; i++) for (let j = 0; j < i - 1; j++) entailed.push([X(`C${i}`), X(`C${j}`)]);
+      const work = { steps: 0 };
+      expect(directInferred(g, entailed, new Set(), work)).toEqual([]);
+      return { steps: work.steps, pairs: entailed.length };
+    };
+    const small = measure(200), large = measure(400);
+    expect(small.steps).toBeGreaterThanOrEqual(small.pairs);
+    expect(large.steps / large.pairs).toBeLessThanOrEqual(1.5 * small.steps / small.pairs);
   });
   it('reports no unsatisfiable classes or inferred relations when sparq only decided consistency', async () => {
     // Used to go wrong: the consistency-only result carried the structural fallback's

@@ -395,8 +395,10 @@ function profileNotes(r: SparqOwlDlResult, g: OntologyGraph): OwlProfileNote[] |
  * A pair implied through an asserted parent is dropped in O(parents); only the remaining,
  * genuinely new pairs get the O(|sup(a)|) directness test. Linear in sparq's output for
  * ordinary hierarchies, where nearly every entailed pair follows from an asserted parent.
+ * @param work Accumulates one step per entailed pair, told edge examined and candidate intermediate examined.
  */
-export function directInferred(graph: OntologyGraph, entailed: [string, string][], unsat: Set<string>): [string, string][] {
+export function directInferred(graph: OntologyGraph, entailed: [string, string][], unsat: Set<string>, work?: { steps: number }): [string, string][] {
+  let steps = 0;
   // Classes become small integers, so the hot loop hashes numbers rather than long IRIs.
   const ids = new Map<string, number>();
   const iris: string[] = [];
@@ -434,6 +436,7 @@ export function directInferred(graph: OntologyGraph, entailed: [string, string][
     let x: number | undefined = a;
     while (x !== undefined) {
       for (const p of told[x] ?? []) {
+        steps++;
         // Back at a through an equivalence: that's a's own (inferred) parent, not a told one.
         if (p === a) continue;
         if (p === b) return true;
@@ -448,15 +451,18 @@ export function directInferred(graph: OntologyGraph, entailed: [string, string][
   };
   const out: [string, string][] = [];
   for (let k = 0; k < entailed.length; k++) {
+    steps++;
     const a = pairs[2 * k], b = pairs[2 * k + 1];
     if (a === b || b === thing || toldImplied(a, b) || equiv(a, b) || unsat.has(iris[a])) continue;
     // Direct: no strict intermediate between a and b.
     let direct = true;
     for (const m of sup[a]!) {
+      steps++;
       if (m !== b && has(m, b) && !equiv(m, a) && !equiv(m, b)) { direct = false; break; }
     }
     if (direct) out.push([iris[a], iris[b]]);
   }
+  if (work) work.steps += steps;
   return out.sort((x, y) => x[0].localeCompare(y[0]) || x[1].localeCompare(y[1]));
 }
 
