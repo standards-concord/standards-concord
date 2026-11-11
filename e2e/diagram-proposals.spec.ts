@@ -7,6 +7,24 @@ const list = (page: Page) => panel(page).getByRole('list', { name: 'Your propose
 const diagram = (page: Page) => page.getByRole('group', { name: 'Class diagram', exact: true });
 const form = (page: Page, action: string) => page.getByRole('form', { name: action, exact: true });
 
+/**
+ * Serves the page an edited copy of the ontology view. A view request still in flight when the page
+ * navigates (a reload) is cancelled, and its response disposed: nothing waits for it, so it is let go.
+ */
+async function editView(page: Page, edit: (view: { classes: { iri: string; superClasses: string[] }[] } & Record<string, unknown>) => void) {
+  await page.route(/\/api\/ontologies\/[^/]+\/view(\?|$)/, async (route) => {
+    try {
+      const res = await route.fetch();
+      const view = await res.json();
+      edit(view);
+      await route.fulfill({ response: res, json: view });
+    } catch (error) {
+      if (/disposed|closed|already handled/i.test(String(error))) return;
+      throw error;
+    }
+  });
+}
+
 async function openDiagram(page: Page) {
   const { id } = await demoOntology(page.request);
   await page.goto(`/o/${id}/browse?view=diagram&hops=0`);
@@ -152,16 +170,47 @@ test.describe('proposing from the Diagram', () => {
     await expect(panel(page).getByRole('button', { name: 'Open change request', exact: true })).toBeEnabled();
   });
 
+  test('Undo and reload block sending a cycle through a superclass intersection', async ({ page }) => {
+    // Revalidation used to omit B's preserved (C and D) intersection and allow A -> B -> C -> A.
+    await editView(page, (view) => {
+      view.classes = ['A', 'B', 'C', 'D', 'E'].map((name) => ({
+        iri: NS + name, kind: 'class', label: name.toLowerCase(), superClasses: name === 'A' ? [NS + 'B'] : [],
+        equivalentClasses: [], disjointWith: [], restrictions: [],
+        ...(name === 'B' ? { superClassConjuncts: [{ expression: '_:intersection', classes: [NS + 'C', NS + 'D'], restrictions: [] }] } : {}),
+      }));
+    });
+    await openDiagram(page);
+    const changeSuperclass = async (cls: string, parent: string) => {
+      await panel(page).getByRole('button', { name: 'Change superclass', exact: true }).click();
+      const f = form(page, 'Change superclass');
+      await f.getByRole('combobox', { name: 'Class', exact: true }).selectOption(NS + cls);
+      await f.getByRole('combobox', { name: 'New superclass', exact: true }).selectOption(NS + parent);
+      await f.getByRole('button', { name: 'Add to proposal', exact: true }).click();
+    };
+    await changeSuperclass('C', 'A');
+    await expect(form(page, 'Change superclass').getByRole('alert')).toContainText('one of its subclasses');
+    await form(page, 'Change superclass').getByRole('button', { name: 'Cancel', exact: true }).click();
+    await changeSuperclass('A', 'E');
+    await changeSuperclass('C', 'A');
+    await expect(panel(page).getByRole('button', { name: 'Open change request', exact: true })).toBeEnabled();
+    await list(page).getByRole('button', { name: /^Undo: Make “a”/ }).click();
+    await expect(list(page).getByRole('listitem')).toHaveCount(1);
+    await expect(panel(page).getByRole('alert')).toContainText('one of its subclasses');
+    await expect(panel(page).getByRole('button', { name: 'Open change request', exact: true })).toBeDisabled();
+    await page.reload();
+    await page.getByRole('button', { name: 'Review them', exact: true }).click();
+    await expect(list(page).getByRole('listitem')).toHaveCount(1);
+    await expect(panel(page).getByRole('alert')).toContainText('one of its subclasses');
+    await expect(panel(page).getByRole('button', { name: 'Open change request', exact: true })).toBeDisabled();
+  });
+
   test('adding a superclass keeps a parent from another vocabulary', async ({ page }) => {
     // The form built the new superclass list from the diagram's parents, which leave out classes from
     // other vocabularies, so "As well as" used to propose dropping them. The demo has no such parent,
     // so the page is given one: volunteer is also a schema.org Person.
     const EXTERNAL = 'https://schema.org/Person';
-    await page.route(/\/api\/ontologies\/[^/]+\/view(\?|$)/, async (route) => {
-      const res = await route.fetch();
-      const view = (await res.json()) as { classes: { iri: string; superClasses: string[] }[] };
+    await editView(page, (view) => {
       for (const c of view.classes) if (c.iri === NS + 'Volunteer') c.superClasses = [...c.superClasses, EXTERNAL];
-      await route.fulfill({ response: res, json: view });
     });
     const id = await openDiagram(page);
     await panel(page).getByRole('button', { name: 'Change superclass', exact: true }).click();

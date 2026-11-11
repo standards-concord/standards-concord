@@ -1,6 +1,6 @@
 import type { OntologyView } from '@concord/core/types';
 import { applyChangeOps, OntologyGraph, termNamespace } from '@concord/core';
-import { changesToOps, proposalError } from './diagramProposals';
+import { changesToOps, proposalError, undoChange, type PendingChange } from './diagramProposals';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearDiagramProposalStorage, readProposalDraft, rebaseProposalDraft, writeProposalDraft, type ProposalDraft } from './diagramProposalStorage';
 
@@ -134,6 +134,29 @@ describe('restored diagram drafts', () => {
       expect(proposalError(currentView, restored.items, current)).toBeTruthy();
       expect(() => changesToOps(restored.items, current, currentView)).toThrow();
     }
+  });
+
+  it('blocks a cycle through a preserved superclass intersection after Undo and storage restore', () => {
+    // This saved draft used to pass validation despite A -> B -> C -> A after Undo.
+    const classView = (name: string, parents: string[] = []) => ({ iri: current + name, kind: 'class' as const, superClasses: parents, equivalentClasses: [], disjointWith: [], restrictions: [] });
+    const currentView: OntologyView = { ...view, classes: [
+      classView('A', [current + 'B']),
+      { ...classView('B'), superClassConjuncts: [{ expression: '_:intersection', classes: [current + 'C', current + 'D'], restrictions: [] }] },
+      classView('C'), classView('D'), classView('E'),
+    ] };
+    const first: PendingChange = { id: 'first', kind: 'superclass', classIri: current + 'A', parent: current + 'E', mode: 'replace' };
+    const second: PendingChange = { id: 'second', kind: 'superclass', classIri: current + 'C', parent: current + 'A', mode: 'add' };
+    writeProposalDraft('alice', 'one', { ...draft, namespace: current, items: [first, second] });
+    const restored = rebaseProposalDraft(readProposalDraft('alice', 'one'), current);
+    expect(proposalError(currentView, restored.items, current)).toBeUndefined();
+    const items = undoChange(restored.items, first.id, current).items;
+    expect(items).toEqual([second]);
+    expect(proposalError(currentView, items, current)).toMatch(/subclasses/);
+    writeProposalDraft('alice', 'one', { ...restored, items });
+    const afterReload = rebaseProposalDraft(readProposalDraft('alice', 'one'), current);
+    expect(afterReload.items).toEqual([second]);
+    expect(proposalError(currentView, afterReload.items, current)).toMatch(/subclasses/);
+    expect(() => changesToOps(afterReload.items, current, currentView)).toThrow(/subclasses/);
   });
 
   it('blocks a rebased draft when its names now clash with current terms', () => {

@@ -42,7 +42,20 @@ export function superClassesFor(current: string[], parent: string, mode: 'replac
 }
 
 export function wouldCreateCycle(model: OntologyModel, classIri: string, parent: string): boolean {
-  return classIri === parent || model.descendants(classIri).includes(parent);
+  return hasSuperclassCycle(model.parents, classIri, [parent]);
+}
+
+function hasSuperclassCycle(parents: Map<string, string[]>, classIri: string, directParents = parents.get(classIri) ?? []): boolean {
+  const seen = new Set<string>();
+  const stack = [...directParents];
+  while (stack.length) {
+    const iri = stack.pop()!;
+    if (iri === classIri) return true;
+    if (seen.has(iri)) continue;
+    seen.add(iri);
+    stack.push(...(parents.get(iri) ?? []));
+  }
+  return false;
 }
 
 export function references(p: PendingChange): string[] {
@@ -137,18 +150,15 @@ export function proposalError(view: OntologyView, items: PendingChange[], namesp
     }
   }
   const { parents } = replaySuperClasses(view, items, namespace);
+  // setSuperClasses replaces named assertions only; anonymous intersections survive every intent.
+  // Use the same complete adjacency as the preview model when adding, undoing, restoring or sending.
+  for (const c of view.classes) {
+    parents.set(c.iri, [...(parents.get(c.iri) ?? []), ...(c.superClassConjuncts ?? []).flatMap((part) => part.classes)]);
+  }
   for (const p of items) {
     if (p.kind !== 'class' && p.kind !== 'superclass') continue;
     const start = p.kind === 'class' ? namespace + p.localName : p.classIri;
-    const seen = new Set<string>();
-    const stack = [...(parents.get(start) ?? [])];
-    while (stack.length) {
-      const iri = stack.pop()!;
-      if (iri === start) return 'A class cannot be its own superclass or have one of its subclasses as a superclass.';
-      if (seen.has(iri)) continue;
-      seen.add(iri);
-      stack.push(...(parents.get(iri) ?? []));
-    }
+    if (hasSuperclassCycle(parents, start)) return 'A class cannot be its own superclass or have one of its subclasses as a superclass.';
   }
 }
 

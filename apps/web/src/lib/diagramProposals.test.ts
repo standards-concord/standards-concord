@@ -102,7 +102,7 @@ describe('diagram proposals', () => {
 });
 
 describe('diagram proposal review regressions', () => {
-  const external = 'http://xmlns.com/foaf/0.1/Person';
+  const external = 'https://other.example/vocab#Parent';
   const withExternal: OntologyView = { ...view, classes: view.classes.map((c) => c.iri === iri('Volunteer') ? { ...c, superClasses: [iri('Person'), external] } : c) };
   const addParent: PendingChange = { id: 'add-parent', kind: 'superclass', classIri: iri('Volunteer'), parent: iri('Shift'), mode: 'add' };
 
@@ -143,6 +143,36 @@ describe('diagram proposal review regressions', () => {
     expect(buildProposalPreview(view, remaining, NS).model.classes.has(iri('Person'))).toBe(true);
     const repair: PendingChange = { ...first, id: 'repair' };
     expect(proposalError(view, [...remaining, repair], NS)).toBeUndefined();
+  });
+
+  it('checks preserved superclass intersections when adding, undoing and sending superclass changes', async () => {
+    // Undo used to make A -> B -> (C and D), C -> A sendable because validation omitted B's conjuncts.
+    const graph = await OntologyGraph.fromTurtle(`
+      @prefix ex: <${NS}> .
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      ex:A a owl:Class; rdfs:subClassOf ex:B .
+      ex:B a owl:Class; rdfs:subClassOf [ a owl:Class; owl:intersectionOf (ex:C ex:D) ] .
+      ex:C a owl:Class . ex:D a owl:Class . ex:E a owl:Class .
+    `);
+    const intersected = graph.view();
+    expect(intersected.classes.find((c) => c.iri === iri('B'))?.superClassConjuncts?.[0].classes).toEqual([iri('C'), iri('D')]);
+    const first: PendingChange = { id: 'first', kind: 'superclass', classIri: iri('A'), parent: iri('E'), mode: 'replace' };
+    const second: PendingChange = { id: 'second', kind: 'superclass', classIri: iri('C'), parent: iri('A'), mode: 'add' };
+    expect(wouldCreateCycle(buildModel(intersected), iri('C'), iri('A'))).toBe(true);
+    expect(proposalError(intersected, [second], NS)).toMatch(/subclasses/);
+    expect(wouldCreateCycle(buildProposalPreview(intersected, [first], NS).model, iri('C'), iri('A'))).toBe(false);
+    expect(proposalError(intersected, [first, second], NS)).toBeUndefined();
+    expect(() => changesToOps([first, second], NS, intersected)).not.toThrow();
+    const remaining = undoChange([first, second], first.id, NS).items;
+    expect(remaining).toEqual([second]);
+    expect(buildProposalPreview(intersected, remaining, NS).model.parents.get(iri('B'))).toEqual([iri('C'), iri('D')]);
+    expect(proposalError(intersected, remaining, NS)).toMatch(/subclasses/);
+    expect(() => changesToOps(remaining, NS, intersected)).toThrow(/subclasses/);
+    // Replacing B's direct parents still preserves its anonymous intersection axiom.
+    const replaceB: PendingChange = { ...first, id: 'replace-b', classIri: iri('B') };
+    expect(proposalError(intersected, [replaceB, second], NS)).toMatch(/subclasses/);
+    expect(() => changesToOps([replaceB, second], NS, intersected)).toThrow(/subclasses/);
   });
 
   it('blocks missing references before generating ops without dropping proposals', () => {
