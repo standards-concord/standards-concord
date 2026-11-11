@@ -167,6 +167,16 @@ dl.facts dd{margin:0;min-width:0;overflow-wrap:anywhere}
 dl.facts ul{margin:0;padding-left:1.1em}
 .ref{font-weight:500;text-decoration-color:color-mix(in srgb,currentColor 35%,transparent)}
 .ref.deprecated{text-decoration:line-through}
+.code-list{list-style:none;margin:1em 0 0;padding:0;border-top:1px solid var(--line)}
+.code-list ul{list-style:none;margin:0;padding:0 0 0 1.25em;border-left:1px solid var(--line)}
+.code-list li{padding:.5em 0 0}
+.code-list>li{border-bottom:1px solid var(--line);padding-bottom:.5em}
+.code-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:.25em .6em}
+.code-label{font-weight:600}
+.code-list .is-deprecated>.code-head .code-label{text-decoration:line-through;color:var(--muted)}
+.code-list .notation{font-size:.85em;color:var(--muted);font-variant-numeric:tabular-nums}
+.code-replaced{font-size:.9em;color:var(--muted)}
+.code-def{margin:.15em 0 0;color:var(--muted);font-size:.95em}
 .ref.ext code{background:none;padding:0}
 .kw{font-family:var(--mono);font-size:.82em;color:var(--draft);font-weight:600}
 .lit{color:var(--ok)}
@@ -248,7 +258,7 @@ export const PAGE_SCRIPT = `
   // Browse: which term (or group of terms) the Specification tab shows.
   function focus(el){
     if(!browse)return;
-    var term=el&&el.classList.contains('term')&&browse.contains(el)?el:null;
+    var term=el&&browse.contains(el)?el.closest('.term'):null;
     var group=term?term.closest('.term-group'):(el&&el.classList.contains('term-group')?el:null);
     browse.classList.toggle('has-selection',!!term);
     browse.classList.toggle('focused',!!group);

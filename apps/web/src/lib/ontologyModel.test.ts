@@ -21,6 +21,8 @@ function model(classes: ClassView[], props: PropertyView[]): OntologyModel {
     datatypeProperties: props.filter((p) => p.kind === 'datatypeProperty'),
     annotationProperties: [],
     individuals: [],
+    conceptSchemes: [],
+    concepts: [],
     prefixes: {},
     tripleCount: 0,
   };

@@ -72,7 +72,7 @@ describe('restored diagram drafts', () => {
   const current = 'https://example.org/current/';
   const old = draft.namespace!;
   const existing = 'https://example.org/existing#Parent';
-  const view: OntologyView = { metadata: { iri: current, creators: [], contributors: [], imports: [] }, classes: [], datatypeProperties: [], objectProperties: [], annotationProperties: [], individuals: [], prefixes: {}, tripleCount: 0 };
+  const view: OntologyView = { metadata: { iri: current, creators: [], contributors: [], imports: [] }, classes: [], datatypeProperties: [], objectProperties: [], annotationProperties: [], individuals: [], conceptSchemes: [], concepts: [], prefixes: {}, tripleCount: 0 };
 
   it('rebases only draft-minted references when the current graph namespace changes', () => {
     const original: ProposalDraft = { ...draft, items: [

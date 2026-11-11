@@ -30,7 +30,7 @@ export class TermResolver {
     newTerms: { localName: string }[] = [],
   ) {
     const view = graph.view();
-    const all = [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals];
+    const all = [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals, ...view.concepts, ...view.conceptSchemes];
     for (const t of all) {
       this.byName.set(localNameOf(t.iri).toLowerCase(), t.iri);
       if (t.label) this.byName.set(t.label.toLowerCase(), t.iri);
@@ -123,10 +123,22 @@ export function proposalToOps(graph: OntologyGraph, terms: ProposedTerm[], sourc
 /** Human-readable one-liners for a ChangeOp, used in prompts, timelines and agent responses. */
 export function describeOp(op: ChangeOp, compact: (iri: string) => string): string {
   switch (op.op) {
+    case 'addConceptScheme':
+      return `Create the code list “${op.label}”`;
+    case 'addConcept':
+      return `Add code “${op.label}”${op.notation ? ` (${op.notation})` : ''} to ${compact(op.scheme)}`;
+    case 'updateConcept':
+      return `Edit the code or code list “${compact(op.iri)}”: ${Object.keys(op.set).join(', ')}`;
+    case 'moveConcept':
+      return `Move code “${compact(op.iri)}” ${op.broader ? `under ${compact(op.broader)}` : 'to the top of its code list'}`;
+    case 'setCodeList':
+      return `${op.scheme ? 'Set' : 'Clear'} the code list of ${compact(op.property)}${op.scheme ? ` to ${compact(op.scheme)}` : ''}`;
+    case 'deprecateConcept':
+      return `Deprecate code “${compact(op.iri)}”: ${op.reason}`;
     case 'addClass':
       return `Add class ${op.localName} ("${op.label}")${op.subClassOf?.length ? `, subclass of ${op.subClassOf.map(compact).join(', ')}` : ''}: ${op.definition}`;
     case 'addObjectProperty':
-      return `Add object property ${op.localName} (${(op.domain ?? []).map(compact).join(' or ') || 'any'} → ${(op.range ?? []).map(compact).join(' or ') || 'any'}): ${op.definition}`;
+      return `Add object property ${op.localName} (${(op.domain ?? []).map(compact).join(' or ') || 'any'} → ${op.codeList ? `code list ${compact(op.codeList)}` : (op.range ?? []).map(compact).join(' or ') || 'any'}): ${op.definition}`;
     case 'addDatatypeProperty':
       return `Add datatype property ${op.localName} (${(op.domain ?? []).map(compact).join(' or ') || 'any'} → ${(op.range ?? []).map(compact).join(' or ') || 'literal'}): ${op.definition}`;
     case 'addIndividual':

@@ -28,7 +28,7 @@ export const KIND_LABEL: Record<TermView['kind'], string> = {
   objectProperty: 'Object property',
   datatypeProperty: 'Datatype property',
   annotationProperty: 'Annotation property',
-  individual: 'Individual',
+  individual: 'Individual', conceptScheme: 'Code list', concept: 'Code',
 };
 
 /** Manchester-ish rendering of a restriction, e.g. "hasRole some Role". */
@@ -54,6 +54,16 @@ export function restrictionText(r: Restriction, label: Labeler): string {
 export function describeOp(op: ChangeOp, label: Labeler): { verb: string; tone: 'add' | 'remove' | 'modify' | 'deprecate'; title: string; lines: string[] } {
   const list = (xs?: string[]) => (xs ?? []).map(label).join(', ');
   switch (op.op) {
+    case 'addConceptScheme':
+      return { verb: 'Create code list', tone: 'add', title: op.label, lines: [op.definition] };
+    case 'addConcept':
+      return { verb: 'Add code', tone: 'add', title: op.label, lines: [`In “${label(op.scheme)}”${op.broader ? `, under “${label(op.broader)}”` : ', at the top level'}`, ...(op.notation ? [`Code: ${op.notation}`] : []), op.definition] };
+    case 'moveConcept':
+      return { verb: 'Move code', tone: 'modify', title: label(op.iri), lines: [op.broader ? `Now under “${label(op.broader)}”` : 'Now at the top level'] };
+    case 'setCodeList':
+      return op.scheme
+        ? { verb: 'Use code list', tone: 'modify', title: label(op.scheme), lines: [`For the values of “${label(op.property)}”`] }
+        : { verb: 'Stop using a code list for', tone: 'modify', title: label(op.property), lines: ['Its values are no longer limited to a list'] };
     case 'addClass': {
       const lines: string[] = [];
       if (op.definition) lines.push(`“${op.definition}”`);
@@ -71,6 +81,7 @@ export function describeOp(op: ChangeOp, label: Labeler): { verb: string; tone: 
       if (op.range?.length) lines.push(`Range: ${list(op.range)}`);
       if (op.subPropertyOf?.length) lines.push(`Sub-property of ${list(op.subPropertyOf)}`);
       if (op.op === 'addObjectProperty') {
+        if (op.codeList) lines.push(`Code list: ${label(op.codeList)}`);
         if (op.inverseOf) lines.push(`Inverse of ${label(op.inverseOf)}`);
         if (op.characteristics?.length) lines.push(`Characteristics: ${op.characteristics.join(', ')}`);
       } else if (op.functional) lines.push('Functional');
@@ -82,6 +93,8 @@ export function describeOp(op: ChangeOp, label: Labeler): { verb: string; tone: 
       for (const [p, vs] of Object.entries(op.facts ?? {})) lines.push(`${label(p)}: ${vs.map((v) => (v.startsWith('http') ? label(v) : v)).join(', ')}`);
       return { verb: 'Add individual', tone: 'add', title: op.label || op.localName, lines };
     }
+    case 'updateConcept':
+      return { verb: 'Edit', tone: 'modify', title: label(op.iri), lines: Object.entries(op.set).map(([k, v]) => `${({ label: 'Label', definition: 'Definition', notation: 'Code', altLabels: 'Also known as', examples: 'Examples', editorialNote: 'Editorial note' } as Record<string, string>)[k] ?? k}: ${Array.isArray(v) ? v.join('; ') : v || '—'}`) };
     case 'updateAnnotations': {
       const lines = Object.entries(op.set)
         .filter(([, v]) => v !== undefined)
@@ -106,6 +119,8 @@ export function describeOp(op: ChangeOp, label: Labeler): { verb: string; tone: 
       return { verb: 'Remove disjointness', tone: 'remove', title: list(op.classes), lines: [] };
     case 'setCharacteristics':
       return { verb: 'Set characteristics of', tone: 'modify', title: label(op.iri), lines: [op.characteristics.length ? op.characteristics.join(', ') : '(none)'] };
+    case 'deprecateConcept':
+      return { verb: 'Deprecate code', tone: 'deprecate', title: label(op.iri), lines: [op.reason, ...(op.replacedBy ? [`Replaced by ${label(op.replacedBy)}`] : [])] };
     case 'deprecateTerm':
       return { verb: 'Deprecate', tone: 'deprecate', title: label(op.iri), lines: [op.reason, ...(op.replacedBy ? [`Replaced by ${label(op.replacedBy)}`] : [])] };
     case 'removeTerm':

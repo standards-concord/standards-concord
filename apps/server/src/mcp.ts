@@ -104,7 +104,7 @@ function buildServer(user: User, agentName: string) {
 
   server.registerTool(
     'search_terms',
-    { title: 'Search terms', description: 'Find classes and properties by label, synonym, definition or name.', inputSchema: { ontology: ontologyArg, query: z.string(), limit: z.number().int().min(1).max(50).default(10) }, annotations: { readOnlyHint: true } },
+    { title: 'Search terms', description: 'Find classes, properties, codes and code lists by label, synonym, definition or name.', inputSchema: { ontology: ontologyArg, query: z.string(), limit: z.number().int().min(1).max(50).default(10) }, annotations: { readOnlyHint: true } },
     ({ ontology, query, limit }) =>
       withProject(ontology, async (p) => {
         const g = await ontologyStore.working(p);

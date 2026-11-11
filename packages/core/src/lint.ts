@@ -35,6 +35,11 @@ export const LINT_REFERENCES = {
   disjointness: 'OOPS! P10 (missing disjointness)',
   manySubclasses: 'Kendall & McGuinness (2019): keep hierarchies navigable',
   owl2Datatype: 'OWL 2 Structural Specification §4 (datatype maps); ROBOT validate-profile --profile DL',
+  skosLabel: 'SKOS Reference §3.5 (S14)',
+  skosScheme: 'SKOS Reference §4 (Concept Schemes)',
+  skosBroader: 'SKOS Reference §8 (Semantic Relations)',
+  skosNotation: 'SKOS Reference §6 (Notations)',
+  skosDefinition: 'SKOS Reference §7 (Documentation Properties)',
   propertyKind: 'OWL 2 DL: an IRI cannot be both an object and a datatype property',
 } as const;
 
@@ -64,7 +69,7 @@ export function lint(graph: OntologyGraph, opts: LintOptions = {}): Issue[] {
   const classes = v.classes;
   const props = [...v.objectProperties, ...v.datatypeProperties];
   const coreTerms: TermView[] = [...classes, ...props].filter(local);
-  const deprecated = new Set([...classes, ...props, ...v.individuals, ...v.annotationProperties].filter((t) => t.deprecated).map((t) => t.iri));
+  const deprecated = new Set([...classes, ...props, ...v.individuals, ...v.annotationProperties, ...v.concepts, ...v.conceptSchemes].filter((t) => t.deprecated).map((t) => t.iri));
   const labelOf = (iri: string) => graph.term(iri)?.label;
 
   /* --- annotations ------------------------------------------------------ */
@@ -92,6 +97,37 @@ export function lint(graph: OntologyGraph, opts: LintOptions = {}): Issue[] {
       }
     }
   }
+
+  /* --- governed SKOS code lists ----------------------------------------- */
+  const concepts = new Map(v.concepts.map((t) => [t.iri, t]));
+  const schemes = new Set(v.conceptSchemes.map((t) => t.iri));
+  const notations = new Map<string, string>();
+  for (const t of [...v.concepts, ...v.conceptSchemes]) {
+    const labels = objects(s, t.iri, P.prefLabel).filter((l) => l.termType === 'Literal');
+    if (!labels.length && t.kind === 'concept') push('error', 'code-missing-pref-label', `${c(t.iri)} has no skos:prefLabel`, t.iri, LINT_REFERENCES.skosLabel);
+    const languages = labels.map((l) => ((l as any).language ?? '').toLowerCase());
+    if (new Set(languages).size !== languages.length) push('warning', 'skos-multiple-pref-labels', `${c(t.iri)} has more than one skos:prefLabel in the same language`, t.iri, LINT_REFERENCES.skosLabel);
+    if (!t.definition) push('warning', 'code-missing-definition', `${c(t.iri)} has no definition`, t.iri, LINT_REFERENCES.skosDefinition);
+    if (t.kind === 'conceptScheme') {
+      if (!v.concepts.some((code) => code.inScheme.includes(t.iri))) push('warning', 'code-list-empty', `${c(t.iri)} has no codes`, t.iri, LINT_REFERENCES.skosScheme);
+      continue;
+    }
+    if (!t.inScheme.length) push('error', 'code-missing-scheme', `${c(t.iri)} is in no code list`, t.iri, LINT_REFERENCES.skosScheme);
+    for (const scheme of t.inScheme) {
+      if (!schemes.has(scheme)) push('error', 'code-invalid-scheme', `${c(t.iri)} names a code list that is not a scheme: ${c(scheme)}`, t.iri, LINT_REFERENCES.skosScheme);
+      for (const notation of objects(s, t.iri, P.notation)) {
+        const key = `${scheme}|${notation.value}`;
+        if (notations.has(key) && notations.get(key) !== t.iri) push('error', 'code-duplicate-notation', `notation “${notation.value}” is duplicated in ${c(scheme)}`, t.iri, LINT_REFERENCES.skosNotation);
+        notations.set(key, t.iri);
+      }
+    }
+    for (const parent of t.broader) {
+      const p = concepts.get(parent);
+      if (!p || (t.inScheme.length > 0 && (p.inScheme.length !== t.inScheme.length || !p.inScheme.every((i) => t.inScheme.includes(i))))) push('error', 'code-invalid-broader', `${c(t.iri)} has a broader value that is not a code in the same scheme: ${c(parent)}`, t.iri, LINT_REFERENCES.skosBroader);
+    }
+  }
+  for (const cycle of findCycles(new Map(v.concepts.map((t) => [t.iri, t.broader])))) push('error', 'code-broader-cycle', `broader cycle: ${[...cycle, cycle[0]].map(c).join(' → ')}`, cycle[0], LINT_REFERENCES.skosBroader);
+  for (const p of v.objectProperties) if (p.codeList && !schemes.has(p.codeList)) push('error', 'property-invalid-code-list', `${c(p.iri)} names a code list that is not a scheme: ${c(p.codeList)}`, p.iri, LINT_REFERENCES.skosScheme);
 
   /* --- naming ------------------------------------------------------------ */
   for (const t of classes.filter(local)) {
@@ -128,7 +164,7 @@ export function lint(graph: OntologyGraph, opts: LintOptions = {}): Issue[] {
     if (p.deprecated) continue;
     const isLocal = local(p);
     const hasDom = p.domain.length || p.domainExpressions?.length;
-    const hasRng = p.range.length || p.rangeExpressions?.length;
+    const hasRng = p.codeList || p.range.length || p.rangeExpressions?.length;
     if (isLocal && !hasDom) push('warning', 'missing-domain', `${c(p.iri)} has no rdfs:domain`, p.iri, LINT_REFERENCES.domainRange);
     if (isLocal && !hasRng) push('warning', 'missing-range', `${c(p.iri)} has no rdfs:range`, p.iri, LINT_REFERENCES.domainRange);
     if (p.domain.length + (p.domainExpressions?.length ?? 0) > 1) {
@@ -166,7 +202,7 @@ export function lint(graph: OntologyGraph, opts: LintOptions = {}): Issue[] {
     if (!rb) push('info', 'deprecated-without-replacement', `${c(iri)} is deprecated without dcterms:isReplacedBy`, iri, LINT_REFERENCES.deprecated);
     else if (deprecated.has(rb)) push('warning', 'misused-replaced-by', `${c(iri)} is replaced by ${c(rb)}, which is itself deprecated`, iri, LINT_REFERENCES.replacedBy);
   }
-  for (const t of [...classes, ...props, ...v.individuals]) {
+  for (const t of [...classes, ...props, ...v.individuals, ...v.concepts, ...v.conceptSchemes]) {
     if (!t.deprecated && t.replacedBy) push('warning', 'misused-replaced-by', `${c(t.iri)} has dcterms:isReplacedBy but is not deprecated`, t.iri, LINT_REFERENCES.replacedBy);
   }
   if (deprecated.size) {

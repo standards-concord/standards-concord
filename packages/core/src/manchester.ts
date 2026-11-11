@@ -52,6 +52,12 @@ export function toManchester(graph: OntologyGraph): string {
     objects(s, ont, NS.owl + 'incompatibleWith').map((o) => `owl:incompatibleWith ${name(o.value)}`),
   ).sort(), ''));
   frames.push(header.join('\n'));
+  // Vocabulary declarations are hidden from UI views, but remain part of the OWL document.
+  const frameTypes: Record<string, string> = { [T.Class]: 'Class', [T.ObjectProperty]: 'ObjectProperty', [T.DatatypeProperty]: 'DataProperty', [T.AnnotationProperty]: 'AnnotationProperty' };
+  for (const q of s.getQuads(null, nn(RDF_TYPE), null, null)) {
+    if (q.subject.termType === 'NamedNode' && q.subject.value.startsWith(NS.skos) && frameTypes[q.object.value]) frames.push(`${frameTypes[q.object.value]}: ${name(q.subject.value)}`);
+  }
+
 
   for (const p of v.annotationProperties) frames.push([`AnnotationProperty: ${name(p.iri)}`, ...section('Annotations', annotationsOf(p.iri))].join('\n'));
   const datatypes = subjects(s, RDF_TYPE, T.Datatype).filter((t) => t.termType === 'NamedNode').map((t) => t.value).sort();
@@ -90,7 +96,7 @@ export function toManchester(graph: OntologyGraph): string {
       ...section('DisjointWith', objects(s, k.iri, P.disjointWith).filter((t) => t.termType === 'NamedNode').map((t) => name(t.value)).sort()),
     ].join('\n'));
   }
-  for (const i of v.individuals) {
+  for (const i of [...v.individuals, ...v.concepts.map((t) => graph.individualView(t.iri)), ...v.conceptSchemes.map((t) => graph.individualView(t.iri))]) {
     const facts: string[] = [];
     for (const p of Object.keys(i.facts)) {
       for (const o of objects(s, i.iri, p)) {

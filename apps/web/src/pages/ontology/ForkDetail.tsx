@@ -50,7 +50,7 @@ function ForkFormats({ formats }: { formats: Record<string, string> }) {
   );
 }
 
-const KIND_LABEL: Record<string, string> = { class: 'Class', objectProperty: 'Relationship', datatypeProperty: 'Attribute', individual: 'Individual', term: 'Term' };
+const KIND_LABEL: Record<string, string> = { class: 'Class', objectProperty: 'Relationship', datatypeProperty: 'Attribute', individual: 'Individual', conceptScheme: 'Code list', concept: 'Code', term: 'Term' };
 
 function UpstreamChip({ t }: { t: ForkTerm }) {
   switch (t.upstream) {

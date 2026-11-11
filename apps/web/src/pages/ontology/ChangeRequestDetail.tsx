@@ -440,6 +440,9 @@ export function ChangeRequestPage() {
               view federation
             </Link>
           )}
+          {cr.origin.type === 'code-list-edit' && (
+            <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(cr.origin.scheme)}`}>view code list</Link>
+          )}
           {cr.origin.type === 'term-edit' && (
             <Link className="text-accent hover:underline" to={`/o/${id}/browse?term=${encodeURIComponent(cr.origin.termIri)}`}>
               view term

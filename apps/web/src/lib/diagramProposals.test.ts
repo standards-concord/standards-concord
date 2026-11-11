@@ -7,7 +7,7 @@ import { buildProposalPreview, changesToOps, deriveLocalName, describeChange, lo
 const NS = 'https://example.org/test#';
 const iri = (name: string) => NS + name;
 const cls = (name: string, parents: string[] = []): ClassView => ({ iri: iri(name), kind: 'class', label: name.toLowerCase(), superClasses: parents.map(iri), equivalentClasses: [], disjointWith: [], restrictions: [] });
-const view: OntologyView = { metadata: { iri: NS, creators: [], contributors: [], imports: [] }, classes: [cls('Person'), cls('Volunteer', ['Person']), cls('Shift')], objectProperties: [], datatypeProperties: [], annotationProperties: [], individuals: [], prefixes: {}, tripleCount: 0 };
+const view: OntologyView = { metadata: { iri: NS, creators: [], contributors: [], imports: [] }, classes: [cls('Person'), cls('Volunteer', ['Person']), cls('Shift')], objectProperties: [], datatypeProperties: [], annotationProperties: [], individuals: [], conceptSchemes: [], concepts: [], prefixes: {}, tripleCount: 0 };
 const added: PendingChange = { id: 'class', kind: 'class', localName: 'Coordinator', label: 'coordinator', definition: 'A person who coordinates shifts.', parent: iri('Person') };
 const relationship: PendingChange = { id: 'relationship', kind: 'relationship', localName: 'coordinates', label: 'coordinates', definition: 'Connects a coordinator to a shift.', from: iri('Coordinator'), to: iri('Shift'), howMany: 'min' };
 const attribute: PendingChange = { id: 'attribute', kind: 'attribute', localName: 'startDate', label: 'start date', definition: 'The date a shift starts.', classIri: iri('Shift'), range: XSD + 'date', howMany: 'exactly' };

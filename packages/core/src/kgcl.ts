@@ -33,6 +33,18 @@ export function toKGCL(ops: ChangeOp[], prefixes: Record<string, string>, namesp
   const out: string[] = [];
   for (const op of ops) {
     switch (op.op) {
+      case 'addConceptScheme':
+        out.push(`# create code list ${mint(op.localName)} “${op.label}”`);
+        break;
+      case 'addConcept':
+        out.push(`# create code ${mint(op.localName)} “${op.label}”${op.notation ? ` (${op.notation})` : ''}`, `create edge ${mint(op.localName)} skos:inScheme ${c(op.scheme)}`, `create edge ${mint(op.localName)} ${op.broader ? 'skos:broader' : 'skos:topConceptOf'} ${c(op.broader ?? op.scheme)}`);
+        break;
+      case 'moveConcept':
+        out.push(`# move code ${c(op.iri)} ${op.broader ? `under ${c(op.broader)}` : 'to top level'}`);
+        break;
+      case 'setCodeList':
+        out.push(`# ${op.scheme ? `set code list ${c(op.scheme)} on` : 'clear code list on'} ${c(op.property)}`);
+        break;
       case 'addClass':
       case 'addObjectProperty':
       case 'addDatatypeProperty':
@@ -52,10 +64,14 @@ export function toKGCL(ops: ChangeOp[], prefixes: Record<string, string>, namesp
         } else {
           for (const d of op.domain ?? []) out.push(`create edge ${id} rdfs:domain ${c(d)}`);
           for (const r of op.range ?? []) out.push(`create edge ${id} rdfs:range ${c(r)}`);
+          if (op.op === 'addObjectProperty' && op.codeList) out.push(`# values for ${id} from code list ${c(op.codeList)}`);
           for (const s of op.subPropertyOf ?? []) out.push(`create edge ${id} rdfs:subPropertyOf ${c(s)}`);
         }
         break;
       }
+      case 'updateConcept':
+        out.push(`# update code or code list ${c(op.iri)}: ${Object.entries(op.set).map(([k, v]) => `${k} → ${JSON.stringify(v)}`).join('; ')}`);
+        break;
       case 'updateAnnotations': {
         const id = c(op.iri);
         const s = op.set;
@@ -86,6 +102,7 @@ export function toKGCL(ops: ChangeOp[], prefixes: Record<string, string>, namesp
       case 'setCharacteristics':
         out.push(`# set characteristics of ${c(op.iri)}: ${op.characteristics.join(', ') || 'none'}`);
         break;
+      case 'deprecateConcept':
       case 'deprecateTerm':
         out.push(op.replacedBy ? `obsolete ${c(op.iri)} with replacement ${c(op.replacedBy)}` : `obsolete ${c(op.iri)}`);
         break;
@@ -130,7 +147,7 @@ export function migrationSparql(before: OntologyGraph, after: OntologyGraph, dif
     const header = `# ${c(t.iri)} → ${c(target)}`;
     if (t.kind === 'class') {
       ops.push(`${header}\nDELETE { ?s a ${o} } INSERT { ?s a ${n} } WHERE { ?s a ${o} }`);
-    } else if (t.kind === 'individual') {
+    } else if ((t.kind === 'individual' || t.kind === 'concept' || t.kind === 'conceptScheme')) {
       ops.push(`${header}\nDELETE { ${o} ?p ?v } INSERT { ${n} ?p ?v } WHERE { ${o} ?p ?v }`);
       ops.push(`DELETE { ?s ?p ${o} } INSERT { ?s ?p ${n} } WHERE { ?s ?p ${o} }`);
     } else {

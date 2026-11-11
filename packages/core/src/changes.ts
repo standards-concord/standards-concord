@@ -13,7 +13,7 @@ import {
   RDF_FIRST, RDF_REST,
 } from './rdf.js';
 import {
-  CHARACTERISTIC_TYPES, OntologyGraph, P, T, declareAnnotationProperties, looksLikeIRI, restrictionKey,
+  CHARACTERISTIC_TYPES, OntologyGraph, P, T, declareSkos, declareAnnotationProperties, looksLikeIRI, restrictionKey,
 } from './graph.js';
 
 export class ChangeOpError extends Error {
@@ -160,7 +160,8 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
   const date = ctx.date ?? today();
   const usedAnnotations = new Set<string>();
   const annotate = (iri: string, set: TermAnnotations) => {
-    for (const [field, pred] of Object.entries(ANNOTATION_FIELDS) as [keyof typeof ANNOTATION_FIELDS, string][]) {
+    for (const [field, defaultPred] of Object.entries(ANNOTATION_FIELDS) as [keyof typeof ANNOTATION_FIELDS, string][]) {
+      const pred = field === 'label' && (g.kindsOf(iri).has('concept') || g.kindsOf(iri).has('conceptScheme')) ? P.prefLabel : defaultPred;
       const v = set[field];
       if (v === undefined) continue;
       // Replace English/untagged values; keep other-language translations.
@@ -194,6 +195,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     const clash = findLabel(g, fields.label);
     if (clash) warnings.push(`label "${fields.label}" is already used by <${clash}>`);
     add(iri, RDF_TYPE, nn(type));
+    if (type === T.Concept || type === T.ConceptScheme) add(iri, RDF_TYPE, nn(T.NamedIndividual));
     annotate(iri, fields);
     if (g.ontologyIRI) add(iri, P.isDefinedBy, nn(g.ontologyIRI));
     add(iri, P.created, typedLit(date, NS.xsd + 'date'));
@@ -208,7 +210,128 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     return iri;
   };
 
+  const requireScheme = (iri: string) => {
+    if (g.term(iri)?.kind !== 'conceptScheme') fail(`<${iri}> is not a code list (skos:ConceptScheme)`);
+    return iri;
+  };
+  const requireCode = (iri: string) => {
+    const t = g.term(iri);
+    if (t?.kind !== 'concept') return fail(`<${iri}> is not a code (skos:Concept)`);
+    return t;
+  };
+  const checkNotation = (scheme: string[], notation: string | undefined, except?: string) => {
+    if (!notation?.trim()) return;
+    if (scheme.some((list) => subjects(s, P.inScheme, list).some((c) => c.value !== except && objects(s, c.value, RDF_TYPE).some((t) => t.value === T.Concept) && objects(s, c.value, P.notation).some((n) => n.value === notation.trim())))) fail(`notation "${notation.trim()}" is already used in this code list`);
+  };
+  const checkBroader = (iri: string, schemes: string[], broader: string) => {
+    const parent = requireCode(broader);
+    if (!schemes.length || parent.inScheme.length !== schemes.length || !parent.inScheme.every((i) => schemes.includes(i))) fail('broader code must be in the same scheme');
+    const seen = new Set<string>();
+    const todo = [broader];
+    while (todo.length) {
+      const next = todo.pop()!;
+      if (next === iri) fail('moving this code would create a broader cycle');
+      if (seen.has(next)) continue;
+      seen.add(next);
+      const t = g.term(next);
+      if (t?.kind === 'concept') todo.push(...t.broader);
+    }
+  };
+  const setCodeList = (property: string, scheme: string | null) => {
+    if (!g.kindsOf(property).has('objectProperty')) fail(`<${property}> is not an object property`);
+    if (scheme !== null) requireScheme(scheme);
+    removeAll(property, P.range);
+    if (scheme !== null) {
+      declareSkos(s);
+      const node = blankNode();
+      add(node, RDF_TYPE, nn(T.Class));
+      add(node, NS.owl + 'intersectionOf', writeList(s, [nn(T.Concept), writeRestriction(g, { property: P.inScheme, kind: 'value', filler: scheme })]));
+      add(property, P.range, node);
+    }
+    touched.add(property);
+  };
+
   switch (op.op) {
+    case 'addConceptScheme': {
+      declareSkos(s);
+      newTerm(op.localName, 'class', T.ConceptScheme, op);
+      break;
+    }
+    case 'addConcept': {
+      const scheme = requireScheme(ex(op.scheme));
+      if (!op.definition?.trim()) fail('definition is required');
+      checkNotation([scheme], op.notation);
+      const broader = op.broader ? ex(op.broader) : undefined;
+      if (broader) checkBroader(g.namespace + op.localName, [scheme], broader);
+      declareSkos(s);
+      const iri = newTerm(op.localName, 'individual', T.Concept, op);
+      add(iri, P.inScheme, nn(scheme));
+      add(iri, broader ? P.broader : P.topConceptOf, nn(broader ?? scheme));
+      if (op.notation?.trim()) add(iri, P.notation, literal(op.notation.trim()));
+      break;
+    }
+    case 'updateConcept': {
+      const iri = requireTerm(notRecorded(ex(op.iri)));
+      const current = g.term(iri);
+      if (current?.kind !== 'concept' && current?.kind !== 'conceptScheme') fail(`<${iri}> is not a code or code list`);
+      const term = current!;
+      for (const field of Object.keys(op.set)) {
+        if (!['label', 'definition', 'notation', 'altLabels', 'examples', 'editorialNote'].includes(field)) fail(`cannot update unknown field "${field}"`);
+        if (term.kind === 'conceptScheme' && (field === 'notation' || field === 'examples')) fail(`code lists have no ${field}`);
+      }
+      for (const [field, value] of Object.entries(op.expect ?? {})) {
+        if (!['label', 'definition', 'notation', 'altLabels', 'examples', 'editorialNote'].includes(field)) fail(`cannot check unknown field "${field}"`);
+        if (!sameAnnotationValue(value, (term as unknown as Record<string, string | string[] | undefined>)[field])) fail(`the ${field} of <${iri}> has changed since this edit was proposed; revise the edit against the current value`);
+      }
+      if (op.set.label !== undefined && !op.set.label.trim()) fail('label cannot be empty');
+      if (op.set.notation !== undefined) {
+        checkNotation(requireCode(iri).inScheme, op.set.notation, iri);
+        removeAll(iri, P.notation);
+        if (op.set.notation.trim()) add(iri, P.notation, literal(op.set.notation.trim()));
+      }
+      annotate(iri, op.set);
+      declareSkos(s);
+      touched.add(iri);
+      break;
+    }
+    case 'moveConcept': {
+      const iri = requireTerm(notRecorded(ex(op.iri)));
+      const code = requireCode(iri);
+      if (op.expect && (code.broader[0] ?? null) !== (op.expect.broader === null ? null : ex(op.expect.broader))) {
+        fail(`the parent of <${iri}> has changed since this edit was proposed; revise the edit against the current parent`);
+      }
+      if (!code.inScheme.length) fail('code has no scheme');
+      const broader = op.broader === null ? null : ex(op.broader);
+      if (broader) checkBroader(iri, code.inScheme, broader);
+      removeAll(iri, P.broader);
+      removeAll(iri, P.topConceptOf);
+      if (broader) add(iri, P.broader, nn(broader));
+      else for (const scheme of code.inScheme) add(iri, P.topConceptOf, nn(scheme));
+      declareSkos(s);
+      touched.add(iri);
+      break;
+    }
+    case 'deprecateConcept': {
+      const iri = requireTerm(notRecorded(ex(op.iri)));
+      const code = requireCode(iri);
+      if (!op.reason?.trim()) fail('a deprecation reason is required');
+      const replacement = op.replacedBy ? ex(op.replacedBy) : undefined;
+      if (replacement) {
+        if (replacement === iri) fail('a code cannot be replaced by itself');
+        const other = requireCode(replacement);
+        if (!code.inScheme.length || code.inScheme.length !== other.inScheme.length || !other.inScheme.every((i) => code.inScheme.includes(i))) fail('replacement code must be in the same scheme');
+      }
+      deprecate(g, iri, op.reason, replacement);
+      declareSkos(s);
+      usedAnnotations.add(P.historyNote);
+      if (replacement) usedAnnotations.add(P.replacedBy);
+      touched.add(iri);
+      break;
+    }
+    case 'setCodeList': {
+      setCodeList(ex(op.property), op.scheme === null ? null : ex(op.scheme));
+      break;
+    }
     case 'addClass': {
       const supers = (op.subClassOf ?? []).map(ex).map(notRecorded).map(requireClass);
       const eqs = (op.equivalentTo ?? []).map(ex).map(notRecorded).map(requireClass);
@@ -241,7 +364,11 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
       if (inverse) add(iri, P.inverseOf, nn(inverse));
       for (const c of characteristics) add(iri, RDF_TYPE, nn(characteristicType(c)));
       if (!domain.length) warnings.push(`<${iri}> has no domain`);
-      if (!range.length) warnings.push(`<${iri}> has no range`);
+      if (isObj && op.codeList) {
+        if (range.length) fail('codeList replaces range; specify only codeList');
+        setCodeList(iri, ex(op.codeList));
+      }
+      if (!range.length && !(isObj && op.codeList)) warnings.push(`<${iri}> has no range`);
       break;
     }
     case 'addIndividual': {
@@ -403,6 +530,8 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     }
     case 'removeTerm': {
       const iri = requireTerm(ex(op.iri));
+      if (g.kindsOf(iri).has('conceptScheme') && subjects(s, P.inScheme, iri).length) fail('cannot remove a code list that still has codes');
+      if (g.kindsOf(iri).has('concept') && subjects(s, P.broader, iri).length) fail('cannot remove a code that has narrower codes');
       const n = removeTerm(g, iri);
       if (n.axioms) warnings.push(`removing <${iri}> also removed ${n.axioms} axiom(s) that referenced it`);
       warnings.push(`<${iri}> was removed outright: this is a breaking (major) change; prefer deprecateTerm`);
@@ -412,7 +541,7 @@ function applyOne(g: OntologyGraph, op: ChangeOp, ctx: ChangeContext, warnings: 
     case 'renameTerm': {
       const iri = requireTerm(ex(op.iri));
       const kinds = g.kindsOf(iri);
-      const kind = kinds.has('class') ? 'class' : kinds.has('individual') && kinds.size === 1 ? 'individual' : 'property';
+      const kind = kinds.has('class') || kinds.has('conceptScheme') ? 'class' : kinds.has('concept') || kinds.has('individual') && kinds.size === 1 ? 'individual' : 'property';
       if (!isValidLocalName(op.newLocalName, kind)) fail(`invalid local name "${op.newLocalName}" for a ${kind}`);
       const newIri = notRecorded(g.namespace + op.newLocalName);
       if (newIri === iri) fail('new name is the same as the old one');
@@ -465,7 +594,7 @@ function characteristicType(c: PropertyCharacteristic): string {
 
 function findLabel(g: OntologyGraph, label: string, except?: string): string | undefined {
   const want = label.trim().toLowerCase();
-  for (const q of g.store.getQuads(null, nn(P.label), null, null)) {
+  for (const q of [P.label, P.prefLabel].flatMap((p) => g.store.getQuads(null, nn(p), null, null))) {
     if (q.subject.termType === 'NamedNode' && q.subject.value !== except && q.object.value.trim().toLowerCase() === want) {
       if (!objects(g.store, q.subject.value, P.deprecated).some((t) => t.value === 'true')) return q.subject.value;
     }
@@ -601,7 +730,7 @@ export function removeTerm(g: OntologyGraph, iri: string): { axioms: number } {
 /** OBO-style rename: new IRI gets the term's axioms, references are rewritten, old IRI is deprecated. */
 function renameTerm(g: OntologyGraph, oldIri: string, newIri: string, date: string): void {
   const s = g.store;
-  const keepOnOld = new Set([RDF_TYPE, P.label, P.definition, P.isDefinedBy]);
+  const keepOnOld = new Set<string>([RDF_TYPE, P.label, P.prefLabel, P.definition, P.isDefinedBy, P.inScheme, P.topConceptOf]);
   for (const q of s.getQuads(nn(oldIri), null, null, null)) {
     s.addQuad(nn(newIri), q.predicate as any, q.object as any);
     if (!keepOnOld.has(q.predicate.value)) s.removeQuad(q);
@@ -621,11 +750,12 @@ function renameTerm(g: OntologyGraph, oldIri: string, newIri: string, date: stri
     for (const o of objects(s, newIri, p)) s.removeQuad(nn(newIri), nn(p), o as any, defaultGraph());
   }
   s.addQuad(nn(newIri), nn(P.created), typedLit(date, NS.xsd + 'date'));
-  const labelOld = objects(s, oldIri, P.label)[0]?.value;
+  const labelPred = g.kindsOf(oldIri).has('concept') || g.kindsOf(oldIri).has('conceptScheme') ? P.prefLabel : P.label;
+  const labelOld = objects(s, oldIri, labelPred)[0]?.value;
   // Obsolete term labels are prefixed (OBO convention), which also avoids a duplicate-label clash.
-  for (const o of objects(s, oldIri, P.label)) {
-    s.removeQuad(nn(oldIri), nn(P.label), o as any, defaultGraph());
-    s.addQuad(nn(oldIri), nn(P.label), literal(`obsolete ${o.value}`, (o as any).language || undefined));
+  for (const o of objects(s, oldIri, labelPred)) {
+    s.removeQuad(nn(oldIri), nn(labelPred), o as any, defaultGraph());
+    s.addQuad(nn(oldIri), nn(labelPred), literal(`obsolete ${o.value}`, (o as any).language || undefined));
   }
   deprecate(g, oldIri, `Renamed to <${newIri}>${labelOld ? ` ("${labelOld}")` : ''} on ${date}; the term's axioms moved to the new IRI.`, newIri);
 }

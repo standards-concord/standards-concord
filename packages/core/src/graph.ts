@@ -6,7 +6,7 @@ import { Parser, Store } from 'n3';
 import { termNamespace } from './termRules.js';
 import type { Quad, Term, Literal } from 'n3';
 import type {
-  ClassView, IndividualView, IRI, OntologyMetadata, OntologyView, PropertyCharacteristic,
+  ConceptView, ConceptSchemeView, ClassView, IndividualView, IRI, OntologyMetadata, OntologyView, PropertyCharacteristic,
   PropertyView, Restriction, TermAnnotations, TermView,
 } from './types.js';
 import { NS, RDF_TYPE, STANDARD_PREFIXES, isSafeNamespace, isSafePrefix, today } from './ns.js';
@@ -35,6 +35,11 @@ export const MAPPING_PROPERTIES = [
 
 /** Annotation predicates projected into TermAnnotations (everything else on a term is "other"). */
 export const P = {
+  prefLabel: NS.skos + 'prefLabel',
+  notation: NS.skos + 'notation',
+  inScheme: NS.skos + 'inScheme',
+  broader: NS.skos + 'broader',
+  topConceptOf: NS.skos + 'topConceptOf',
   label: NS.rdfs + 'label',
   comment: NS.rdfs + 'comment',
   definition: NS.skos + 'definition',
@@ -62,6 +67,8 @@ export const P = {
 } as const;
 
 export const T = {
+  Concept: NS.skos + 'Concept',
+  ConceptScheme: NS.skos + 'ConceptScheme',
   Ontology: NS.owl + 'Ontology',
   Class: NS.owl + 'Class',
   RdfsClass: NS.rdfs + 'Class',
@@ -75,6 +82,16 @@ export const T = {
   Thing: NS.owl + 'Thing',
   Nothing: NS.owl + 'Nothing',
 } as const;
+
+/** Local declarations make this subset usable in OWL 2 DL without importing SKOS. */
+export const SKOS_DECLARATIONS = new Map<string, string>([
+  [T.Concept, T.Class], [T.ConceptScheme, T.Class],
+  [P.inScheme, T.ObjectProperty], [P.broader, T.ObjectProperty], [P.topConceptOf, T.ObjectProperty],
+  [P.notation, T.DatatypeProperty], [P.prefLabel, T.AnnotationProperty],
+]);
+export function declareSkos(store: Store): void {
+  for (const [iri, type] of SKOS_DECLARATIONS) store.addQuad(nn(iri), nn(RDF_TYPE), nn(type));
+}
 
 export interface EmptyOntologyOptions {
   iri: string;
@@ -204,6 +221,8 @@ export class OntologyGraph {
       else if (t === T.NamedIndividual) kinds.add('individual');
     }
     if (!kinds.has('individual') && types.some((t) => this.isClassIri(t))) kinds.add('individual');
+    if (types.includes(T.Concept)) { kinds.delete('individual'); kinds.add('concept'); }
+    if (types.includes(T.ConceptScheme)) { kinds.delete('individual'); kinds.add('conceptScheme'); }
     return kinds;
   }
 
@@ -222,7 +241,7 @@ export class OntologyGraph {
 
   view(): OntologyView {
     const named = (type: string) =>
-      subjects(this.store, RDF_TYPE, type).filter((t) => t.termType === 'NamedNode').map((t) => t.value);
+      subjects(this.store, RDF_TYPE, type).filter((t) => t.termType === 'NamedNode').map((t) => t.value).filter((i) => !i.startsWith(NS.skos));
     const uniqSorted = (xs: string[]) => [...new Set(xs)].sort();
     const ont = this.ontologyIRI;
 
@@ -239,7 +258,7 @@ export class OntologyGraph {
       ...this.store.getQuads(null, nn(RDF_TYPE), null, null)
         .filter((q) => q.subject.termType === 'NamedNode' && classSet.has(q.object.value))
         .map((q) => q.subject.value),
-    ]).filter((i) => i !== ont);
+    ]).filter((i) => i !== ont && !this.kindsOf(i).has('concept') && !this.kindsOf(i).has('conceptScheme'));
 
     return {
       metadata: this.metadata(),
@@ -248,6 +267,8 @@ export class OntologyGraph {
       datatypeProperties: dtIris.map((i) => this.propertyView(i, 'datatypeProperty')),
       annotationProperties: apIris.map((i) => this.propertyView(i, 'annotationProperty')),
       individuals: indIris.map((i) => this.individualView(i)),
+      conceptSchemes: named(T.ConceptScheme).sort().map((i) => this.conceptSchemeView(i)),
+      concepts: named(T.Concept).sort().map((i) => this.conceptView(i)),
       prefixes: { ...this.prefixes },
       tripleCount: this.size,
     };
@@ -255,6 +276,8 @@ export class OntologyGraph {
 
   term(iri: string): TermView | undefined {
     const kinds = this.kindsOf(iri);
+    if (kinds.has('concept')) return this.conceptView(iri);
+    if (kinds.has('conceptScheme')) return this.conceptSchemeView(iri);
     if (kinds.has('class')) return this.classView(iri);
     if (kinds.has('objectProperty')) return this.propertyView(iri, 'objectProperty');
     if (kinds.has('datatypeProperty')) return this.propertyView(iri, 'datatypeProperty');
@@ -312,7 +335,7 @@ export class OntologyGraph {
     }
     const dep = objects(s, iri, P.deprecated).some((t) => t.value === 'true' || t.value === '1');
     return clean({
-      label: pickPreferred(objects(s, iri, P.label)),
+      label: (this.kindsOf(iri).has('concept') || this.kindsOf(iri).has('conceptScheme') ? pickPreferred(objects(s, iri, P.prefLabel)) : undefined) ?? pickPreferred(objects(s, iri, P.label)),
       definition: pickPreferred([...objects(s, iri, P.definition), ...objects(s, iri, P.iaoDefinition)]),
       comment: pickPreferred(objects(s, iri, P.comment)),
       altLabels: vals(P.altLabel),
@@ -434,19 +457,42 @@ export class OntologyGraph {
     const inv = [...objects(s, iri, P.inverseOf), ...subjects(s, P.inverseOf, iri)].find((t) => t.termType === 'NamedNode' && t.value !== iri);
     const dom = objects(s, iri, P.domain);
     const rng = objects(s, iri, P.range);
+    const codeList = rng.length === 1 ? this.codeListOf(rng[0]) : undefined;
     return clean({
       iri,
       kind,
       ...this.annotations(iri),
       domain: named(dom),
       range: named(rng),
+      codeList,
       domainExpressions: nonEmpty(dom.filter((t) => t.termType === 'BlankNode').map((t) => manchesterExpr(s, t, this.prefixes)).sort()),
-      rangeExpressions: nonEmpty(rng.filter((t) => t.termType === 'BlankNode').map((t) => manchesterExpr(s, t, this.prefixes)).sort()),
+      rangeExpressions: codeList ? undefined : nonEmpty(rng.filter((t) => t.termType === 'BlankNode').map((t) => manchesterExpr(s, t, this.prefixes)).sort()),
       superProperties: named(objects(s, iri, P.subPropertyOf)),
       inverseOf: inv?.value,
       characteristics: (Object.entries(CHARACTERISTIC_TYPES) as [PropertyCharacteristic, string][])
         .filter(([, t]) => types.includes(t)).map(([c]) => c),
     }) as PropertyView;
+  }
+
+  /** Recognises exactly the governed code-list range, independent of RDF list ordering. */
+  codeListOf(node: Term): string | undefined {
+    if (node.termType !== 'BlankNode') return undefined;
+    const head = firstObject(this.store, node, NS.owl + 'intersectionOf');
+    const members = head && readList(this.store, head);
+    if (members?.length !== 2 || !members.some((m) => m.termType === 'NamedNode' && m.value === T.Concept)) return undefined;
+    const r = members.find((m) => m.termType === 'BlankNode');
+    if (!r) return undefined;
+    const restriction = this.restrictionOf(r);
+    return restriction?.kind === 'value' && restriction.property === P.inScheme && restriction.filler && !restriction.literal ? restriction.filler : undefined;
+  }
+
+  conceptSchemeView(iri: string): ConceptSchemeView {
+    return { iri, kind: 'conceptScheme', ...this.annotations(iri), topConcepts: subjects(this.store, P.topConceptOf, iri).filter((t) => t.termType === 'NamedNode').map((t) => t.value).sort() };
+  }
+
+  conceptView(iri: string): ConceptView {
+    const values = (p: string) => objects(this.store, iri, p).filter((t) => t.termType === 'NamedNode').map((t) => t.value).sort();
+    return { iri, kind: 'concept', ...this.annotations(iri), notation: this.literalOf(iri, P.notation), inScheme: values(P.inScheme), broader: values(P.broader), topConceptOf: values(P.topConceptOf), narrower: subjects(this.store, P.broader, iri).filter((t) => t.termType === 'NamedNode').map((t) => t.value).sort() };
   }
 
   individualView(iri: string): IndividualView {

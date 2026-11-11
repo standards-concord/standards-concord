@@ -82,7 +82,7 @@ const KIND_LABEL: Record<TermView['kind'], string> = {
   objectProperty: 'Object property',
   datatypeProperty: 'Datatype property',
   annotationProperty: 'Annotation property',
-  individual: 'Individual',
+  individual: 'Individual', conceptScheme: 'Code list', concept: 'Code',
 };
 const LEVEL_LABEL: Record<ChangeLevel, string> = { major: 'Major', minor: 'Minor', patch: 'Patch' };
 const CHARACTERISTIC_LABEL: Record<string, string> = {
@@ -145,10 +145,13 @@ export function renderOntologyPage(input: OntologyPageInput): string {
     { id: id('sec-datatype-properties'), title: 'Datatype properties', terms: view.datatypeProperties },
     { id: id('sec-annotation-properties'), title: 'Annotation properties', terms: view.annotationProperties },
     { id: id('sec-individuals'), title: 'Individuals', terms: view.individuals },
+    { id: id('sec-code-lists'), title: 'Code lists', terms: view.conceptSchemes ?? [] },
   ].map((g) => ({ ...g, terms: [...g.terms].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'en', { sensitivity: 'base' })) }));
 
   const index = new Map<string, Indexed>();
   for (const g of groups) for (const t of g.terms) index.set(t.iri, { term: t, anchor: anchors.get(t.iri)!, name: nameOf(t) });
+
+  for (const t of view.concepts ?? []) index.set(t.iri, { term: t, anchor: anchors.get(t.iri)!, name: nameOf(t) });
 
   const ref = (iri: string) => {
     const hit = index.get(iri);
@@ -209,7 +212,9 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const propertyRows = (p: PropertyView) =>
     [
       row('Domain', list([...p.domain.map(ref), ...(p.domainExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">Any (unconstrained)</span>'),
-      row('Range', list([...p.range.map(ref), ...(p.rangeExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">Any (unconstrained)</span>'),
+      p.codeList
+        ? row('Values from code list', ref(p.codeList))
+        : row('Range', list([...p.range.map(ref), ...(p.rangeExpressions ?? []).map((e) => `<code>${esc(e)}</code>`)]) || '<span class="muted">Any (unconstrained)</span>'),
       row('Subproperty of', refs(p.superProperties)),
       row('Superproperty of', refs(byName(subProperties.get(p.iri)))),
       row('Inverse of', p.inverseOf ? ref(p.inverseOf) : ''),
@@ -224,7 +229,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const card = (t: TermView) => {
     const { anchor, name } = index.get(t.iri)!;
     const rows =
-      t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : propertyRows(t as PropertyView);
+      t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : 'domain' in t ? propertyRows(t) : '';
     const report = reportHref(t);
     return `<article class="term${t.deprecated ? ' is-deprecated' : ''}" id="${esc(anchor)}" data-kind="${t.kind}">
   <header class="term-head">
@@ -240,6 +245,26 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   ${t.comment && t.comment !== t.definition ? `<p class="comment muted">${esc(t.comment)}</p>` : ''}
   ${rows || annotationRows(t) ? `<dl class="facts">${rows}${annotationRows(t)}</dl>` : ''}
 </article>`;
+  };
+
+  const anchoredCodes = new Set<string>();
+  const codeList = (scheme: TermView): string => {
+    const codes = (view.concepts ?? []).filter((c) => c.inScheme.includes(scheme.iri));
+    const codeIris = new Set(codes.map((c) => c.iri));
+    const rendered = new Set<string>();
+    const branch = (code: typeof codes[number]): string => {
+      if (rendered.has(code.iri)) return '';
+      rendered.add(code.iri);
+      const anchor = anchors.get(code.iri)!;
+      const anchorAttribute = anchoredCodes.has(code.iri) ? '' : ` id="${esc(anchor)}"`;
+      anchoredCodes.add(code.iri);
+      const children = codes.filter((c) => c.broader.includes(code.iri)).map(branch).join('');
+      // The label links to the code's own anchor; the notation (the value data stores) sits beside it.
+      return `<li${anchorAttribute} data-kind="concept"${code.deprecated ? ' class="is-deprecated"' : ''}><div class="code-head"><a class="code-label" href="#${esc(fragment(anchor))}">${esc(nameOf(code))}</a>${code.notation ? ` <code class="notation" title="Code">${esc(code.notation)}</code>` : ''}${code.deprecated ? ` <span class="kind kind-deprecated">Deprecated</span>${code.replacedBy ? ` <span class="code-replaced">use ${ref(code.replacedBy)}</span>` : ''}` : ''}</div>${code.definition ? `<p class="code-def">${esc(code.definition)}</p>` : ''}${children ? `<ul>${children}</ul>` : ''}</li>`;
+    };
+    const roots = codes.filter((c) => !c.broader.some((iri) => codeIris.has(iri)));
+    const body = roots.map(branch).join('') + codes.filter((c) => !rendered.has(c.iri)).map(branch).join('');
+    return card(scheme).replace('</article>', `<ul class="code-list" aria-label="Codes in ${esc(nameOf(scheme))}">${body}</ul></article>`);
   };
 
   /* ------------------------- class hierarchy ------------------------- */
@@ -377,7 +402,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
         .join('')}
       </tbody></table></details>
     </section>
-    ${nonEmpty.map((g) => `<section id="${g.id}" class="term-group" aria-label="${esc(g.title)}"><h2 class="group-title">${esc(g.title)} <span class="count">${g.terms.length}</span></h2>${g.terms.map(card).join('')}</section>`).join('')}
+    ${nonEmpty.map((g) => `<section id="${g.id}" class="term-group" aria-label="${esc(g.title)}"><h2 class="group-title">${esc(g.title)} <span class="count">${g.terms.length}</span></h2>${g.terms.map((t) => t.kind === 'conceptScheme' ? codeList(t) : card(t)).join('')}</section>`).join('')}
   </div>
 </div>
 ${reportDialog}`;

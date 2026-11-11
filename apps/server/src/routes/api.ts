@@ -16,6 +16,7 @@ import { mountGithubApp } from './githubApp.js';
 import { getAgentReport, listAgentReports, reportGap, sparql } from '../services/agents.js';
 import { reconcile as reconcileAutopilot, turtleDiff } from '../services/appChecks.js';
 import * as crs from '../services/changeRequests.js';
+import { proposeCodeListEdit } from '../services/codeListEdits.js';
 import { proposeTermEdit } from '../services/termEdits.js';
 import { withTriageBudget } from '../services/budget.js';
 import { feedbackChat, listFeedback, questionsFor, readPodFeedback, submitFeedback, summariseFeedback, transcribe, type Pathway } from '../services/feedback.js';
@@ -730,6 +731,12 @@ export function apiRouter(): Router {
       origin: { type: 'bug-report' },
       naturalLanguage: `Bug report${termIri ? ` about <${termIri}>` : ''}: ${title}\n\n${description}`,
     });
+    res.status(201).json(await crOut(cr, req));
+  });
+
+  r.post('/ontologies/:id/code-list-edits', async (req, res) => {
+    const user = requireUser(req);
+    const cr = await proposeCodeListEdit(await project(req), user, req.body ?? {});
     res.status(201).json(await crOut(cr, req));
   });
 

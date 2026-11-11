@@ -53,6 +53,18 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.48.0',
+    date: '2026-11-11',
+    title: 'Code lists',
+    changes: [{
+      id: 'governed-code-lists', type: 'feat', title: 'Code lists',
+      detail: "Ontologies can now hold code lists: controlled lists of codes such as activity types. Codes are proposed and approved like terms, and data checks reject codes that aren't in the list.",
+      roles: ['steward', 'contributor', 'agent'], to: '{o}/browse',
+      ask: 'Was proposing a code as easy as editing a term?',
+    }],
+    pr: 134,
+  },
+  {
     version: '0.47.0',
     date: '2026-11-11',
     title: 'Check data in a SPARQL endpoint',

@@ -15,10 +15,12 @@ export function ontologyDigest(graph: OntologyGraph, maxTerms = 400): string {
       return `Class ${c(t.iri)} "${t.label ?? ''}"${sup.length ? ` ⊑ ${sup.join(' and ')}` : ''}${t.disjointWith.length ? ` disjoint ${t.disjointWith.map(c).join(',')}` : ''}${dep}${def}`;
     }
     if (t.kind === 'individual') return `Individual ${c(t.iri)} "${t.label ?? ''}" : ${t.types.map(c).join(', ')}${dep}`;
+    if (t.kind === 'conceptScheme') return `Code list ${c(t.iri)} “${t.label ?? ''}”${dep}${def}`;
+    if (t.kind === 'concept') return `Code ${c(t.iri)} “${t.label ?? ''}”${t.notation ? ` (${t.notation})` : ''} in ${t.inScheme.map(c).join(', ')}${t.broader.length ? ` under ${t.broader.map(c).join(', ')}` : ''}${dep}${def}`;
     const kind = t.kind === 'objectProperty' ? 'ObjectProperty' : t.kind === 'datatypeProperty' ? 'DataProperty' : 'AnnotationProperty';
-    return `${kind} ${c(t.iri)} "${t.label ?? ''}" ${t.domain.map(c).join('|') || '⊤'} → ${t.range.map(c).join('|') || '⊤'}${t.characteristics.length ? ` (${t.characteristics.join(',')})` : ''}${dep}${def}`;
+    return `${kind} ${c(t.iri)} "${t.label ?? ''}" ${t.domain.map(c).join('|') || '⊤'} → ${t.codeList ? `code list ${c(t.codeList)}` : t.range.map(c).join('|') || '⊤'}${t.characteristics.length ? ` (${t.characteristics.join(',')})` : ''}${dep}${def}`;
   };
-  const terms: TermView[] = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.individuals];
+  const terms: TermView[] = [...v.classes, ...v.objectProperties, ...v.datatypeProperties, ...v.individuals, ...v.concepts, ...v.conceptSchemes];
   const prefixes = Object.entries(v.prefixes)
     .map(([p, ns]) => `@prefix ${p}: <${ns}> .`)
     .join('\n');
