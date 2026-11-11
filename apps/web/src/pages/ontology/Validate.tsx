@@ -4,17 +4,19 @@ import { CheckCircle2, Download, FileUp, ListChecks, LoaderCircle, RotateCcw, Sh
 import { DATA_FORMATS, dataFormatForFile, sniffDataFormat, type DataFormat } from '@concord/core/data-formats';
 import { DATA_CHECK_LIMITS, DEFAULT_DATA_BASE } from '@concord/core/data-check';
 import { DataCheckError, checkDataInBrowser, resetDataCheck, warmDataCheck } from '../../lib/checkDataInBrowser';
-import { accountToken, onAccountChange, stillCurrent } from '../../lib/session';
+import { accountToken, onAccountChange, stillCurrent, useSession } from '../../lib/session';
 import { api, type DataValidation } from '../../api';
-import { useAsync } from '../../lib/hooks';
-import { Badge, Button, Card, CardHeader, CodeBlock, InlineError, Select, cx } from '../../components/ui';
-import { CollapsibleCard } from '../../components/Disclosure';
+import { useAsync, useLocalStorage } from '../../lib/hooks';
+import { Badge, Button, Card, CardHeader, CodeBlock, InlineError, Input, Select, cx } from '../../components/ui';
+import { CollapsibleCard, Disclosure } from '../../components/Disclosure';
 import { CodeEditor, type CodeEditorHandle } from '../../components/code/CodeEditor';
 import { Pager, ProblemItem, listLabel, usePage, useTurtleChecks } from '../../components/check/turtleChecks';
 import type { Finding, RawFinding } from '../../lib/shaclFindings';
 import { defaultSampleData, useSampleData } from '../../lib/sampleData';
 import { termCompletions } from '../../lib/termCompletions';
 import type { CodeLanguage } from '../../components/code/languages';
+import { parseTurtle, RDF_TYPE } from '../../lib/turtleDoc';
+import { endpointClasses, endpointDrift, endpointFallback, EndpointNetworkError, fetchEndpointSample, sampleQuery, type EndpointSample } from '../../lib/sparqlEndpoint';
 import { useOntology } from './Layout';
 
 /**
@@ -96,6 +98,8 @@ function hash(s: string): string {
   return (h >>> 0).toString(36);
 }
 
+const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString('en')} ${n === 1 ? one : many}`;
+
 const FORMAT_IDS = Object.keys(DATA_FORMATS) as DataFormat[];
 const LANGUAGE: Record<DataFormat, CodeLanguage> = { turtle: 'turtle', trig: 'turtle', ntriples: 'ntriples', nquads: 'ntriples', jsonld: 'json', rdfxml: 'xml' };
 /** Larger files are checked but not shown in the editor, which would be slow. */
@@ -106,6 +110,11 @@ const MAX_BYTES = 5 * 1024 * 1024;
  * checked almost as you type; a large file waits for a longer pause, so typing in it stays smooth.
  */
 const autoCheckDelay = (chars: number) => (chars < 100_000 ? 80 : 400);
+
+type EndpointSettings = { url: string; graph: string; limit: number };
+type DataSource =
+  | { source: 'file'; name: string; text: string }
+  | (EndpointSample & { source: 'endpoint'; name: string; version: string; endpoint: EndpointSettings });
 
 type Picked = DataFormat | 'auto';
 
@@ -173,7 +182,15 @@ export function ValidateTab() {
   // The sample data, shared with Query, is there to start with.
   const [data, setData] = useSampleData(id, ontology);
   const editor = useRef<CodeEditorHandle>(null);
-  const [file, setFile] = useState<{ name: string; text: string } | null>(null);
+  const [file, setFile] = useState<DataSource | null>(null);
+  const { session } = useSession();
+  // The query-draft prefix also clears these preferences on sign-out in session.tsx.
+  const [endpoint, setEndpoint] = useLocalStorage<EndpointSettings>(`concord.query.${session?.user?.id ?? 'guest'}.${id}.endpoint`, { url: '', graph: '', limit: 50 });
+  const endpointRun = useRef<AbortController | null>(null);
+  const [fetching, setFetching] = useState<{ completed: number; total: number } | null>(null);
+  const [endpointError, setEndpointError] = useState<unknown>();
+  const [fallback, setFallback] = useState('');
+  const [queryPreview, setQueryPreview] = useState('');
   const [picked, setPicked] = useState<Picked>('auto');
   const [report, setReport] = useState<{ result: DataValidation; text: string; format: DataFormat; version: string; ms?: number } | null>(null);
   // The version's ontology and shapes, for describing problems in Turtle.
@@ -197,7 +214,7 @@ export function ValidateTab() {
   const inFlight = useRef(new Set<{ controller: AbortController; started: number }>());
 
   const text = file?.text ?? data;
-  const format: DataFormat = picked === 'auto' ? (file && dataFormatForFile(file.name)) || sniffDataFormat(text) : picked;
+  const format: DataFormat = file?.source === 'endpoint' ? 'ntriples' : picked === 'auto' ? (file && dataFormatForFile(file.name)) || sniffDataFormat(text) : picked;
   // The report shown is for other inputs while a new check runs.
   const stale = !!report && (report.text !== text || report.format !== format || report.version !== version);
   const prefixes = useMemo(() => ({ ...(view.data?.prefixes ?? {}), [ontology.prefix]: ontology.namespace }), [view.data, ontology.prefix, ontology.namespace]);
@@ -235,6 +252,9 @@ export function ValidateTab() {
   useEffect(() => {
     const off = onAccountChange(() => {
       setSrc(undefined);
+      setFile(null);
+      setEndpointError(undefined);
+      setFallback('');
       setAccountEpoch((n) => n + 1);
       invalidate(true);
     });
@@ -245,14 +265,17 @@ export function ValidateTab() {
   }, []);
   // Fetch the version's ontology and shapes as soon as it is picked, so Validate answers at once.
   useEffect(() => {
+    let active = true;
     versionSources(id, version, true)
       .then((s) => {
+        if (!active) return;
         setSrc({ ...s, version });
         return warmDataCheck({ key: s.key, ontology: s.turtle, shapes: s.shapes, baseIRI: DEFAULT_DATA_BASE, maxTriples: DATA_CHECK_LIMITS.triples });
       })
       .catch(() => {
         /* reported by the check */
       });
+    return () => { active = false; };
   }, [id, version, accountEpoch]);
 
   const setVersion = (v: string) => {
@@ -268,6 +291,9 @@ export function ValidateTab() {
    * old report goes; otherwise it stays, marked out of date, until the new check answers.
    */
   const invalidate = (replaced = false, when: 'now' | 'soon' = 'now') => {
+    endpointRun.current?.abort();
+    endpointRun.current = null;
+    setFetching(null);
     request.current++;
     loads.current++;
     setReading(false);
@@ -352,7 +378,7 @@ export function ValidateTab() {
     // The file's contents become the data now, so nothing reported or asked for before can stand.
     invalidate(true);
     if (content.length > EDITOR_LIMIT) {
-      setFile({ name: f.name, text: content });
+      setFile({ source: 'file', name: f.name, text: content });
     } else {
       setFile(null);
       setData(content);
@@ -360,6 +386,86 @@ export function ValidateTab() {
     const byName = dataFormatForFile(f.name);
     setPicked(byName ?? 'auto');
   };
+
+  // URL-driven version changes and unmounts also cancel a live fetch.
+  useEffect(() => {
+    setFetching(null);
+    setEndpointError(undefined);
+    setFallback('');
+    return () => { endpointRun.current?.abort(); endpointRun.current = null; };
+  }, [id, version]);
+
+  useEffect(() => {
+    if (src?.version !== version) {
+      setQueryPreview('');
+      return;
+    }
+    try {
+      const classes = endpointClasses(src.turtle, ontology.namespace);
+      setQueryPreview(classes.length ? sampleQuery(classes[0], endpoint.limit, endpoint.graph.trim()) : 'This version has no classes to sample.');
+    } catch (e) {
+      setQueryPreview((e as Error).message);
+    }
+  }, [src, version, ontology.namespace, endpoint.limit, endpoint.graph]);
+
+  const fetchAndCheck = async (settings = endpoint) => {
+    // A fetch chosen after an upload takes precedence over that file's pending read.
+    loads.current++;
+    setReading(false);
+    endpointRun.current?.abort();
+    const controller = new AbortController();
+    endpointRun.current = controller;
+    const token = accountToken();
+    const snapshot = { ...settings, graph: settings.graph.trim(), url: settings.url.trim() };
+    setEndpointError(undefined);
+    setFallback('');
+    setFetching({ completed: 0, total: 0 });
+    let classes: string[] = [];
+    const current = () => endpointRun.current === controller && !!token.account && stillCurrent(token, token.account);
+    try {
+      const selected = await versionSources(id, version);
+      if (!current()) return;
+      classes = endpointClasses(selected.turtle, ontology.namespace);
+      const sample = await fetchEndpointSample({
+        endpoint: snapshot.url,
+        graph: snapshot.graph,
+        limit: snapshot.limit,
+        classes,
+        title: ontology.title,
+        controller,
+        onProgress: (completed, total) => { if (current()) setFetching({ completed, total }); },
+      });
+      if (!current()) return;
+      endpointRun.current = null;
+      invalidate(true);
+      setFile({ ...sample, source: 'endpoint', name: `${ontology.slug}-sample.nt`, version, endpoint: snapshot });
+      setPicked('auto');
+      setError(undefined);
+    } catch (e) {
+      // The helper aborts sibling requests on failure, so identity/account, rather than
+      // the signal, determine whether a friendly error still belongs to this run.
+      if (endpointRun.current !== controller || !token.account || !stillCurrent(token, token.account)) return;
+      setEndpointError(e);
+      if (e instanceof EndpointNetworkError) setFallback(endpointFallback(snapshot.url, iri, classes, snapshot.limit, snapshot.graph));
+    } finally {
+      if (endpointRun.current === controller) {
+        endpointRun.current = null;
+        setFetching(null);
+      }
+    }
+  };
+
+  const driftCounts = useMemo(() => {
+    if (file?.source !== 'endpoint' || src?.version !== version) return {};
+    if (file.version === version && !file.cutShort) return file.counts;
+    // With another version, or when the budget left some queries unfinished, count
+    // the classes actually present in the retained sample rather than guessing.
+    let classes: string[];
+    try { classes = endpointClasses(src.turtle, ontology.namespace); } catch { return {}; }
+    const counts = Object.fromEntries(classes.map((c) => [c, 0]));
+    for (const t of parseTurtle(file.text).triples) if (t.p.term.value === RDF_TYPE && Object.hasOwn(counts, t.o.term.value)) counts[t.o.term.value]++;
+    return counts;
+  }, [file, src, version, ontology.namespace]);
 
   const loadExamples = async () => {
     setError(undefined);
@@ -421,7 +527,7 @@ export function ValidateTab() {
               {latest && !published.some((r) => r.version === latest) && <option value={latest}>v{latest} (latest release)</option>}
               <option value="draft">Working draft</option>
             </Select>
-            <Select value={picked} onChange={(e) => {
+            <Select value={file?.source === 'endpoint' ? 'ntriples' : picked} disabled={file?.source === 'endpoint'} onChange={(e) => {
                 setPicked(e.target.value as Picked);
                 invalidate();
               }} className="max-w-64" aria-label="Data format">
@@ -471,6 +577,52 @@ export function ValidateTab() {
             </Button>
           </div>
 
+          <Disclosure title="Check data in a SPARQL endpoint" keepMounted>
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,3fr)_minmax(0,2fr)_max-content]">
+                <label className="block space-y-1 text-sm">
+                  <span className="font-medium">Endpoint URL</span>
+                  <Input type="url" placeholder="https://example.org/sparql" value={endpoint.url} onChange={(e) => setEndpoint({ ...endpoint, url: e.target.value })} />
+                </label>
+                <label className="block space-y-1 text-sm">
+                  <span className="font-medium">Graph (optional)</span>
+                  <Input placeholder="The endpoint’s default graph" value={endpoint.graph} onChange={(e) => setEndpoint({ ...endpoint, graph: e.target.value })} />
+                </label>
+                <label className="block space-y-1 text-sm">
+                  <span className="font-medium">Resources per class</span>
+                  <Select value={endpoint.limit} onChange={(e) => setEndpoint({ ...endpoint, limit: Number(e.target.value) })}>
+                    {[20, 50, 200].map((n) => <option key={n} value={n}>{n}</option>)}
+                  </Select>
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="primary" disabled={!!fetching || !endpoint.url.trim()} onClick={() => void fetchAndCheck()}>Fetch and check</Button>
+                {fetching && (
+                  <>
+                    <span role="status" className="text-sm text-muted">{fetching.total ? `Fetching ${fetching.completed} of ${fetching.total} classes…` : 'Reading this version’s classes…'}</span>
+                    <Button onClick={() => {
+                      endpointRun.current?.abort();
+                      endpointRun.current = null;
+                      setFetching(null);
+                    }}>Cancel</Button>
+                  </>
+                )}
+              </div>
+              <p className="text-xs text-muted">Your browser asks the endpoint directly; nothing goes through Concord.</p>
+              <Disclosure title="Show the queries">
+                <p className="mb-2 text-xs text-muted">One query per class in this version. The first query is:</p>
+                <CodeBlock language="sparql" code={queryPreview || 'Reading this version’s classes…'} ariaLabel="Sample query" />
+              </Disclosure>
+              {endpointError ? <InlineError error={endpointError} /> : null}
+              {fallback && (
+                <div className="space-y-2">
+                  <p className="text-sm">You can fetch the sample from your terminal and send it to this version for checking:</p>
+                  <CodeBlock language="shell" code={fallback} ariaLabel="Fetch and check with curl" />
+                </div>
+              )}
+            </div>
+          </Disclosure>
+
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -481,7 +633,26 @@ export function ValidateTab() {
             className={cx('rounded-lg', dragging && 'ring-2 ring-accent')}
             data-testid="validate-drop"
           >
-            {file ? (
+            {file?.source === 'endpoint' ? (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface-2 px-4 py-3 text-sm" aria-label="Endpoint sample" role="region">
+                <div className="space-y-0.5">
+                  <p>
+                    <span className="font-medium">Sample from {file.host}</span>{' '}
+                    <span className="text-muted">
+                      ({plural(file.triples, 'triple')} from {plural(file.classesSampled, 'class', 'classes')}, fetched in {file.seconds.toFixed(1)} s)
+                    </span>
+                  </p>
+                  {file.cutShort && <p className="text-muted">Cut short at {file.cutShort === 'triples' ? `${DATA_CHECK_LIMITS.triples.toLocaleString('en')} triples` : `${DATA_CHECK_LIMITS.bytes / 1024 / 1024} MB`}, the most one check takes.</p>}
+                  {file.version !== version && <p className="text-muted">Fetched for {file.version === 'draft' ? 'the working draft' : `v${file.version}`}. Check again to sample this version’s classes.</p>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" disabled={!!fetching} onClick={() => void fetchAndCheck(file.endpoint)}>Check again</Button>
+                  {new Blob([file.text]).size < EDITOR_LIMIT && <Button size="sm" onClick={() => { setData(file.text); setFile(null); setPicked('ntriples'); invalidate(true); }}>Open in editor</Button>}
+                  <Button size="sm" onClick={() => download(file.name, file.text, 'application/n-triples')}>Download</Button>
+                  <Button size="sm" variant="ghost" onClick={() => { setFile(null); setPicked('auto'); invalidate(true); }}>Remove</Button>
+                </div>
+              </div>
+            ) : file ? (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-surface-2 px-4 py-3 text-sm" data-testid="validate-file-summary">
                 <span>
                   <span className="font-medium">{file.name}</span> <span className="text-muted">({Math.round(file.text.length / 1024).toLocaleString()} KB, too large to show here)</span>
@@ -553,6 +724,7 @@ export function ValidateTab() {
           prefixes={{ ...dataPrefixes(report.text), ...prefixes }}
           onTurtle={async () => (await checkHere(report, true)).turtle ?? ''}
           name={`${ontology.slug}-${report.version}-report`}
+          drift={file?.source === 'endpoint' && report.text === file.text && report.version === version && src?.version === version ? <EndpointDrift title={ontology.title} namespace={ontology.namespace} prefix={ontology.prefix} counts={driftCounts} terms={report.result.terms} /> : undefined}
           located={turtleReport ? { findings: checks.findings, terms: checks.termFindings, onReveal: stale ? undefined : reveal } : undefined}
         />
       )}
@@ -561,6 +733,48 @@ export function ValidateTab() {
         <ApiHelp iri={iri} />
       </CollapsibleCard>
     </div>
+  );
+}
+
+/** What a sample from an endpoint says about how the data uses the standard: its own terms it doesn't define, and its classes with no instances. */
+function EndpointDrift({ title, namespace, prefix, counts, terms }: { title: string; namespace: string; prefix: string; counts: Record<string, number>; terms: DataValidation['terms'] }) {
+  const { undefinedTerms, emptyClasses } = endpointDrift(terms, namespace, counts);
+  const name = (iri: string) => `${prefix}:${iri.slice(namespace.length)}`;
+  const classes = Object.keys(counts).length;
+  const [all, setAll] = useState(false);
+  const names = (iris: string[]) => (
+    <>
+      <span className="font-mono text-xs">{(all ? iris : iris.slice(0, 8)).map(name).join(', ')}</span>
+      {!all && iris.length > 8 && (
+        <>
+          {', '}
+          <button type="button" className="text-accent hover:underline" onClick={() => setAll(true)}>
+            and {iris.length - 8} more
+          </button>
+        </>
+      )}
+    </>
+  );
+  return (
+    <section aria-label={`How the sample uses ${title}`} className="space-y-1 rounded-lg border border-line px-4 py-3 text-sm" data-testid="endpoint-drift">
+      <h3 className="font-medium">How the sample uses {title}</h3>
+      {!undefinedTerms.length && !emptyClasses.length ? (
+        <p className="text-muted">Every class has instances, and every term is defined.</p>
+      ) : (
+        <ul className="list-disc space-y-1 pl-5">
+          {undefinedTerms.length > 0 && (
+            <li>
+              {plural(undefinedTerms.length, `${prefix}: term`)} this version doesn’t define, likely {undefinedTerms.length === 1 ? 'a typo or a term' : 'typos or terms'} from a newer draft (see Terms below): {names(undefinedTerms.map((t) => t.term!))}
+            </li>
+          )}
+          {emptyClasses.length > 0 && (
+            <li>
+              {emptyClasses.length} of {plural(classes, 'class', 'classes')} with no instances in the sample: {names(emptyClasses)}
+            </li>
+          )}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -586,7 +800,7 @@ function CheckStatus({ checking, done, ms }: { checking: boolean; done: boolean;
 /** Turtle's problems, as sentences with where each one is in the data. */
 type Located = { findings: Finding[]; terms: Finding[]; onReveal?: (from: number, to: number) => void };
 
-function Report({ report, prefixes, onTurtle, name, stale, located }: { report: DataValidation; prefixes: Record<string, string>; onTurtle: () => Promise<string>; name: string; stale: boolean; located?: Located }) {
+function Report({ report, prefixes, onTurtle, name, stale, located, drift }: { report: DataValidation; prefixes: Record<string, string>; onTurtle: () => Promise<string>; name: string; stale: boolean; located?: Located; drift?: ReactNode }) {
   const [saving, setSaving] = useState(false);
   const shapesPage = usePage(located?.findings ?? []);
   const [saveError, setSaveError] = useState<unknown>();
@@ -653,6 +867,7 @@ function Report({ report, prefixes, onTurtle, name, stale, located }: { report: 
             <Badge tone="ok">Every term is defined</Badge>
           )}
         </div>
+        {drift}
         {report.truncated && (
           <p className="text-xs text-muted" data-testid="validation-truncated">
             The report lists the first 1,000 results and term issues. The counts above include them all.
