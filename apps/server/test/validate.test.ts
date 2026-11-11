@@ -576,8 +576,19 @@ ex:org a vol:Organisation ; vol:offersOpportunity ex:opp . ex:role a vol:Role .`
           expect(poolState().running, 'Timed out after 30 s waiting for all validation workers to become busy').toBe(POOL_LIMITS.workers);
           workers = execFileSync('pgrep', ['-P', String(process.pid), '-f', 'validationWorker']).toString().trim().split(/\s+/).map(Number);
           signalWorkers('SIGSTOP');
-          // Process any replies sent just before SIGSTOP, and retry if a worker finished first.
-          await new Promise((r) => setTimeout(r, 10));
+          for (const pid of workers) {
+            let state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)]).toString().trim();
+            while (!state.startsWith('T') && Date.now() < deadline) {
+              await new Promise((r) => setTimeout(r, 0));
+              state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)]).toString().trim();
+            }
+            expect(state.startsWith('T'), 'Timed out after 30 s waiting for validation workers to stop').toBe(true);
+          }
+          // Drain replies already in the IPC buffer through a full poll phase before checking the held slots.
+          for (let i = 0; i < 2; i++) {
+            await new Promise((r) => setTimeout(r, 0));
+            await new Promise((r) => setImmediate(r));
+          }
           const held = poolState().running === POOL_LIMITS.workers;
           if (held) {
             const extra = post('/def/volunteering', '<urn:s> <urn:p> <urn:o> .').then((r) => r);
@@ -590,9 +601,12 @@ ex:org a vol:Organisation ; vol:offersOpportunity ex:opp . ex:role a vol:Role .`
         }
         expect.fail('Timed out after 30 s trying to hold all validation workers busy');
       } finally {
-        signalWorkers('SIGCONT');
-        await Promise.allSettled(requests);
-        Object.assign(POOL_LIMITS, { queueWaitMs: before.wait, perClient: before.perClient, timeoutMs: before.timeoutMs });
+        try {
+          signalWorkers('SIGCONT');
+        } finally {
+          await Promise.allSettled(requests);
+          Object.assign(POOL_LIMITS, { queueWaitMs: before.wait, perClient: before.perClient, timeoutMs: before.timeoutMs });
+        }
       }
     });
   });
