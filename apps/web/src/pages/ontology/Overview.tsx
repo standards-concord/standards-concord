@@ -12,6 +12,7 @@ import { LevelBadge, RoleChips, RoleRingLegend, StatusPill } from '../../compone
 import { Disclosure } from '../../components/Disclosure';
 import { ValidationDetails } from '../../components/Validation';
 import { ImportsSection } from '../../components/Imports';
+import { SampleNotice } from '../../components/SampleNotice';
 import { Avatar, ErrorCard, Loading } from '../../components/ui';
 import { useOntology } from './Layout';
 
@@ -70,6 +71,7 @@ export function OverviewTab() {
   return (
     <div className="grid gap-x-12 gap-y-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="min-w-0 space-y-10">
+        {o.sample && <SampleNotice sample={o.sample} />}
         <section aria-label="About this ontology">
           <p className="max-w-[68ch] text-lg leading-relaxed">{o.description || <span className="text-muted">No description yet.</span>}</p>
           <p className="mt-3 max-w-[68ch] text-sm leading-relaxed text-muted" data-testid="overview-summary">

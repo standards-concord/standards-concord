@@ -71,6 +71,7 @@ export async function createProject(
     creditCreator?: boolean;
     seedTurtle?: string;
     demo?: boolean;
+    sample?: OntologyProject['sample'];
     slug?: string;
   },
   owner: User,
@@ -110,8 +111,10 @@ export async function createProject(
     updatedAt: now,
     domain: input.domain,
     demo: input.demo,
+    sample: input.sample,
   };
-  const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: CC BY 4.0\n\nManaged with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
+  const sampleNotice = input.sample ? `## Sample copy\n\nThis is a sample copy for trying Concord. The original is published by ${input.sample.publisher}: [${input.sample.sourceTitle}](${input.sample.source}). Licence: [${input.sample.licence.name}](${input.sample.licence.url}). Used by ${input.sample.usedBy}.\n\n[What the conversion changed](#conversion-changes)\n\n### Conversion changes\n\n${input.sample.changes}\n\n` : '';
+  const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: ${input.sample ? `[${input.sample.licence.name}](${input.sample.licence.url})` : 'CC BY 4.0'}\n\n${sampleNotice}Managed with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
   await ontologyStore.init(project, await graph.toTurtle(), readme);
   await put('ontologies', project);
   await setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);

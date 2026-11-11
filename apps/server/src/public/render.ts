@@ -1,6 +1,6 @@
 import { compactIRI, localName, type WorkedExample } from '@concord/core';
 import type { ClassView, IndividualView, OntologyView, PropertyView, Restriction, TermView } from '@concord/core/types';
-import type { ChangeLevel } from '@concord/shared';
+import type { ChangeLevel, SampleAttribution } from '@concord/shared';
 import { escapeHtml as esc, renderMarkdown, safeHref } from './markdown.js';
 import type { PublicUseCaseView, PublishedRequirements, RequirementView } from './requirements.js';
 import { PAGE_CSS, PAGE_SCRIPT } from './assets.js';
@@ -44,6 +44,7 @@ export interface OntologyPageInput {
     namespace: string;
     ontologyIRI: string;
     github?: { repo: string };
+    sample?: SampleAttribution;
   };
   view: OntologyView;
   /** A published release, or the unreleased working draft. */
@@ -124,7 +125,7 @@ const anchorSafe = (s: string) => s.replace(/[^A-Za-z0-9_.-]/g, '-');
  * pages already written to disk: refreshReleasePages regenerates any page
  * that doesn't carry the current value.
  */
-export const PAGE_GENERATOR = 'Concord public page 5';
+export const PAGE_GENERATOR = 'Concord public page 6';
 
 const BUG_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88M14.12 3.88 16 2M9 7.13v-1a3 3 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
 const COPY_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
@@ -547,6 +548,12 @@ ${input.downloads.map((d) => `<link rel="alternate" type="${esc(d.mediaType)}" h
     <h1>${esc(meta.title ?? project.title)}</h1>
     <p class="subtitle">${statusPill}<span class="version">${esc(versionLabel)}</span>${input.release?.publishedAt ? `<span class="muted">Released ${esc(formatDate(input.release.publishedAt))}</span>` : ''}</p>
     ${banner}
+    ${project.sample ? `<section aria-label="About this sample" class="block">
+      <h2>About this sample</h2>
+      <p>A sample copy for trying Concord. The original is published by ${esc(project.sample.publisher)}: <a href="${esc(project.sample.source)}">${esc(project.sample.sourceTitle)}</a>. Licence: <a href="${esc(project.sample.licence.url)}">${esc(project.sample.licence.name)}</a>. <a href="#${id('sample-conversion-changes')}">What the conversion changed</a>.</p>
+      <p>Used by ${esc(project.sample.usedBy)}.</p>
+      <details><summary>Conversion changes</summary><p id="${id('sample-conversion-changes')}">${esc(project.sample.changes)}</p></details>
+    </section>` : ''}
     <dl class="meta">${metaRows}</dl>
     <p class="downloads"><span class="muted">Download</span> ${downloadsInline}</p>
   </div>

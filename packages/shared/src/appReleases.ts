@@ -53,6 +53,17 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.49.0',
+    date: '2026-11-11',
+    title: 'Nine sample standards from the Solid ecosystem',
+    changes: [{
+      id: 'solid-sample-standards', type: 'feat',
+      title: 'Nine sample standards from the Solid ecosystem',
+      detail: 'Open Sample standards on the home page to explore vocabularies used by SolidOS, including sharing permissions, forms, contacts and meetings. Each sample names its original publisher, licence and conversion changes.',
+      roles: [], to: '/',
+    }],
+  },
+  {
     version: '0.48.1',
     date: '2026-11-11',
     title: 'Simpler Concord name in the header, page title and footer',

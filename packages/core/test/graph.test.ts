@@ -164,3 +164,17 @@ describe('IRI helpers', () => {
     expect(fixtureText('volunteering.ttl')).toContain('owl:Ontology');
   });
 });
+
+// Solid forms use rdf:type as a property value. The writer used to emit the predicate-only
+// abbreviation "a" there, producing invalid Turtle. This is server-side serialisation.
+it('round-trips rdf:type as a value without using the predicate abbreviation', async () => {
+  const g = await OntologyGraph.fromTurtle(`
+    @prefix rdf: <${NS.rdf}> .
+    @prefix owl: <${NS.owl}> .
+    <https://example.org/forms> a owl:Ontology .
+    <https://example.org/field> <http://www.w3.org/ns/ui#property> rdf:type .
+  `);
+  const turtle = await g.toTurtle();
+  const roundTrip = await OntologyGraph.fromTurtle(turtle);
+  expect(roundTrip.store.getQuads(null, null, null, null).some((q) => q.predicate.value === 'http://www.w3.org/ns/ui#property' && q.object.value === NS.rdf + 'type')).toBe(true);
+});

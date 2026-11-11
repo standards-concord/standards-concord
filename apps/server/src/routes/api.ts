@@ -71,6 +71,7 @@ import { releaseTrace, useCaseDetail, useCasesForCR } from '../services/useCaseD
 import { fairContext } from '../services/fairResolution.js';
 import { hostedImportClosure } from '../services/importClosure.js';
 import { advanceClock, DEMO_SLUG, resetAll, seedDemo, step } from '../services/simulation.js';
+import { seedSamples } from '../services/samples.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
@@ -174,6 +175,7 @@ export function apiRouter(): Router {
 
   r.get('/personas', async (_req, res) => {
     await seedDemo();
+    if (config.demoMode) await seedSamples();
     const ps = await personas();
     res.json(
       PERSONAS.map((spec) => ({ ...ps.find((u) => u.name === spec.name), roles: spec.roles, playable: spec.playable, key: spec.key })).filter((p) => p.id),
@@ -201,6 +203,7 @@ export function apiRouter(): Router {
         chosen === 'steward' ? ['owner', 'steward', 'editor', 'member'] : chosen === 'editor' ? ['editor', 'reviewer', 'member'] : chosen === 'reviewer' ? ['reviewer', 'member'] : [chosen, ...(chosen === 'contributor' ? [] : (['member'] as Role[]))];
       if (demo) await setRoles(demo.id, user.id, [...new Set(roles)]);
     }
+    await seedSamples();
     await endAdminLogin(req.cookies?.[SESSION_COOKIE]);
     const token = await setSessionCookie(res, user.id, 'demo');
     await rememberTester(req, res, testerBefore, user);

@@ -35,7 +35,7 @@ const FIXTURE = path.join(config.repoRoot, 'packages/core/fixtures/volunteering.
 const VOL = 'https://w3id.org/odi/volunteering#';
 export const DEMO_SLUG = 'volunteering';
 
-async function ensurePersonas(): Promise<Map<string, User>> {
+export async function ensurePersonas(): Promise<Map<string, User>> {
   const byKey = new Map<string, User>();
   const existing = await personas();
   for (const p of PERSONAS) {
@@ -290,7 +290,7 @@ async function seedConnectedApp(project: OntologyProject, owner: User, passesId:
   });
 }
 
-async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string, beforeWrite?: (r: Release) => Promise<void>) {
+export async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string, beforeWrite?: (r: Release) => Promise<void>) {
   const working = await ontologyStore.working(project);
   const stamped = stampRelease(working, { version, level: 'major', date: clock.iso().slice(0, 10), backwardCompatible: true });
   const files: Record<string, string> = {};
@@ -311,7 +311,7 @@ async function bootstrapRelease(project: OntologyProject, steward: User, version
     status: 'published',
     changeRequestIds: [],
     notes,
-    versionIRI: `${project.ontologyIRI}/${version}`,
+    versionIRI: stamped.metadata().versionIRI!,
     createdBy: steward.id,
     createdAt: now,
     publishedAt: now,
@@ -565,5 +565,8 @@ export async function resetAll() {
   });
   clock.reset();
   await saveClock();
-  return seedDemo();
+  const demo = await seedDemo();
+  const { seedSamples } = await import('./samples.js');
+  await seedSamples();
+  return demo;
 }

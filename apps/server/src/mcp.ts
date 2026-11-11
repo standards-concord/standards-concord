@@ -79,12 +79,12 @@ function buildServer(user: User, agentName: string) {
 
   server.registerTool(
     'list_ontologies',
-    { title: 'List ontologies', description: 'List the ontologies on Concord with their prefix, namespace, version and size.', inputSchema: {}, annotations: { readOnlyHint: true } },
+    { title: 'List ontologies', description: 'List the ontologies on Concord with their prefix, namespace, version and size. Sample copies include an isSample flag and source/licence attribution.', inputSchema: {}, annotations: { readOnlyHint: true } },
     async () => {
       const rows = await Promise.all(
         (await list<OntologyProject>('ontologies')).map(async (p) => {
           const v = (await ontologyStore.working(p)).view();
-          return { slug: p.slug, title: p.title, prefix: p.prefix, namespace: p.namespace, version: p.currentVersion, stage: p.stage, classes: v.classes.length, properties: v.objectProperties.length + v.datatypeProperties.length, url: link(`/o/${p.id}`) };
+          return { isSample: !!p.sample, sample: p.sample, slug: p.slug, title: p.title, prefix: p.prefix, namespace: p.namespace, version: p.currentVersion, stage: p.stage, classes: v.classes.length, properties: v.objectProperties.length + v.datatypeProperties.length, url: link(`/o/${p.id}`) };
         }),
       );
       return json(rows);

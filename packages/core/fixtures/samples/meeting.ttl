@@ -1,0 +1,122 @@
+# Concord sample copy for trying Concord: Meeting
+# Source: http://www.w3.org/ns/pim/meeting
+# Publisher: W3C
+# Licence: W3C Software and Document License <https://www.w3.org/copyright/software-license-2023/>
+# Upstream copy: upstream/meeting.ttl (see upstream/SOURCES.md)
+# Changes: Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Retained meeting:label and also supplied an rdfs:label for Meeting.
+
+@prefix dc: <http://purl.org/dc/elements/1.1/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix meeting: <http://www.w3.org/ns/pim/meeting#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix vann: <http://purl.org/vocab/vann/> .
+
+#################################################################
+### Ontology
+#################################################################
+
+<http://www.w3.org/ns/pim/meeting> a owl:Ontology ;
+    dcterms:title "Meeting"@en ;
+    dcterms:description "Agendas, notes, participants and calls for people meeting online."@en ;
+    rdfs:comment """An online meeting, in Solid world, is a collection of linked
+data resources which allow people to collaborate in real time toward the objectives of the meeting.
+The online state of a meeting may also evolve before the meeting as it is planned, and it should
+also in time evolve to give a clear idea of the take-aways for posterity""" ,
+        "Concord sample copy for trying Concord. Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Retained meeting:label and also supplied an rdfs:label for Meeting."@en ;
+    dcterms:source <http://www.w3.org/ns/pim/meeting> ;
+    dc:created "2016-06-25" ;
+    dc:title "An ontology for an online meeting" ;
+    dcterms:license <https://www.w3.org/copyright/software-license-2023/> ;
+    dcterms:rights "Original vocabulary published by W3C." ;
+    vann:preferredNamespacePrefix "meeting" ;
+    vann:preferredNamespaceUri meeting: ;
+    prov:wasDerivedFrom <http://www.w3.org/ns/pim/meeting> .
+
+#################################################################
+### Classes
+#################################################################
+
+meeting:Meeting a owl:Class ;
+    rdfs:label "meeting"@en ;
+    meeting:label "meeting"@en , "reunion"@fr .
+
+meeting:VideoCallPage a owl:Class ;
+    rdfs:label "video call page"@en ;
+    rdfs:comment """A web page (eg on appear.in, or wherever) for  a live video chat.
+    The URI should be as accurate as possible ideally without requiring meeting numbers, room numbers, etc to be entered.""" .
+
+<http://www.w3.org/ns/pim/trip#Trip> a owl:Class .
+
+#################################################################
+### Object properties
+#################################################################
+
+meeting:trip a owl:ObjectProperty ;
+    rdfs:label "trip" ;
+    rdfs:range <http://www.w3.org/ns/pim/trip#Trip> .
+
+#################################################################
+### Annotation properties
+#################################################################
+
+dc:created a owl:AnnotationProperty .
+
+dc:title a owl:AnnotationProperty .
+
+dcterms:description a owl:AnnotationProperty .
+
+dcterms:license a owl:AnnotationProperty .
+
+dcterms:rights a owl:AnnotationProperty .
+
+dcterms:source a owl:AnnotationProperty .
+
+dcterms:title a owl:AnnotationProperty .
+
+vann:preferredNamespacePrefix a owl:AnnotationProperty .
+
+vann:preferredNamespaceUri a owl:AnnotationProperty .
+
+rdfs:comment a owl:AnnotationProperty .
+
+rdfs:isDefinedBy a owl:AnnotationProperty .
+
+rdfs:label a owl:AnnotationProperty .
+
+rdfs:seeAlso a owl:AnnotationProperty .
+
+meeting:actionItems a owl:AnnotationProperty ;
+    rdfs:label "action items" .
+
+meeting:agenda a owl:AnnotationProperty ;
+    rdfs:label "agenda" .
+
+meeting:attendeeGroup a owl:AnnotationProperty ;
+    rdfs:label "attendees"@en , "participants"@fr .
+
+meeting:chat a owl:AnnotationProperty ;
+    rdfs:label "chat" ;
+    rdfs:comment "A live text-based chat object or chat document." .
+
+meeting:label a owl:AnnotationProperty .
+
+meeting:nextMeeting a owl:AnnotationProperty ;
+    rdfs:label "next meeting" .
+
+meeting:previousMeeting a owl:AnnotationProperty ;
+    rdfs:label "previous meeting" .
+
+meeting:sharedNotes a owl:AnnotationProperty ;
+    rdfs:label "notes"@en , "notes"@fr ;
+    rdfs:comment "A shared notepad to capture the course and result of the meeting" .
+
+meeting:toolList a owl:AnnotationProperty .
+
+meeting:videoCallPage a owl:AnnotationProperty ;
+    rdfs:label "video call"@en ;
+    rdfs:comment """For a meeting, a web page (eg on appear.in, or wherever) for  a live video chat for the meeting.
+  The URI should be as accurate as possible ideally without requiring meeting numbers etc to be entered.""" .
+
+prov:wasDerivedFrom a owl:AnnotationProperty .

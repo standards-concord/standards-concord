@@ -95,6 +95,13 @@ export async function defaultStartupTasks(): Promise<StartupTask[]> {
             },
           },
           { name: 'demo-seed', run: async () => void (await seedDemo()) },
+          {
+            name: 'sample-seed',
+            run: async () => {
+              const { seedSamples } = await import('./services/samples.js');
+              await seedSamples();
+            },
+          },
         ]
       : []),
     // Release pages written by an older renderer (or without a use case snapshot) are regenerated.
