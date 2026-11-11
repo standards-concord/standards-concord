@@ -114,7 +114,18 @@ interface HistoryDoc {
   movedTo?: string;
   /** Set once anything that was already at the mirror's path (not written by this server) has been kept aside. */
   keptExisting?: boolean;
+  /**
+   * Where `keptExisting` and `mirroredRev` hold: the folder the copy went to (or this server's store). A copy going
+   * somewhere new (a Solid account's own pod after the cutover, step 5e) starts again: what is there is kept aside
+   * first, and the record is copied whole.
+   */
+  keptIn?: string;
 }
+
+/** Where a tester's copy goes now: Concord's folder in their pod, or this server's store. */
+const copyPlace = async (userId: string) => (await solid.folderUrl(userId, 'alpha/')) ?? 'this server';
+/** The copy's state at `place`: nothing kept or copied yet if it was somewhere else before. */
+const atPlace = (h: HistoryDoc, place: string) => (h.keptIn === place ? { kept: !!h.keptExisting, mirroredRev: h.mirroredRev } : { kept: false, mirroredRev: 0 });
 
 /** Limits on what a visit or a feedback submission can add. Merging records never drops anything. */
 export const MAX_VERSIONS = 200;
@@ -235,7 +246,9 @@ const revisionOf = (bytes: Buffer): number => {
 async function mirrorNow(user: User): Promise<void> {
   try {
     const h = await history(user.id);
-    if (h.mirroredRev === h.rev && !h.feedbackToCopy?.length) return;
+    const place = await copyPlace(user.id);
+    const state = atPlace(h, place);
+    if (state.mirroredRev === h.rev && !h.feedbackToCopy?.length) return;
     const copied: string[] = [];
     for (const id of h.feedbackToCopy ?? []) {
       const fb = await get<FeedbackSubmission>('feedback', id);
@@ -245,7 +258,7 @@ async function mirrorNow(user: User): Promise<void> {
     const doc: RecordDoc = { '@context': CONTEXT, '@id': '', '@type': 'concord:AlphaTestingRecord', revision: h.rev, versions: h.versions };
     const body = JSON.stringify(doc, null, 2);
     let has: number | undefined;
-    if (!h.keptExisting) {
+    if (!state.kept) {
       // The first time, a document already at the record's path (one this server didn't write) is kept, byte for
       // byte, beside it, and the record only replaces exactly that version (or only creates, if nothing was there).
       // If the pod can't say, or the document changes in between, nothing is written and it's tried again later.
@@ -280,8 +293,9 @@ async function mirrorNow(user: User): Promise<void> {
     // Re-read and saved in one transaction: a visit saved while the pod was being written must not be lost.
     await transaction(async () => {
       const now = await history(user.id);
+      now.mirroredRev = Math.max(atPlace(now, place).mirroredRev, Math.min(written, now.rev));
       now.keptExisting = true;
-      now.mirroredRev = Math.max(now.mirroredRev, Math.min(written, now.rev));
+      now.keptIn = place;
       now.feedbackToCopy = now.feedbackToCopy?.filter((id) => !copied.includes(id));
       await put('kv', now);
     });
@@ -297,7 +311,7 @@ async function meFor(user: User): Promise<AlphaMe> {
     versions: h.versions,
     storedIn: podKind(user),
     recordUrl: podUrlOf(user, RECORD),
-    ...(h.mirroredRev < h.rev || h.feedbackToCopy?.length ? { podBehind: true } : {}),
+    ...(atPlace(h, await copyPlace(user.id)).mirroredRev < h.rev || h.feedbackToCopy?.length ? { podBehind: true } : {}),
   };
 }
 
