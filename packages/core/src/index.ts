@@ -74,3 +74,5 @@ export { AGREEING, compareGraphs } from './compare.js';
 export type { GraphComparison, TermComparison, TermRelation } from './compare.js';
 export { upstreamOps } from './upstream.js';
 export type { UpstreamPlan } from './upstream.js';
+
+export { termNamespace } from './termRules.js';

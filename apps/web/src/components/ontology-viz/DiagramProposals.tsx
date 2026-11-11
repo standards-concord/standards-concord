@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router';
+import { termNamespace } from '@concord/core/term-rules';
 import type { OntologyView } from '@concord/shared';
 import { api } from '../../api';
 import { accountToken, onAccountChange, stillCurrent } from '../../lib/session';
-import type { Labeler } from '../../lib/ontology';
-import { buildProposalPreview, changesToOps, deriveLocalName, describeChange, HOW_MANY, localNameError, PROPOSAL_DATATYPES, proposalTitle, superClassesFor, undoChange, wouldCreateCycle, type HowMany, type PendingChange, type ProposalPreview } from '../../lib/diagramProposals';
-import { readProposalDraft, writeProposalDraft, type ProposalDraft } from '../../lib/diagramProposalStorage';
+import { allTerms, type Labeler } from '../../lib/ontology';
+import { compactIri } from '../../lib/format';
+import { buildProposalPreview, changesToOps, deriveLocalName, describeChange, HOW_MANY, localNameError, PROPOSAL_DATATYPES, proposalTitle, proposalError, undoFocusTarget, undoChange, wouldCreateCycle, type HowMany, type PendingChange, type ProposalPreview } from '../../lib/diagramProposals';
+import { readProposalDraft, rebaseProposalDraft, writeProposalDraft, type ProposalDraft } from '../../lib/diagramProposalStorage';
 import { XSD } from '../../lib/ontologyModel';
 import { Disclosure } from '../Disclosure';
 import { Button, Field, InlineError, Input, Select, Textarea } from '../ui';
@@ -33,17 +35,19 @@ export interface ProposalRenderState {
 }
 
 /** Key this component by account and ontology so no form state crosses either boundary. */
-export function DiagramProposals({ userId, ontologyId, namespace, view, label, selected, onSelect, children }: {
+export function DiagramProposals({ userId, ontologyId, view, label, selected, onSelect, children }: {
   userId?: string;
   ontologyId: string;
-  namespace: string;
   view: OntologyView;
   label: Labeler;
   selected?: string;
   onSelect: (iri: string) => void;
   children: (state: ProposalRenderState) => ReactNode;
 }) {
-  const [draft, setDraft] = useState<ProposalDraft>(() => userId ? readProposalDraft(userId, ontologyId) : { items: [], title: '', description: '' });
+  const namespace = termNamespace(view.metadata, view.prefixes);
+  const [savedDraft, setDraft] = useState<ProposalDraft>(() => userId ? readProposalDraft(userId, ontologyId) : { items: [], title: '', description: '', namespace });
+  const draft = useMemo(() => rebaseProposalDraft(savedDraft, namespace), [savedDraft, namespace]);
+  const validationError = draft.storageError ?? proposalError(view, draft.items, namespace);
   const [on, setOn] = useState(false);
   const [action, setAction] = useState<Action>();
   const [form, setForm] = useState<FormValues>({ label: '', definition: '', localName: '', first: '', second: '', range: XSD + 'string', howMany: 'any', mode: 'replace' });
@@ -55,20 +59,31 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
   const [announcement, setAnnouncement] = useState('');
   const formRef = useRef<HTMLFormElement>(null);
   const buttons = useRef<HTMLDivElement>(null);
+  const proposalList = useRef<HTMLOListElement>(null);
+  const undoFocus = useRef<string | null | undefined>(undefined);
   const activeField = useRef<'first' | 'second' | undefined>(undefined);
   const token = useRef(accountToken());
   const alive = useRef(true);
   const navigate = useNavigate();
   const preview = useMemo(() => buildProposalPreview(view, draft.items, namespace), [view, draft.items, namespace]);
-  const names: Labeler = (iri) => preview.model.classes.get(iri)?.label ?? preview.model.properties.get(iri)?.label ?? label(iri);
+  const assertedTerms = useMemo(() => new Set(allTerms(view).map((t) => t.iri)), [view]);
+  const names: Labeler = (iri) => preview.model.classes.get(iri)?.label ?? preview.model.properties.get(iri)?.label ?? (assertedTerms.has(iri) ? label(iri) : compactIri(iri, view.prefixes));
   const classes = [...preview.model.classes.values()].sort((a, b) => names(a.iri).localeCompare(names(b.iri)));
-  const parents = preview.model.parents.get(form.first) ?? [];
+  const parents = preview.model.classes.get(form.first)?.superClasses ?? [];
+
+  useLayoutEffect(() => {
+    if (undoFocus.current === undefined) return;
+    const next = undoFocus.current;
+    undoFocus.current = undefined;
+    const target = [...(proposalList.current?.querySelectorAll<HTMLButtonElement>('[data-proposal-id]') ?? [])].find((node) => node.dataset.proposalId === next);
+    (target ?? buttons.current?.querySelector<HTMLButtonElement>('[data-action="class"]'))?.focus();
+  }, [draft.items]);
 
   useEffect(() => {
     alive.current = true;
     const unsubscribe = onAccountChange(() => {
       alive.current = false;
-      setDraft({ items: [], title: '', description: '' });
+      setDraft({ items: [], title: '', description: '', namespace });
       setOn(false);
       setAction(undefined);
     });
@@ -85,7 +100,7 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
   }, [action]);
 
   const updateItems = (items: PendingChange[]) => {
-    setDraft((d) => ({ ...d, items, title: !d.title || d.title === proposalTitle(d.items, names) ? proposalTitle(items, names) : d.title }));
+    setDraft((d) => ({ ...rebaseProposalDraft(d, namespace), items, title: !d.title || d.title === proposalTitle(d.items, names) ? proposalTitle(items, names) : d.title }));
     setDiscarding(false);
     setSendError(undefined);
   };
@@ -130,13 +145,13 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
         setFormError('A class cannot be its own superclass or have one of its subclasses as a superclass.');
         return;
       }
-      item = { id, kind: action, classIri: form.first, parent: form.second, mode: form.mode, superClasses: superClassesFor(parents, form.second, form.mode) };
+      item = { id, kind: action, classIri: form.first, parent: form.second, mode: form.mode };
     } else {
       if (!form.label.trim() || !form.definition.trim()) {
         setFormError('Enter a label and a definition.');
         return;
       }
-      const clash = localNameError(form.localName.trim(), namespace, view, draft.items);
+      const clash = localNameError(form.localName.trim(), namespace, view, draft.items, action === 'class' ? 'class' : 'property');
       if (clash) {
         setFormError(clash);
         return;
@@ -150,12 +165,16 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
         : action === 'attribute' ? { ...term, kind: action, classIri: form.first, range: form.range, howMany: form.howMany }
         : { ...term, kind: action, from: form.first, to: form.second, howMany: form.howMany };
     }
+    const error = proposalError(view, [...draft.items, item], namespace);
+    if (error) { setFormError(error); return; }
     updateItems([...draft.items, item]);
     setAnnouncement('');
     closeForm();
   };
   const send = async () => {
     if (!userId || sending || !draft.items.length) return;
+    const error = draft.storageError ?? proposalError(view, draft.items, namespace);
+    if (error) { setSendError(error); return; }
     if (!draft.title.trim()) {
       setSendError('Enter a title for the change request.');
       return;
@@ -163,10 +182,10 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
     setSending(true);
     setSendError(undefined);
     try {
-      const cr = await api.createChangeRequest(ontologyId, { title: draft.title.trim(), description: draft.description.trim(), kind: 'feature', ops: changesToOps(draft.items, namespace), submit: true });
+      const cr = await api.createChangeRequest(ontologyId, { title: draft.title.trim(), description: draft.description.trim(), kind: 'feature', ops: changesToOps(draft.items, namespace, view), submit: true });
       if (!alive.current || !stillCurrent(token.current, userId)) return;
       writeProposalDraft(userId, ontologyId, { items: [], title: '', description: '' });
-      setDraft({ items: [], title: '', description: '' });
+      setDraft({ items: [], title: '', description: '', namespace });
       navigate(`/o/${ontologyId}/changes/${cr.id}`);
     } catch (error) {
       if (alive.current) setSendError(error);
@@ -261,9 +280,9 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
         </form>
       )}
       <h3 className="border-t border-line pt-4 text-sm font-semibold">Your proposed changes</h3>
-      <ol aria-label="Your proposed changes" className="list-decimal space-y-2 pl-5 text-sm">
+      <ol ref={proposalList} aria-label="Your proposed changes" className="list-decimal space-y-2 pl-5 text-sm">
         {draft.items.map((p) => {
-          const sentence = describeChange(p, names);
+          const sentence = describeChange(p, names, preview.superClasses.get(p.id));
           return (
             <li key={p.id}>
               <span>{sentence}</span>{' '}
@@ -272,8 +291,10 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
                 variant="ghost"
                 disabled={sending}
                 aria-label={`Undo: ${sentence}`}
+                data-proposal-id={p.id}
                 onClick={() => {
                   const result = undoChange(draft.items, p.id, namespace);
+                  undoFocus.current = undoFocusTarget(draft.items, p.id, result.items);
                   updateItems(result.items);
                   setAnnouncement(result.alsoRemoved ? `Also removed ${result.alsoRemoved} ${result.alsoRemoved === 1 ? 'change' : 'changes'} that used it` : 'Proposed change removed');
                   closeForm();
@@ -287,8 +308,8 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
       </ol>
       {!draft.items.length && <p className="text-sm text-muted">No proposed changes yet.</p>}
       <p role="status" aria-live="polite" className="text-sm text-muted">{announcement}</p>
-      <InlineError error={sendError} />
-      {draft.items.length > 0 && (
+      <InlineError error={validationError ?? sendError} />
+      {(draft.items.length > 0 || draft.storageError) && (
         <div className="space-y-4">
           <Field label="Title">
             <Input value={draft.title} disabled={sending} onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))} />
@@ -297,14 +318,14 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
             <Textarea value={draft.description} disabled={sending} onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))} />
           </Field>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="primary" disabled={sending} onClick={() => void send()}>{sending ? 'Opening change request…' : 'Open change request'}</Button>
+            <Button variant="primary" disabled={sending || !!validationError} onClick={() => void send()}>{sending ? 'Opening change request…' : 'Open change request'}</Button>
             <Button variant="secondary" disabled={sending} onClick={() => setDiscarding(true)}>Discard all</Button>
           </div>
           {discarding && (
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-sm">Discard {draft.items.length} proposed {draft.items.length === 1 ? 'change' : 'changes'}?</p>
               <Button variant="secondary" onClick={() => {
-                setDraft({ items: [], title: '', description: '' });
+                setDraft({ items: [], title: '', description: '', namespace });
                 setDiscarding(false);
                 closeForm();
                 setAnnouncement('Proposed changes discarded');
@@ -316,7 +337,7 @@ export function DiagramProposals({ userId, ontologyId, namespace, view, label, s
       )}
     </section>
   );
-  const notice = !on && draft.items.length > 0 && (
+  const notice = !on && (draft.items.length > 0 || draft.storageError) && (
     <p className="text-sm">
       You have {draft.items.length} proposed {draft.items.length === 1 ? 'change' : 'changes'} not sent yet.{' '}
       <Button size="sm" variant="ghost" onClick={() => setOn(true)}>Review them</Button>

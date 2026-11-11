@@ -79,9 +79,11 @@ test.describe('proposing from the Diagram', () => {
     await addRelationship(page, name, rel);
     await list(page).getByRole('button', { name: /^Undo: Add relationship/ }).click();
     await expect(list(page).getByRole('listitem')).toHaveCount(1);
+    await expect(list(page).getByRole('button', { name: /^Undo: Add class/ })).toBeFocused();
     await addRelationship(page, name, rel);
     await list(page).getByRole('button', { name: /^Undo: Add class/ }).click();
     await expect(list(page).getByRole('listitem')).toHaveCount(0);
+    await expect(panel(page).getByRole('button', { name: 'Add class', exact: true })).toBeFocused();
     await expect(panel(page).getByRole('status')).toHaveText('Also removed 1 change that used it');
     await addClass(page, name);
     await addRelationship(page, name, rel);
@@ -106,6 +108,72 @@ test.describe('proposing from the Diagram', () => {
     await expect(page.getByRole('button', { name: 'Review them', exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: 'Propose changes', exact: true }).click();
     await expect(list(page).getByRole('listitem')).toHaveCount(0);
+  });
+
+  test('Undo keeps focus on the next Undo, the previous Undo, then Add class', async ({ page }) => {
+    // Removing the focused row used to leave keyboard focus on the document body.
+    await openDiagram(page);
+    const first = `first coordinator ${uniq()}`, middle = `middle coordinator ${uniq()}`, last = `last coordinator ${uniq()}`;
+    for (const name of [first, middle, last]) await addClass(page, name);
+    const undo = (name: string) => list(page).getByRole('button', { name: `Undo: Add class “${name}”, subclass of “person”`, exact: true });
+    await undo(middle).click();
+    await expect(undo(last)).toBeFocused();
+    await undo(last).click();
+    await expect(undo(first)).toBeFocused();
+    await undo(first).click();
+    await expect(panel(page).getByRole('button', { name: 'Add class', exact: true })).toBeFocused();
+  });
+
+  test('Undo retains an invalid superclass proposal and blocks sending until the cycle is fixed', async ({ page }) => {
+    // Undo used to restore Volunteer -> Person while leaving Person -> Volunteer sendable.
+    await openDiagram(page);
+    const changeSuperclass = async (cls: string, parent: string) => {
+      await panel(page).getByRole('button', { name: 'Change superclass', exact: true }).click();
+      const f = form(page, 'Change superclass');
+      await f.getByRole('combobox', { name: 'Class', exact: true }).selectOption(NS + cls);
+      await f.getByRole('combobox', { name: 'New superclass', exact: true }).selectOption(NS + parent);
+      await f.getByRole('button', { name: 'Add to proposal', exact: true }).click();
+    };
+    await changeSuperclass('Volunteer', 'Session');
+    await changeSuperclass('Person', 'Volunteer');
+    await expect(panel(page).getByRole('button', { name: 'Open change request', exact: true })).toBeEnabled();
+    await list(page).getByRole('button', { name: /^Undo: Make “volunteer”/ }).click();
+    await expect(list(page).getByRole('listitem')).toHaveCount(1);
+    await expect(list(page).getByRole('button', { name: /^Undo: Make “person”/ })).toBeFocused();
+    await expect(panel(page).getByRole('alert')).toContainText('one of its subclasses');
+    await expect(panel(page).getByRole('button', { name: 'Open change request', exact: true })).toBeDisabled();
+    await page.reload();
+    await page.getByRole('button', { name: 'Review them', exact: true }).click();
+    await expect(list(page).getByRole('listitem')).toHaveCount(1);
+    await expect(panel(page).getByRole('alert')).toContainText('one of its subclasses');
+    await expect(panel(page).getByRole('button', { name: 'Open change request', exact: true })).toBeDisabled();
+    await changeSuperclass('Volunteer', 'Session');
+    await expect(panel(page).getByRole('alert')).toHaveCount(0);
+    await expect(panel(page).getByRole('button', { name: 'Open change request', exact: true })).toBeEnabled();
+  });
+
+  test('adding a superclass keeps a parent from another vocabulary', async ({ page }) => {
+    // The form built the new superclass list from the diagram's parents, which leave out classes from
+    // other vocabularies, so "As well as" used to propose dropping them. The demo has no such parent,
+    // so the page is given one: volunteer is also a schema.org Person.
+    const EXTERNAL = 'https://schema.org/Person';
+    await page.route(/\/api\/ontologies\/[^/]+\/view(\?|$)/, async (route) => {
+      const res = await route.fetch();
+      const view = (await res.json()) as { classes: { iri: string; superClasses: string[] }[] };
+      for (const c of view.classes) if (c.iri === NS + 'Volunteer') c.superClasses = [...c.superClasses, EXTERNAL];
+      await route.fulfill({ response: res, json: view });
+    });
+    const id = await openDiagram(page);
+    await panel(page).getByRole('button', { name: 'Change superclass', exact: true }).click();
+    const f = form(page, 'Change superclass');
+    await f.getByRole('combobox', { name: 'Class', exact: true }).selectOption(NS + 'Volunteer');
+    await f.getByRole('combobox', { name: 'New superclass', exact: true }).selectOption(NS + 'Agent');
+    await f.getByRole('radio', { name: /^As well as / }).check();
+    await f.getByRole('button', { name: 'Add to proposal', exact: true }).click();
+    await panel(page).getByRole('button', { name: 'Open change request', exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/o/${id}/changes/`));
+    const cr = await (await page.request.get(`/api/change-requests/${page.url().split('/').pop()}`)).json();
+    expect(cr.ops).toEqual([{ op: 'setSuperClasses', iri: NS + 'Volunteer', superClasses: [NS + 'Person', EXTERNAL, NS + 'Agent'] }]);
   });
 
   test('diagram picking fills the last focused class field and Cancel returns focus', async ({ page }) => {

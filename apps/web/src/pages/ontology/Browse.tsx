@@ -755,7 +755,7 @@ export function BrowseTab() {
           </div>
         </div>
       ) : (
-        <DiagramProposals key={`${session?.user?.id ?? 'guest'}:${id}`} userId={session?.user?.id} ontologyId={id} namespace={ontology.namespace} view={view.data!} label={label} selected={selected} onSelect={selectOnCanvas}>
+        <DiagramProposals key={`${session?.user?.id ?? 'guest'}:${id}`} userId={session?.user?.id} ontologyId={id} view={view.data!} label={label} selected={selected} onSelect={selectOnCanvas}>
           {(proposals) => (
             <div className={cx('grid gap-4', showNav ? 'lg:grid-cols-[280px_1fr]' : 'grid-cols-1')}>
               {showNav && <div id="browse-nav">{nav}</div>}
