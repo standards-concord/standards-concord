@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Router, type Request, type Response } from 'express';
-import { bumpVersion, DATA_MEDIA_TYPES, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
+import { bumpVersion, exampleFiles, type WorkedExample, DATA_MEDIA_TYPES, FORMAT_INFO, npmPackage, serialize, toShacl, toShaclc, toWrapperClasses, withWrapperImport, WRAPPER_CDN, type OntologyGraph } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
@@ -15,6 +15,7 @@ import { publishedReleases } from './published.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
 import { publishedRequirements, requirementsFor, validSnapshot, type PublishedRequirements } from './requirements.js';
+import { examplesFor, examplesSnapshot, liveExamples, visibleExamples } from './examples.js';
 import { fragment, termAnchors } from './anchors.js';
 import { persistentIdRules, PUBLIC_BASE } from './w3id.js';
 
@@ -186,7 +187,7 @@ export async function pageInput(
   project: OntologyProject,
   version: string,
   base: string,
-  opts: { relativeDownloads?: boolean; release?: Release; graph?: Awaited<ReturnType<typeof ontologyStore.at>>; requirements?: PublishedRequirements } = {},
+  opts: { relativeDownloads?: boolean; release?: Release; graph?: Awaited<ReturnType<typeof ontologyStore.at>>; requirements?: PublishedRequirements; examples?: WorkedExample[] } = {},
 ): Promise<OntologyPageInput> {
   const isDraft = version === 'draft';
   const graph = opts.graph ?? (await ontologyStore.at(project, isDraft ? 'working' : version));
@@ -229,6 +230,8 @@ export async function pageInput(
     pageUrl: `${root}/${version}`,
     links: { latest: root, draft: `${root}/draft`, app: `${base}/o/${encodeURIComponent(project.slug)}`, versionBase: root, report: `${root}/-/report`, site: base },
     requirements: isDraft ? await publishedRequirements(project) : await requirementsFor(project, opts.requirements ?? await requirementsSnapshot(project, version)),
+    examples: opts.examples ?? await examplesFor(project, version, graph),
+    exampleBase: opts.relativeDownloads ? '' : `${root}/${version}/`,
     persistentId: persistentIdRules(project, base),
     generatedAt: clock.iso(),
   };
@@ -266,10 +269,12 @@ export async function releasePageFiles(
   release: Release,
   graph: Awaited<ReturnType<typeof ontologyStore.at>>,
   given?: PublishedRequirements,
+  givenExamples?: WorkedExample[],
 ): Promise<Record<string, string>> {
   const requirements = given ?? await releaseRequirements(project, release.version);
-  const html = renderOntologyPage(await pageInput(project, release.version, config.publicUrl, { relativeDownloads: true, release, graph, requirements }));
-  return { 'index.html': html, [REQUIREMENTS_SNAPSHOT]: snapshotFile(requirements) };
+  const examples = givenExamples ?? await liveExamples(project, graph);
+  const html = renderOntologyPage(await pageInput(project, release.version, config.publicUrl, { relativeDownloads: true, release, graph, requirements, examples }));
+  return { 'index.html': html, [REQUIREMENTS_SNAPSHOT]: snapshotFile(requirements), ...exampleFiles(examples, graph.ontologyIRI) };
 }
 
 /** The public use cases and requirements to freeze into a release published now. */
@@ -345,7 +350,12 @@ export async function refreshReleasePages(): Promise<boolean> {
           requirements = project.demo ? await releaseRequirements(project, release.version) : { useCases: [], snapshotMissing: true };
           writeSnapshot = true;
         }
-        const files = await releasePageFiles(project, release, await ontologyStore.at(project, release.version), requirements);
+        const graph = await ontologyStore.at(project, release.version);
+        const recorded = await examplesSnapshot(project, release.version);
+        const examples = await visibleExamples(project, recorded ?? (project.demo ? (await liveExamples(project, graph)).filter((e) => requirements.useCases.some((u) => u.id === e.source)) : []));
+        const files = await releasePageFiles(project, release, graph, requirements, examples);
+        // Existing snapshots and query files are history; only the rendered page is refreshed.
+        if (recorded !== undefined) for (const name of Object.keys(files)) if (name === 'examples.json' || name.startsWith('examples/')) delete files[name];
         if (!writeSnapshot) delete files[REQUIREMENTS_SNAPSHOT];
         changed[release.version] = files;
       } catch (err) {
@@ -594,6 +604,26 @@ export function publicRouter(): Router {
       if (body === undefined) throw new HttpError(404, `${f.title} ${release.version} has no frozen closure`);
       res.set('Content-Disposition', `inline; filename="${f.slug}-${release.version}${part ? `-${part}` : ''}.ttl"`);
       res.send(body);
+    } catch (err) {
+      next(err);
+    }
+  });
+  r.get([`${PUBLIC_BASE}/:slug/:version/examples.json`, `${PUBLIC_BASE}/:slug/:version/examples/:file`], async (req, res, next) => {
+    try {
+      const project = await findProject(String(req.params.slug));
+      if (!project) throw new HttpError(404, 'Not found');
+      const requested = String(req.params.version);
+      const version = requested === 'latest' ? await latestVersion(project) ?? 'draft' : requested;
+      if (version !== 'draft' && !(await ontologyStore.versions(project)).includes(version)) throw new HttpError(404, 'Not found');
+      if (await isHeld(project, version)) return held(res, project, version, 'turtle');
+      const graph = await readOntology(project, version, undefined);
+      const examples = await examplesFor(project, version, graph);
+      const files = exampleFiles(examples, graph.ontologyIRI);
+      const name = req.params.file === undefined ? 'examples.json' : `examples/${String(req.params.file)}`;
+      if (!(name in files)) throw new HttpError(404, 'Not found');
+      res.set('Access-Control-Allow-Origin', '*').set('Cache-Control', 'no-cache');
+      res.set('Content-Disposition', `attachment; filename="${name.split('/').pop()}"`);
+      res.type(name.endsWith('.json') ? 'application/json' : name.endsWith('.rq') ? 'application/sparql-query' : 'text/turtle').send(files[name]);
     } catch (err) {
       next(err);
     }

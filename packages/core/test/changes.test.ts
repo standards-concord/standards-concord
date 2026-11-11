@@ -119,6 +119,22 @@ describe('applyChangeOps', () => {
     expect(() => applyChangeOps(g, [{ op: 'setSuperClasses', iri: X('Employee'), superClasses: [X('Employee')] }])).toThrow(/own superclass/);
   });
 
+  it('setSuperClasses keeps asserted external parents but refuses newly added undeclared parents', () => {
+    // Keeping an asserted parent used to fail if its vocabulary was not recognised.
+    const g = baseOntology();
+    const parent = 'https://other.example/vocab#Parent';
+    const { namedNode } = DataFactory;
+    g.store.addQuad(namedNode(X('Employee')), namedNode(NS.rdfs + 'subClassOf'), namedNode(parent));
+    expect(g.isClassIri(parent)).toBe(false);
+    const { graph } = applyChangeOps(g, [{ op: 'setSuperClasses', iri: X('Employee'), superClasses: [parent, X('Agent')] }]);
+    expect(cls(graph, 'Employee').superClasses.sort()).toEqual([parent, X('Agent')].sort());
+    expect(() => applyChangeOps(g, [{ op: 'setSuperClasses', iri: X('Employee'), superClasses: [parent, 'https://other.example/vocab#NewParent'] }])).toThrow(/not a declared class/);
+    // An assertion on a different class does not authorise adding it here.
+    expect(() => applyChangeOps(g, [{ op: 'setSuperClasses', iri: X('Person'), superClasses: [parent] }])).toThrow(/not a declared class/);
+    g.store.addQuad(namedNode(X('Employee')), namedNode(NS.rdfs + 'subClassOf'), namedNode(X('Employee')));
+    expect(() => applyChangeOps(g, [{ op: 'setSuperClasses', iri: X('Employee'), superClasses: [parent, X('Employee')] }])).toThrow(/own superclass/);
+  });
+
   it('setDomainRange replaces domain/range and checks kinds', () => {
     const { graph } = applyChangeOps(baseOntology(), [{ op: 'setDomainRange', iri: X('worksFor'), domain: [X('Employee')] }]);
     expect(prop(graph, 'worksFor').domain).toEqual([X('Employee')]);

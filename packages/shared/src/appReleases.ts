@@ -53,6 +53,39 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.46.0',
+    date: '2026-11-11',
+    title: 'Propose changes from the Diagram',
+    pr: 130,
+    changes: [
+      {
+        id: 'diagram-proposals',
+        type: 'feat',
+        title: 'Propose changes from the Diagram: add classes, attributes, relationships and superclasses, then open one change request',
+        detail: 'Build a proposal on the Diagram and review the proposed terms and links before opening one change request. Nothing changes until it is approved and merged. Unsent proposals stay on this device until sent, discarded or signed out.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/browse?view=diagram',
+        ask: 'Could you propose the classes and relationships you needed, and was it clear what would change?',
+      },
+    ],
+  },
+  {
+    version: '0.45.0',
+    date: '2026-11-10',
+    title: 'Worked examples in every release',
+    pr: 132,
+    changes: [
+      {
+        id: 'worked-examples',
+        type: 'feat',
+        title: 'See the questions a standard can answer',
+        detail: 'Public pages show worked examples with answers, queries and downloadable data, frozen with each release. On Validate data, use the version’s example data as a starting point.',
+        roles: [],
+        to: '/def/volunteering#tab-examples',
+      },
+    ],
+  },
+  {
     version: '0.44.2',
     date: '2026-11-10',
     title: 'The welcome page keeps its videos',

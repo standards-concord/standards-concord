@@ -21,6 +21,7 @@ import { ontologyStore } from './ontologyStore.js';
 import { createHash } from 'node:crypto';
 import { getUser, logActivity } from './users.js';
 import { reasonInWorker } from '../reasoner/pool.js';
+import { filterAsync } from '../asyncList.js';
 import { closureFingerprint, hostedImportClosure } from './importClosure.js';
 
 export const getProject = async (id: string) => await mustGet<OntologyProject>('ontologies', id);
@@ -178,12 +179,14 @@ const validationCache = new Map<string, Promise<ValidationReport>>();
  * questions run in them; a use case that stops being public has its questions
  * removed from saved reports too (services/useCases.ts).
  */
-export async function competencyTests(ontologyId: string) {
-  return (await list<UseCase>('useCases', ontologyId))
+export async function competencyTests(ontologyId: string, opts: { published?: boolean } = {}) {
+  // Public pages use the demo's fixed questions, never text a tester typed as a persona.
+  const useCases = await list<UseCase>('useCases', ontologyId);
+  return (opts.published ? await filterAsync(useCases, async (u) => !!u.demoSeed || !(await getUser(u.authorId))?.simulated) : useCases)
     .filter((u) => u.status !== 'archived' && u.status !== 'draft' && u.visibility === 'public' && !u.withdrawnAt)
-    .flatMap((u) => u.competencyQuestions.map((q) => ({ q, source: u.id })))
+    .flatMap((u) => (opts.published ? u.demoSeed?.competencyQuestions ?? u.competencyQuestions : u.competencyQuestions).map((q) => ({ q, source: u.id })))
     .filter(({ q }) => q.sparql)
-    .map(({ q, source }) => ({ question: q.question, sparql: q.sparql!, exampleData: q.exampleData, source }));
+    .map(({ q, source }) => ({ id: q.id, question: q.question, sparql: q.sparql!, exampleData: q.exampleData, exampleAnswer: q.exampleAnswer, source }));
 }
 
 export async function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string; source?: string }[]) {

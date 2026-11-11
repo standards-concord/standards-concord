@@ -3,6 +3,7 @@
  * read-only `OntologyView` projection used for display, diffing and linting.
  */
 import { Parser, Store } from 'n3';
+import { termNamespace } from './termRules.js';
 import type { Quad, Term, Literal } from 'n3';
 import type {
   ClassView, IndividualView, IRI, OntologyMetadata, OntologyView, PropertyCharacteristic,
@@ -178,12 +179,7 @@ export class OntologyGraph {
   get namespace(): string {
     const iri = this.ontologyIRI;
     const declared = iri ? this.literalOf(iri, NS.vann + 'preferredNamespaceUri') : undefined;
-    if (declared) return declared;
-    if (!iri) return '';
-    if (/[#/]$/.test(iri)) return iri;
-    // A declared prefix for "<iri>#" or "<iri>/" wins over the default hash namespace.
-    for (const sep of ['#', '/']) if (Object.values(this.prefixes).includes(iri + sep)) return iri + sep;
-    return iri + '#';
+    return termNamespace({ iri, preferredNamespace: declared }, this.prefixes);
   }
 
   toTurtle(): Promise<string> {

@@ -227,6 +227,11 @@ export function ValidateTab() {
   const showError = !!error && !(turtleMode && parseError && (checks.syntaxError || checks.syntaxPending));
   // Signing in or out (here or in another tab) drops what the last account's sources showed and checks again as the new one.
   const [accountEpoch, setAccountEpoch] = useState(0);
+  const examples = useAsync(async () => {
+    const res = await fetch(`${iri}/examples/data.ttl`, { cache: 'no-store' });
+    return res.ok && !!(await res.text()).trim();
+  }, [iri, accountEpoch]);
+
   useEffect(() => {
     const off = onAccountChange(() => {
       setSrc(undefined);
@@ -356,6 +361,29 @@ export function ValidateTab() {
     setPicked(byName ?? 'auto');
   };
 
+  const loadExamples = async () => {
+    setError(undefined);
+    invalidate(true);
+    const mine = loads.current;
+    const token = accountToken();
+    setReading(true);
+    try {
+      const res = await fetch(`${iri}/examples/data.ttl`, { cache: 'no-store' });
+      if (!res.ok) throw new Error('The example data could not be loaded. Try again.');
+      const text = await res.text();
+      if (mine !== loads.current || !token.account || !stillCurrent(token, token.account)) return;
+      if (!text.trim()) throw new Error('This version has no example data.');
+      setFile(null);
+      setPicked('turtle');
+      setData(text);
+      invalidate(true);
+    } catch (e) {
+      if (mine === loads.current) setUploadError(e instanceof Error ? e : new Error(String(e)));
+    } finally {
+      if (mine === loads.current) setReading(false);
+    }
+  };
+
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
     setDragging(false);
@@ -420,6 +448,14 @@ export function ValidateTab() {
             <Button icon={FileUp} onClick={() => fileInput.current?.click()}>
               Upload a file
             </Button>
+            {examples.data && !examples.loading && (
+              <a href={`${iri}/examples/data.ttl`} className="text-sm text-accent hover:underline" onClick={(e) => {
+                e.preventDefault();
+                void loadExamples();
+              }}>
+                Use example data
+              </a>
+            )}
             <Button
               variant="ghost"
               icon={RotateCcw}

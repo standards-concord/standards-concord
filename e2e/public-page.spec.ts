@@ -198,7 +198,7 @@ test.describe('Public ontology page', () => {
     await page.goto(`${PAGE}#tab-download`);
     const links = page.getByRole('tabpanel', { name: 'Download and cite' }).locator('table a', { hasText: 'View' });
     const hrefs = await links.evaluateAll((as) => as.map((a) => [(a as HTMLAnchorElement).href, a.getAttribute('type')]));
-    expect(hrefs.length).toBe(10); // seven RDF and LinkML formats, SHACLC, and the JavaScript and TypeScript classes
+    expect(hrefs.length).toBe(12); // seven RDF and LinkML formats, SHACLC, the JavaScript and TypeScript classes, and the worked examples and their data
     for (const [href, type] of hrefs) {
       const res = await request.get(href!);
       expect(res.status(), href!).toBe(200);

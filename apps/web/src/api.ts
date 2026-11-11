@@ -199,6 +199,7 @@ export type NewOntologyInput = {
   creditCreator?: boolean;
 };
 export type NewChangeRequestInput = {
+  submit?: boolean;
   title: string;
   description: string;
   kind: ChangeRequestKind;
