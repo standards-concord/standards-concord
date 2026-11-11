@@ -545,14 +545,29 @@ ex:org a vol:Organisation ; vol:offersOpportunity ex:opp . ex:role a vol:Role .`
     it('turns a job away when it has waited too long for a worker', async () => {
       const before = { wait: POOL_LIMITS.queueWaitMs, perClient: POOL_LIMITS.perClient };
       POOL_LIMITS.queueWaitMs = 0;
-      POOL_LIMITS.perClient = 10;
-      const big = bigData(3000);
+      POOL_LIMITS.perClient = POOL_LIMITS.workers + 1;
+      const requests: Promise<request.Response>[] = [];
       try {
-        const answers = await Promise.all(Array.from({ length: POOL_LIMITS.workers + 1 }, () => post('/def/volunteering', big)));
-        const statuses = answers.map((r) => r.status);
-        expect(statuses).toContain(503);
-        expect(statuses).toContain(200);
+        // 2026-11-11: all three got 200 on a busy machine because bodies arrived serially and nothing queued.
+        // Keep workers busy with 24,000 triples each, then send a tiny body so it reaches the queue promptly.
+        const big = bigData(12_000);
+        for (let i = 0; i < POOL_LIMITS.workers; i++) {
+          requests.push(post('/def/volunteering', big).then((r) => r)); // Explicitly start supertest's lazy requests.
+        }
+        const running = Promise.all(requests);
+        // Handle transport failures even if the assertion below fails before we await the responses.
+        void running.catch(() => {});
+        const deadline = Date.now() + 30_000;
+        while (poolState().running !== POOL_LIMITS.workers && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        expect(poolState().running, 'Timed out after 30 s waiting for all validation workers to become busy').toBe(POOL_LIMITS.workers);
+        const extra = post('/def/volunteering', '<urn:s> <urn:p> <urn:o> .').then((r) => r);
+        requests.push(extra);
+        expect((await extra).status).toBe(503);
+        expect((await running).map((r) => r.status)).toEqual(Array(POOL_LIMITS.workers).fill(200));
       } finally {
+        await Promise.allSettled(requests);
         Object.assign(POOL_LIMITS, { queueWaitMs: before.wait, perClient: before.perClient });
       }
     });
