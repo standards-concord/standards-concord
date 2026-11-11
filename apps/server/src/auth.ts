@@ -8,6 +8,8 @@ import { seal, sealingAvailable, unseal } from './sealed.js';
 import type { AuthProvider } from '@concord/shared';
 import { allUsers, setPodUrl, createSession, createUser, destroySession, findByProvider, linkFederatedIdentity, sessionOf, type FederatedIdentity } from './services/users.js';
 import { clientIdDocument, exportLogin, finishLogin, importLogin, resolveIssuer, sessionKey, shareLogins, SolidLoginError, startLogin, type SolidLogin, type StoredLogin } from './solidOidc.js';
+import { keepAlive } from './keepAlive.js';
+import { solid } from './services/solid.js';
 import { keepOwnPodLogin, loadOwnPodLogin, saveOwnPodLogin, USER_LOGIN_PREFIX, usesOwnPod } from './services/ownPods.js';
 import { clearTesterCookie, mergeTesterRecords, mirrorToPod, moveTesterRecord, testerFor, testerRecordMovedTo } from './services/alpha.js';
 
@@ -357,6 +359,12 @@ export function mountAuth(router: Router) {
       const kept = await keepOwnPodLogin(user.id, done.login, done.storage);
       if (kept.status === 'kept') ownLogin = kept.sharedId;
       if (kept.status === 'kept' && user.podUrl !== done.storage) await setPodUrl(user.id, done.storage!);
+      // Private data kept here for them (brought over at the cutover from the pod the VM made) moves into their pod.
+      if (kept.status === 'kept')
+        void keepAlive(solid.carryIntoOwnPod(user.id)).then(
+          (n) => n && console.log(`[solid] moved ${n} private document(s) into ${user.id}'s own pod`),
+          (err) => console.warn(`[solid] moving ${user.id}'s private data into their pod stopped; it's tried again at their next sign-in: ${(err as Error).message}`),
+        );
     }
     if (isAdmin(user, 'solid')) await keepAdminLogin(sessionToken, done.login, { sharedWith: ownLogin });
     res.redirect(`${config.webUrl}${done.returnTo}`);
