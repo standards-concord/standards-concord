@@ -53,6 +53,19 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.45.0',
+    date: '2026-11-10',
+    title: 'Check data in a SPARQL endpoint',
+    changes: [{
+      id: 'validate-sparql-endpoint',
+      type: 'feat',
+      title: 'Check a live sample from your triplestore',
+      detail: 'On Validate data, open Check data in a SPARQL endpoint to sample classes from the selected version. Your browser fetches the data directly, checks it here, and shows undefined terms and classes with no instances in the sample.',
+      roles: ['steward', 'contributor', 'agent'],
+      to: '{o}/validate',
+    }],
+  },
+  {
     version: '0.44.1',
     date: '2026-11-07',
     title: 'Validate data takes every value the ontology allows',
