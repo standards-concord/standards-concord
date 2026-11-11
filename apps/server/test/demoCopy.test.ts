@@ -2,6 +2,8 @@ import type { ChangeRequest, OntologyProject, Release, Review, User, Vote } from
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
 import { closeDb, get, list, openDb, put } from '../src/db.js';
+import { PAGE_GENERATOR } from '../src/public/render.js';
+import { refreshReleasePages } from '../src/public/routes.js';
 import { LEGACY_DEMO_COPY as copy, refreshDemoCopy } from '../src/services/demoCopy.js';
 import { createProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
@@ -104,7 +106,7 @@ describe('refreshing persisted demo copy', () => {
     expect(await list('ontologies')).toEqual(records);
   });
 
-  it('refreshes stored release HTML even after the description was repaired, keeping snapshots and release commits', async () => {
+  it('has the release-pages task re-render demo release pages that embed the old description, and no others', async () => {
     const owner = await createUser({ name: 'Release owner', provider: 'demo', subject: 'copy-release-owner' });
     const demo = await project(owner, true, description);
     const other = await project(owner, false);
@@ -121,7 +123,14 @@ describe('refreshing persisted demo copy', () => {
       await put('releases', release, p.id);
       releases.push(release);
     }
+    // Both ontologies' pages count as written by the current renderer, so only a stale mark re-renders one.
+    const pages = (await get<{ id: string; state: Record<string, string> }>('kv', 'public-pages'))?.state ?? {};
+    await put('kv', { id: 'public-pages', state: { ...pages, [demo.slug]: PAGE_GENERATOR, [other.slug]: PAGE_GENERATOR } });
+
     expect((await refreshDemoCopy()).releasePages).toBe(1);
+    // demo-copy itself writes no release files: the release-pages task (which runs after it) does.
+    expect(await ontologyStore.readReleaseFile(demo, '1.0.0', 'index.html')).toBe(oldPage);
+    await refreshReleasePages();
     const html = await ontologyStore.readReleaseFile(demo, '1.0.0', 'index.html');
     expect(html).toContain('An owner');
     expect(html).not.toContain(copy.description.from);
@@ -129,9 +138,7 @@ describe('refreshing persisted demo copy', () => {
     expect(await ontologyStore.readReleaseFile(demo, '1.0.0', 'requirements.json')).toBe(snapshot);
     expect(await ontologyStore.readReleaseFile(demo, '1.0.0', 'examples.json')).toBe('[]\n');
     for (const r of releases) expect(await get('releases', r.id)).toEqual(r);
-    const head = await ontologyStore.head(demo);
     expect((await refreshDemoCopy()).releasePages).toBe(0);
-    expect(await ontologyStore.head(demo)).toBe(head);
   });
 
   it('registers the task after the seed and serialises concurrent startup instances', async () => {
@@ -139,6 +146,8 @@ describe('refreshing persisted demo copy', () => {
     const copyTask = tasks.find((t) => t.name === 'demo-copy');
     expect(copyTask).toBeDefined();
     expect(tasks.findIndex((t) => t.name === 'demo-copy')).toBeGreaterThan(tasks.findIndex((t) => t.name === 'demo-seed'));
+    // release-pages re-renders what demo-copy marks stale, so it must run after it.
+    expect(tasks.findIndex((t) => t.name === 'release-pages')).toBeGreaterThan(tasks.findIndex((t) => t.name === 'demo-copy'));
     const owner = await createUser({ name: 'Concurrency owner', provider: 'demo', subject: 'copy-concurrency-owner' });
     const demo = await project(owner, true);
     const head = await ontologyStore.head(demo);

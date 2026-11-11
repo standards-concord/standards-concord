@@ -1,9 +1,7 @@
 import type { ChangeRequest, OntologyProject, Release, Review, TimelineEvent, User, Vote } from '@concord/shared';
 import { clock } from '../clock.js';
-import { config } from '../config.js';
 import { get, list, put, transaction } from '../db.js';
-import { renderOntologyPage } from '../public/render.js';
-import { pageInput } from '../public/routes.js';
+import { markReleasePagesStale } from '../public/routes.js';
 import { withOntologyLocks } from './changeRequests.js';
 import { ontologyStore } from './ontologyStore.js';
 import { PERSONAS, personaByKey } from './personas.js';
@@ -124,20 +122,14 @@ export async function refreshDemoCopy() {
         }
       }
 
-      const pages: Record<string, Record<string, string>> = {};
-      for (const r of (await list<Release>('releases', project.id)).filter((r) => r.ontologyId === project.id && r.status === 'published')) {
-        const html = await ontologyStore.readReleaseFile(project, r.version, 'index.html');
-        if (!html?.includes(LEGACY_DEMO_COPY.description.from)) continue;
-        // Render from the current project, reusing frozen use-case/requirements snapshots: regenerating those
-        // would change published requirements and could replace real contributors' data. Tags stay put.
-        const updated = renderOntologyPage(await pageInput(project, r.version, config.publicUrl, { relativeDownloads: true }));
-        if (updated === html) continue;
-        pages[r.version] = { 'index.html': updated };
-      }
-      if (Object.keys(pages).length) {
-        await assertStillHeld(project);
-        await ontologyStore.updateReleaseFiles(project, pages, 'Regenerate release pages with current demo copy');
-        counts.releasePages += Object.keys(pages).length;
+      // Release pages that embed the old description are re-rendered by the `release-pages` start-up task, which
+      // runs after this one, through the same path (and the same locking) as any renderer change.
+      let stale = 0;
+      for (const r of (await list<Release>('releases', project.id)).filter((r) => r.ontologyId === project.id && r.status === 'published'))
+        if ((await ontologyStore.readReleaseFile(project, r.version, 'index.html'))?.includes(LEGACY_DEMO_COPY.description.from)) stale++;
+      if (stale) {
+        await markReleasePagesStale(project.slug);
+        counts.releasePages += stale;
       }
     });
   }

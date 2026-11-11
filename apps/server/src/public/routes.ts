@@ -313,6 +313,19 @@ async function readPageState(): Promise<Record<string, string>> {
  * Changes are committed to the ontology's repository and go out with its next
  * push to GitHub. Tags still point at the original commits.
  */
+/**
+ * Has the next `release-pages` run re-render this ontology's release pages, through the same path as any
+ * renderer change (used when stored demo copy that the pages embed was corrected).
+ */
+export async function markReleasePagesStale(slug: string): Promise<void> {
+  await transaction(async () => {
+    const state = await readPageState();
+    if (!(slug in state)) return;
+    delete state[slug];
+    await put('kv', { id: PAGE_STATE, state });
+  });
+}
+
 export async function refreshReleasePages(): Promise<boolean> {
   const state = await readPageState();
   // Whether everything was refreshed and recorded: if not, the start-up task isn't recorded as done, so it is tried
