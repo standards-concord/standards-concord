@@ -15,7 +15,7 @@ fi
 if git diff --quiet "$prev" HEAD -- \
   apps/web apps/server/src apps/server/package.json apps/server/tsconfig.json apps/server/vercel-entry.mjs \
   packages middleware.ts vercel.json package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json \
-  scripts/vercel-ignore-build.sh scripts/vercel-build.mjs; then
+  scripts/vercel-ignore-build.sh scripts/vercel-build.mjs scripts/vercel-output.mjs; then
   echo "Nothing the web app, the API or the middleware uses changed since $prev: skipping the build."
   exit 0
 fi
