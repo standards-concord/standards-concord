@@ -6,7 +6,7 @@ import type { OutputFormat } from '@concord/core/types';
 import type { OntologyProject, Release } from '@concord/shared';
 import { clock } from '../clock.js';
 import { config } from '../config.js';
-import { get, HttpError, list, put, transaction } from '../db.js';
+import { get, HttpError, list, put, remove, transaction } from '../db.js';
 import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { releaseForViewer } from '../services/releases.js';
@@ -320,9 +320,13 @@ async function readPageState(): Promise<Record<string, string>> {
 export async function markReleasePagesStale(slug: string): Promise<void> {
   await transaction(async () => {
     const state = await readPageState();
-    if (!(slug in state)) return;
-    delete state[slug];
-    await put('kv', { id: PAGE_STATE, state });
+    if (slug in state) {
+      delete state[slug];
+      await put('kv', { id: PAGE_STATE, state });
+    }
+    // The task may already be recorded as done for this version (say, an earlier run of the caller failed part way):
+    // forget that, so it runs again.
+    await remove('kv', 'startup:release-pages');
   });
 }
 

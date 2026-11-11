@@ -127,7 +127,10 @@ describe('refreshing persisted demo copy', () => {
     const pages = (await get<{ id: string; state: Record<string, string> }>('kv', 'public-pages'))?.state ?? {};
     await put('kv', { id: 'public-pages', state: { ...pages, [demo.slug]: PAGE_GENERATOR, [other.slug]: PAGE_GENERATOR } });
 
+    // An earlier start-up may already have recorded release-pages as done for this version.
+    await put('kv', { id: 'startup:release-pages', appVersion: 'test', deployment: 'test', at: owner.createdAt });
     expect((await refreshDemoCopy()).releasePages).toBe(1);
+    expect(await get('kv', 'startup:release-pages')).toBeUndefined();
     // demo-copy itself writes no release files: the release-pages task (which runs after it) does.
     expect(await ontologyStore.readReleaseFile(demo, '1.0.0', 'index.html')).toBe(oldPage);
     await refreshReleasePages();
