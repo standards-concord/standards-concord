@@ -134,6 +134,13 @@ test('a contributor cannot follow a live call’s updates on either A or B', asy
   });
   expect(response.ok(), await response.text()).toBeTruthy();
   const meeting = await response.json() as Meeting;
+  // The owner can follow the call on both servers first, so the contributor's 404s below come from
+  // the role check and not from A failing to find a call that was started on B.
+  for (const base of ['', API_URL_B!]) {
+    const owned = await page.request.get(`${base}/api/meetings/${meeting.id}/updates?from=0`);
+    expect(owned.ok(), await owned.text()).toBeTruthy();
+    expect(((await owned.json()) as { meeting: Meeting }).meeting.id).toBe(meeting.id);
+  }
   const ownerCookies = await page.context().cookies();
   try {
     await signIn(page, { name: `Cross-instance contributor ${uniq()}`, role: 'contributor' });
