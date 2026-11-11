@@ -3,7 +3,7 @@
   "name": "io.github.standards-concord/concord",
   "title": "Concord",
   "description": "Read, query and check data against Concord's open data ontologies (OWL, LinkML), and report gaps.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "websiteUrl": "https://standards-concord.vercel.app/connect",
   "icons": [
     {
