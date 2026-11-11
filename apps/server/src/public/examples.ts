@@ -11,7 +11,9 @@ const cache = new Map<string, Promise<WorkedExample[]>>();
 /** Only public questions enter the cache; changing either the graph or questions changes its key. */
 export async function liveExamples(project: OntologyProject, graph: OntologyGraph): Promise<WorkedExample[]> {
   const questions = await competencyTests(project.id, { published: true });
-  const digest = createHash('sha256').update(await graph.toTurtle()).update(JSON.stringify(questions)).digest('hex');
+  // Turtle drops prefixes the ontology doesn't use, but queries may rely on them (withPrefixes), so they are part of the key.
+  const prefixes = Object.entries(graph.prefixes).sort(([a], [b]) => a.localeCompare(b));
+  const digest = createHash('sha256').update(await graph.toTurtle()).update(JSON.stringify(prefixes)).update(JSON.stringify(questions)).digest('hex');
   const key = `${project.id}:${digest}`;
   let hit = cache.get(key);
   if (!hit) {

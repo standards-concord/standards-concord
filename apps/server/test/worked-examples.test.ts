@@ -121,6 +121,21 @@ describe('public worked examples', () => {
     safe(html);
   });
 
+  // Used to go wrong: the draft cache was keyed by the graph's Turtle, which leaves out prefixes the ontology
+  // doesn't use, so changing a prefix that only a question relies on reused the old answer.
+  it('refreshes a draft when only a prefix that the questions use changes', async () => {
+    const { project, visible } = await setup();
+    await put('useCases', { ...visible, competencyQuestions: visible.competencyQuestions.map((q) => ({ ...q, sparql: 'ASK { ?s a q:Record }' })) }, project.id);
+    const { OntologyGraph } = await import('@concord/core');
+    const base = await (await ontologyStore.working(project)).toTurtle();
+    const withPrefix = (ns: string) => OntologyGraph.fromTurtle(`@prefix q: <${ns}> .\n${base}\n<https://example.org/r> a <${NS}Record> .`);
+    const matching = await withPrefix(NS);
+    const other = await withPrefix('https://example.org/other#');
+    expect(await matching.toTurtle()).toBe(await other.toTurtle());
+    expect((await liveExamples(project, matching))[0]).toMatchObject({ result: { boolean: true } });
+    expect((await liveExamples(project, other))[0]).toMatchObject({ result: { boolean: false } });
+  });
+
   it('computes the draft live, invalidates on question edits and never publishes restricted questions', async () => {
     const { project, visible } = await setup();
     const root = `/def/${project.slug}/draft`;
