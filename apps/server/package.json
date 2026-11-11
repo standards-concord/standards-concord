@@ -1,6 +1,7 @@
 {
   "name": "@concord/server",
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
