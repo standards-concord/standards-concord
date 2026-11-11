@@ -2,7 +2,7 @@
 # Run CI's jobs (.github/workflows/ci.yml) on this machine instead of GitHub Actions, and
 # optionally record each result for the commit that was tested.
 #
-#   scripts/ci-local.sh                     # test, e2e-dev, e2e-preview, e2e-solid, walkthrough
+#   scripts/ci-local.sh                     # test, e2e-dev, e2e-preview, e2e-vercel, e2e-solid, walkthrough
 #   scripts/ci-local.sh test e2e-dev        # just these jobs
 #   scripts/ci-local.sh --report            # also record the result (see below)
 #   scripts/ci-local.sh --parallel 6 --shards 4
@@ -44,9 +44,9 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-[ ${#jobs[@]} -eq 0 ] && jobs=(test e2e-dev e2e-preview e2e-solid walkthrough)
+[ ${#jobs[@]} -eq 0 ] && jobs=(test e2e-dev e2e-preview e2e-vercel e2e-solid walkthrough)
 for job in "${jobs[@]}"; do
-  case "$job" in test|e2e-dev|e2e-preview|e2e-solid|walkthrough) ;; *) echo "Unknown job: $job" >&2; exit 2 ;; esac
+  case "$job" in test|e2e-dev|e2e-preview|e2e-vercel|e2e-solid|walkthrough) ;; *) echo "Unknown job: $job" >&2; exit 2 ;; esac
 done
 
 sha=$(git rev-parse HEAD)
@@ -73,8 +73,8 @@ status() { # job state description
     || { statuses_posted=false; echo "note: gh may not post commit statuses here; the result goes in $logdir/summary.md" >&2; }
 }
 
-# A throwaway Postgres for the document store's tests, as CI's postgres:16 service. Each test
-# piece gets its own database, so the two store passes can run at once.
+# A throwaway Postgres for the store tests and the packaged-function browser tests, as CI's
+# postgres:16 service. Each piece gets its own database, so they can run at once.
 pg_started=false
 pg() { # run a Postgres binary, as nobody when we are root (initdb refuses root)
   local bin; bin=$(dirname "$(command -v pg_ctl 2>/dev/null || ls /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null | sort -V | tail -1)")
@@ -83,7 +83,6 @@ pg() { # run a Postgres binary, as nobody when we are root (initdb refuses root)
   if [ "$(id -u)" = 0 ]; then su nobody -s /bin/sh -c "$(printf '%q ' "$cmd" "$@")"; else "$cmd" "$@"; fi
 }
 start_postgres() {
-  [ -n "${TEST_DATABASE_URL:-}" ] && return 0
   pgdir=$(mktemp -d)
   [ "$(id -u)" = 0 ] && { chown -R nobody "$pgdir" 2>/dev/null || chown -R nobody:nogroup "$pgdir"; }
   pg initdb -D "$pgdir/data" -U postgres --auth=trust -E UTF8 >/dev/null || return 1
@@ -139,7 +138,7 @@ piece_test-store() { TEST_DATABASE_URL="${TEST_DATABASE_URL:-$pg_base/ci_store}"
 # Each piece gets its own servers, data directory, ports and output folder.
 e2e_env() { # n
   local base=$((9000 + $1 * 10))
-  export E2E_API_PORT=$base E2E_WEB_PORT=$((base + 1)) E2E_GITHUB_STUB_PORT=$((base + 2)) E2E_DATA_DIR="$(mktemp -d)"
+  export E2E_API_PORT=$base E2E_API_PORT_B=$((base + 3)) E2E_WEB_PORT=$((base + 1)) E2E_GITHUB_STUB_PORT=$((base + 2)) E2E_DATA_DIR="$(mktemp -d)"
 }
 # The whole suite against the production build (what Vercel serves), in shards.
 piece_e2e-preview() {
@@ -152,6 +151,13 @@ piece_e2e-preview() {
 }
 # A smoke test against the Vite dev server (what `pnpm dev` runs), as CI does.
 piece_e2e-dev() { e2e_env 0; E2E_MODE=dev pnpm test:e2e:smoke --output test-results/dev; }
+# Two Vercel-function processes, one empty database, and the production web build.
+piece_e2e-vercel() {
+  e2e_env "$((shards + 1))" # the block after the last preview shard; B uses offset +3
+  psql -q "$pg_base/postgres" -c 'create database ci_e2e_vercel' || return 1
+  E2E_MODE=preview E2E_API=vercel E2E_DATABASE_URL="$pg_base/ci_e2e_vercel" E2E_TWO_SERVERS=1 \
+    pnpm exec playwright test -c e2e --project=local --retries=0 --output test-results/vercel e2e/meetings.spec.ts e2e/two-servers.spec.ts
+}
 piece_e2e-solid() { pnpm test:e2e:solid; }
 piece_walkthrough() {
   WALKTHROUGH_BROWSER_TESTS=1 pnpm --filter @concord/walkthrough test || return 1
@@ -166,6 +172,7 @@ want() { printf '%s\n' "${jobs[@]}" | grep -qx "$1"; }
 want test && pieces+=(test:unit test:store)
 want walkthrough && pieces+=(walkthrough:all)
 for i in $(seq 1 "$shards"); do want e2e-preview && pieces+=("e2e-preview:$i"); done
+want e2e-vercel && pieces+=(e2e-vercel:all)
 want e2e-dev && pieces+=(e2e-dev:smoke)
 want e2e-solid && pieces+=(e2e-solid:all)
 
@@ -192,7 +199,7 @@ echo "Installing and building the web app once…"
 pnpm install --frozen-lockfile >"$logdir/setup.log" 2>&1 \
   && pnpm --filter @concord/web build >>"$logdir/setup.log" 2>&1 \
   || { echo "Setup failed; see $logdir/setup.log" >&2; tail -20 "$logdir/setup.log" >&2; exit 1; }
-if want test && [ -z "${TEST_DATABASE_URL:-}" ]; then start_postgres || { echo "Couldn't start Postgres" >&2; exit 1; }; fi
+if want e2e-vercel || { want test && [ -z "${TEST_DATABASE_URL:-}" ]; }; then start_postgres || { echo "Couldn't start Postgres" >&2; exit 1; }; fi
 
 for job in "${jobs[@]}"; do status "$job" pending "running locally"; done
 echo "Running ${#pieces[@]} pieces, $parallel at a time (logs: $logdir)"
@@ -233,6 +240,7 @@ for job in "${jobs[@]}"; do
   if $ok; then
     note=""; [ "$job" = test ] && [ -f "$logdir/test.note" ] && note="; $(cat "$logdir/test.note")"
     [ "$job" = e2e-dev ] && note="$note (smoke test, as in CI)"
+    [ "$job" = e2e-vercel ] && note="$note (two packaged API processes, one Postgres database)"
     status "$job" success "passed$note"
     echo "| local/$job | ✅ passed$note |" >>"$logdir/summary.md"
   else
