@@ -53,6 +53,22 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.45.0',
+    date: '2026-11-10',
+    title: 'Worked examples in every release',
+    pr: 132,
+    changes: [
+      {
+        id: 'worked-examples',
+        type: 'feat',
+        title: 'See the questions a standard can answer',
+        detail: 'Public pages show worked examples with answers, queries and downloadable data, frozen with each release. On Validate data, use the version’s example data as a starting point.',
+        roles: [],
+        to: '/def/volunteering#tab-examples',
+      },
+    ],
+  },
+  {
     version: '0.44.2',
     date: '2026-11-10',
     title: 'The welcome page keeps its videos',
