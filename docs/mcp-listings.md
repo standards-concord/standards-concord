@@ -34,7 +34,7 @@ Curated from the official registry. Once the official entry is live, email partn
 
 > Subject: MCP Registry listing: Concord (Open Data Institute)
 >
-> Hi, Concord is the Open Data Institute's platform for designing open data ontologies together. Its remote MCP server lets agents read the hub's OWL and LinkML ontologies, query them, check data against them and report gaps to the maintainers. It is published in the official MCP Registry as io.github.standards-concord/concord (https://standards-concord.vercel.app/mcp, OAuth with dynamic client registration). Could it be included in the GitHub MCP Registry? Thanks, Jesse
+> Hi, Concord is the Open Data Institute's platform for designing open data standards together. Its remote MCP server lets agents read its OWL and LinkML ontologies, query them, check data against them and report gaps to the maintainers. It is published in the official MCP Registry as io.github.standards-concord/concord (https://standards-concord.vercel.app/mcp, OAuth with dynamic client registration). Could it be included in the GitHub MCP Registry? Thanks, Jesse
 
 ## Anthropic Connectors Directory
 
@@ -43,8 +43,8 @@ Curated from the official registry. Once the official entry is live, email partn
 - Icon for the listing: `https://standards-concord.vercel.app/icon-512.png`. Still needed from Jesse: a privacy policy URL (the ODI should own this), a support contact, a reviewer test account (demo sign-in works on the alpha, but a real Google or GitHub sign-in is better for review), and confirming it was tested as a custom connector (the *Add to Claude* button does this).
 - Listing text:
   - **Name:** Concord
-  - **Short description:** Read, query and check data against the ODI's open data ontologies, and report what's missing.
-  - **Long description:** Concord is the Open Data Institute's platform for designing open data standards together. Connect it to Claude to look up terms in the hub's strict OWL ontologies, fetch them as Turtle, JSON-LD or LinkML for code generation, run SPARQL over them, and validate your own data against them. When a standard is missing a concept or doesn't fit your data, Claude can report it: Concord triages the report straight away (often the right terms already exist) and, where the standard should change, opens a change request that the community reviews under the standard's governance.
+  - **Short description:** Read, query and check data against Concord's open data ontologies, and report what's missing.
+  - **Long description:** Concord is the Open Data Institute's platform for designing open data standards together. Connect it to Claude to look up terms in its strict OWL ontologies, fetch them as Turtle, JSON-LD or LinkML for code generation, run SPARQL over them, and validate your own data against them. When a standard is missing a concept or doesn't fit your data, Claude can report it: Concord triages the report straight away (often the right terms already exist) and, where the standard should change, opens a change request that the community reviews under the standard's governance.
   - **Example prompts:** "Which terms in the volunteering ontology describe skills, and how are they related?"; "Generate pydantic models for the volunteering standard from its LinkML."; "Check this Turtle file against the volunteering ontology and tell me what doesn't fit."; "Our data records whether an opportunity reimburses travel. Is that in the standard? If not, report it."
   - **Documentation:** https://standards-concord.vercel.app/connect
 

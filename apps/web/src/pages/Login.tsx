@@ -31,7 +31,7 @@ export function LoginPage() {
           Design open standards together
         </h1>
         <p className="mt-4 max-w-md text-lg">
-          Concord is where the Open Data Institute writes strict OWL ontologies in the open and decides on changes without needing a meeting.
+          Concord is where working groups write strict OWL ontologies in the open and decide on changes without needing a meeting.
         </p>
         <p className="mt-4 max-w-md text-muted">
           Requirements come in from interviews, meeting transcripts and coding agents. Every proposed change is checked for consistency, FAIR principles and the

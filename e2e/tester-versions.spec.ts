@@ -72,7 +72,7 @@ test('a signed-out tester picks the version they last tested and gets questions 
   await expect(page.getByText(`What’s new since ${since}`).first()).toBeVisible({ timeout: 20_000 });
   const answers = page.getByRole('heading', { name: 'Your answers so far' }).locator('..');
   await expect(answers.getByText('How likely are you to use this for a real standards project?')).toBeVisible();
-  await expect(answers.getByText('Which governance models should the hub offer?')).toHaveCount(0);
+  await expect(answers.getByText('Which governance models should Concord offer?')).toHaveCount(0);
   await settle(page);
   await expectNoCrash(page);
 });

@@ -59,7 +59,7 @@ export const PERSONAS: PersonaSpec[] = [
     key: 'daniel',
     name: 'Daniel Brooks',
     organisation: 'Open Data Institute',
-    persona: 'ODI technical oversight. Checks that standards meet the hub’s quality bar (FAIR, licensing, logical consistency). Rarely intervenes.',
+    persona: 'ODI technical oversight. Checks that standards meet the ODI’s quality bar (FAIR, licensing, logical consistency). Rarely intervenes.',
     roles: ['odi', 'reviewer'],
   },
 ];

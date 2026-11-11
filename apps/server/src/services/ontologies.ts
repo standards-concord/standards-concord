@@ -111,7 +111,7 @@ export async function createProject(
     domain: input.domain,
     demo: input.demo,
   };
-  const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: CC BY 4.0\n\nManaged on the Open Data Institute with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
+  const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: CC BY 4.0\n\nManaged with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
   await ontologyStore.init(project, await graph.toTurtle(), readme);
   await put('ontologies', project);
   await setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);

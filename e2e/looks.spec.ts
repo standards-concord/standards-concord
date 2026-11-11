@@ -13,6 +13,23 @@ const LOOKS = ['odi', 'spec', 'civic', 'workbench', 'classic'] as const;
 const look = (page: Page) => page.evaluate(() => document.documentElement.dataset.look);
 
 test.describe('looks', () => {
+  test('Concord names the page, home link and footer, with the ODI logo only in its look', async ({ page }) => {
+    // The page title, home link and footer used to carry inconsistent product names.
+    await signIn(page, { name: 'Concord name tester' });
+    for (const id of ['odi', 'civic']) {
+      await page.goto(id === 'odi' ? '/' : '/?look=civic');
+      await settle(page);
+      expect(await look(page)).toBe(id);
+      await expect(page).toHaveTitle('Concord');
+      const home = page.getByRole('banner').getByRole('link', { name: 'Concord: home', exact: true });
+      await expect(home).toBeVisible();
+      await expect(page.getByRole('contentinfo')).toContainText('Concord is an alpha prototype from the Open Data Institute (ODI).');
+      const logo = home.getByRole('img', { name: 'Open Data Institute', includeHidden: true });
+      if (id === 'odi') await expect(logo).toBeVisible();
+      else await expect(logo).toBeHidden();
+    }
+  });
+
   test('the ODI look is the default, applied before the app renders', async ({ page }) => {
     await page.goto('/login');
     expect(await look(page)).toBe('odi');

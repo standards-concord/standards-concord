@@ -5,13 +5,13 @@
     "url": "https://github.com/standards-concord/standards-concord"
   },
   "metadata": {
-    "description": "Concord's MCP connector for the Open Data Institute."
+    "description": "Concord's MCP connector for open data standards."
   },
   "plugins": [
     {
       "name": "concord",
       "source": "./plugins/concord",
-      "description": "Read, query and check data against the ODI's ontologies (OWL, LinkML), and report what's missing. Sign in with your Concord account on first use."
+      "description": "Read, query and check data against Concord's open data ontologies (OWL, LinkML), and report what's missing. Sign in with your Concord account on first use."
     }
   ]
 }

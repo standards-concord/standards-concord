@@ -219,7 +219,7 @@ export const actions: Record<string, Action> = {
   /* ------------------------------- hub ------------------------------- */
   async 'title-card'(c) {
     // The card stays up across the navigation, then open-hub fades it to reveal the hub.
-    await c.d.chapter({ eyebrow: 'prototype', title: 'Concord', sub: 'Designing data standards together, in the open.' }, 0);
+    await c.d.chapter({ eyebrow: 'Open Data Institute · prototype', title: 'Concord', sub: 'Designing data standards together, in the open.' }, 0);
     await c.d.pause(900);
     await c.d.goto(`${c.hub}/`, { keepCard: true });
   },
@@ -607,7 +607,7 @@ export const actions: Record<string, Action> = {
     await claimAppWorks(c, true);
   },
   async 'outro-card'(c) {
-    await c.d.chapter({ eyebrow: 'Concord', title: 'Thanks for watching', sub: `Try it: ${startHere(c)}` }, 0);
+    await c.d.chapter({ eyebrow: 'Concord · Open Data Institute', title: 'Thanks for watching', sub: `Try it: ${startHere(c)}` }, 0);
   },
 
   /* ------------------------ alpha testers (feedback.md) ------------------------ */

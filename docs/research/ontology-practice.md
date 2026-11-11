@@ -1,6 +1,6 @@
 # Ontology Engineering Practice for a Collaborative, Strict-OWL, FAIR Standards Platform
 
-*Research brief, October 2026. Prepared as design input for an AI-assisted platform where groups co-author OWL ontologies for the Open Data Institute. Bracketed numbers point to the reference list. Where something is the author's synthesis and not a source's stated position, it is marked "Recommendation".*
+*Research brief, October 2026. Prepared as design input for an AI-assisted platform where groups co-author OWL ontologies for the Open Data Institute's open data standards. Bracketed numbers point to the reference list. Where something is the author's synthesis and not a source's stated position, it is marked "Recommendation".*
 
 ---
 
@@ -114,7 +114,7 @@ OntoClean (Guarino and Welty, 2002) [12] validates taxonomies with four meta-pro
 
 The constraints it checks include: an anti-rigid class cannot subsume a rigid one; a class with an identity criterion cannot be subsumed by one without it; an anti-unity class cannot subsume a unity class.
 
-Typical violation: *Student* (a role, anti-rigid) placed above *Person* (rigid). For a Standards Platform this matters for roles such as Publisher, Maintainer and Steward, which are anti-rigid roles of rigid Agents. **Recommendation:** have the AI propose meta-property tags for every new class and flag constraint violations for a human to review. This is cheap and catches real modelling errors.
+Typical violation: *Student* (a role, anti-rigid) placed above *Person* (rigid). For a standards platform this matters for roles such as Publisher, Maintainer and Steward, which are anti-rigid roles of rigid Agents. **Recommendation:** have the AI propose meta-property tags for every new class and flag constraint violations for a human to review. This is cheap and catches real modelling errors.
 
 ### 1.8 Kendall & McGuinness, *Ontology Engineering* (2019), and the OMG/EDM Council use-case approach
 
@@ -246,7 +246,7 @@ FOOPS! [27][28] (Garijo, Corcho and Poveda-Villalón, ISWC 2021) scores ontologi
 
 **Recommendation:** run FOOPS! (REST API or JAR) on every release candidate and block publication below a threshold, for example 100% of the F and R1.1 checks.
 
-### 3.3 Required ontology header (minimum for the ODI hub)
+### 3.3 Required ontology header (minimum for Concord)
 
 ```turtle
 <https://w3id.org/odi/ont/licensing> a owl:Ontology ;
@@ -422,7 +422,7 @@ These rules synthesise OWL 2 semantics [33], OBO principle 19 [43], the gist pol
 - **Contributor:** proposes changes through issues or KGCL.
 - **AI agent:** a *contributor* only. It drafts CQs, axioms, definitions, OntoClean tags, KGCL changes and changelogs, and never holds approval rights. (Recommendation, consistent with LLMs4KGOE's human-in-the-loop emphasis [55].)
 
-### 5.3 Proposed decision rules for the ODI hub (Recommendation)
+### 5.3 Proposed decision rules for Concord (Recommendation)
 
 | Change class (4.4) | Approval | Window | Escalation |
 |---|---|---|---|

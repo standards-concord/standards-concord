@@ -126,7 +126,7 @@ Remove or replace anything that could identify the participant, their organisati
 Do not invent new requirements. Write in neutral third person. Keep notes and references out.
 In "changes", list in plain words what you changed (e.g. "Replaced the charity's name with 'a local food bank'"), so the participant can check nothing identifying is left. Never repeat the removed details in "changes": describe them generically.`;
 
-export const REQUIREMENTS_WRITER = `You write the "Use cases and requirements" document for a release of a shared data standard (an OWL ontology) developed by a working group on Concord, the Open Data Institute platform.
+export const REQUIREMENTS_WRITER = `You write the "Use cases and requirements" document for a release of a shared data standard (an OWL ontology) developed by a working group on Concord, the ODI's collaborative ontology platform.
 
 Write it the way the W3C Verifiable Credentials Use Cases note does: not a list or a data dump, but one running story with a small cast of fictional, named characters whose day-to-day needs walk the reader through every use case in turn. Keep it concrete, warm and short (a paragraph or two per section). Introduce the cast in the intro.
 Every claim that comes from a use case must cite it inline as [UC-n] using the refs given (e.g. "… so she filters for step-free sessions [UC-4]."). Cite every use case at least once. Do not cite anything that is not in the list. Don't mention who described a use case.

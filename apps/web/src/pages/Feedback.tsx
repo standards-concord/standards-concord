@@ -322,7 +322,7 @@ export function FeedbackPage() {
         <Card className="mx-auto max-w-lg p-8 text-center">
           <Heart className="mx-auto size-8 text-accent" />
           <h1 className="mt-3 text-xl font-semibold">Thank you!</h1>
-          <p className="mt-2 text-sm text-muted">Your feedback goes straight to the Open Data Institute team building Concord. It genuinely shapes what we build next.</p>
+          <p className="mt-2 text-sm text-muted">Your feedback goes straight to the ODI team building Concord. It genuinely shapes what we build next.</p>
           <p className="mt-3 flex items-start justify-center gap-1.5 text-xs text-muted" data-testid="feedback-saved">
             <KeyRound className="mt-0.5 size-3.5 shrink-0" aria-hidden />
             {submitted.savedTo

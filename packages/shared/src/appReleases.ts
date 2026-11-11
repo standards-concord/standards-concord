@@ -53,6 +53,21 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.48.1',
+    date: '2026-11-11',
+    title: 'Simpler Concord name in the header, page title and footer',
+    changes: [
+      {
+        id: 'simpler-concord-name',
+        type: 'fix',
+        title: 'Simpler Concord name in the header, page title and footer',
+        detail: 'The header, browser tab, home page and welcome page now just say Concord. The ODI logo still appears in the ODI look.',
+        roles: [],
+        to: '/',
+      },
+    ],
+  },
+  {
     version: '0.48.0',
     date: '2026-11-11',
     title: 'Code lists',
