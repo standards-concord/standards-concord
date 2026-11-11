@@ -5,6 +5,7 @@ import { createApp } from '../src/app.js';
 import { openDb } from '../src/db.js';
 import { seedDemo } from '../src/services/simulation.js';
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { BODY_LIMITS, RATE_LIMITS } from '../src/public/validate.js';
 import { gzipSync } from 'node:zlib';
@@ -543,32 +544,55 @@ ex:org a vol:Organisation ; vol:offersOpportunity ex:opp . ex:role a vol:Role .`
     });
 
     it('turns a job away when it has waited too long for a worker', async () => {
-      const before = { wait: POOL_LIMITS.queueWaitMs, perClient: POOL_LIMITS.perClient };
+      const before = { wait: POOL_LIMITS.queueWaitMs, perClient: POOL_LIMITS.perClient, timeoutMs: POOL_LIMITS.timeoutMs };
       POOL_LIMITS.queueWaitMs = 0;
       POOL_LIMITS.perClient = POOL_LIMITS.workers + 1;
+      // The held jobs' own time limit keeps running while they're frozen, so a slow machine mustn't hit it.
+      POOL_LIMITS.timeoutMs = 120_000;
       const requests: Promise<request.Response>[] = [];
+      let workers: number[] = [];
+      const signalWorkers = (signal: 'SIGSTOP' | 'SIGCONT') => {
+        for (const pid of workers) {
+          try {
+            process.kill(pid, signal);
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+          }
+        }
+      };
       try {
-        // 2026-11-11: all three got 200 on a busy machine because bodies arrived serially and nothing queued.
-        // Keep workers busy with 24,000 triples each, then send a tiny body so it reaches the queue promptly.
-        const big = bigData(12_000);
-        for (let i = 0; i < POOL_LIMITS.workers; i++) {
-          requests.push(post('/def/volunteering', big).then((r) => r)); // Explicitly start supertest's lazy requests.
-        }
-        const running = Promise.all(requests);
-        // Handle transport failures even if the assertion below fails before we await the responses.
-        void running.catch(() => {});
+        // Freeze busy workers until the tiny request times out in the queue, so none can reply and take it.
+        const big = bigData(3000);
         const deadline = Date.now() + 30_000;
-        while (poolState().running !== POOL_LIMITS.workers && Date.now() < deadline) {
+        while (Date.now() < deadline) {
+          const batch = Array.from({ length: POOL_LIMITS.workers }, () => post('/def/volunteering', big).then((r) => r)); // Explicitly start supertest's lazy requests.
+          requests.push(...batch);
+          const running = Promise.all(batch);
+          // Handle transport failures even if an assertion fails before we await the responses.
+          void running.catch(() => {});
+          while (poolState().running !== POOL_LIMITS.workers && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+          }
+          expect(poolState().running, 'Timed out after 30 s waiting for all validation workers to become busy').toBe(POOL_LIMITS.workers);
+          workers = execFileSync('pgrep', ['-P', String(process.pid), '-f', 'validationWorker']).toString().trim().split(/\s+/).map(Number);
+          signalWorkers('SIGSTOP');
+          // Process any replies sent just before SIGSTOP, and retry if a worker finished first.
           await new Promise((r) => setTimeout(r, 10));
+          const held = poolState().running === POOL_LIMITS.workers;
+          if (held) {
+            const extra = post('/def/volunteering', '<urn:s> <urn:p> <urn:o> .').then((r) => r);
+            requests.push(extra);
+            expect((await extra).status).toBe(503);
+          }
+          signalWorkers('SIGCONT');
+          expect((await running).map((r) => r.status)).toEqual(Array(POOL_LIMITS.workers).fill(200));
+          if (held) return;
         }
-        expect(poolState().running, 'Timed out after 30 s waiting for all validation workers to become busy').toBe(POOL_LIMITS.workers);
-        const extra = post('/def/volunteering', '<urn:s> <urn:p> <urn:o> .').then((r) => r);
-        requests.push(extra);
-        expect((await extra).status).toBe(503);
-        expect((await running).map((r) => r.status)).toEqual(Array(POOL_LIMITS.workers).fill(200));
+        expect.fail('Timed out after 30 s trying to hold all validation workers busy');
       } finally {
+        signalWorkers('SIGCONT');
         await Promise.allSettled(requests);
-        Object.assign(POOL_LIMITS, { queueWaitMs: before.wait, perClient: before.perClient });
+        Object.assign(POOL_LIMITS, { queueWaitMs: before.wait, perClient: before.perClient, timeoutMs: before.timeoutMs });
       }
     });
   });
