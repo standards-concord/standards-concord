@@ -25,6 +25,7 @@ on:
       - 'pnpm-workspace.yaml'
       - 'tsconfig.base.json'
       - 'scripts/vercel-build.mjs'
+      - 'scripts/vercel-output.mjs'
       - '.github/workflows/vercel-deploy.yml'
   workflow_dispatch:
 
