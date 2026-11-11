@@ -74,6 +74,17 @@ describe('the recording workflow', () => {
     expect(job).not.toMatch(/: write\b/);
   });
 
+  // The repository was re-created with no releases, so the restore found no narration and the
+  // next recording would have re-voiced every paragraph (about 12,000 characters) even though
+  // the media repository's release kept all of it. It now falls back to that repository.
+  it('restores narration from this repository’s releases first, then from the media repository’s', () => {
+    const s = step(/name: Restore narration from the last release/);
+    expect(s).toMatch(/REPO: \$\{\{ github\.repository \}\}/);
+    expect(s).toMatch(/MEDIA_REPO: \$\{\{ vars\.MEDIA_REPO \|\| 'standards-concord\/concord-media' \}\}/);
+    expect(s).toMatch(/for repo in "\$REPO" "\$MEDIA_REPO"; do/);
+    expect(s).toMatch(/gh release download "\$t" --repo "\$repo" --pattern walkthrough-voice\.tar\.gz/);
+  });
+
   // An archive is only ever unpacked by unpack-voice.sh, which refuses links and odd paths.
   it('unpacks narration archives only through unpack-voice.sh', () => {
     expect(step(/name: Restore narration from the last release/)).toMatch(/bash walkthrough\/unpack-voice\.sh "\$RUNNER_TEMP\/walkthrough-voice\.tar\.gz" walkthrough\/\.cache\/voice/);
