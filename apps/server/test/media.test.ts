@@ -8,6 +8,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * use a local folder; the release cache needs GitHub, so it is tested here with a stub.
  */
 
+// The last complete set is kept in the database; a stand-in here, so each test starts with none (afterEach).
+const db = vi.hoisted(() => ({ docs: new Map<string, unknown>(), failWrites: false }));
+vi.mock('../src/db.js', () => ({
+  get: async (_c: string, id: string) => structuredClone(db.docs.get(id)),
+  put: async (_c: string, doc: { id: string }) => {
+    if (db.failWrites) throw new Error('read-only');
+    db.docs.set(doc.id, structuredClone(doc));
+    return doc;
+  },
+}));
+
 const fresh = async () => {
   vi.resetModules();
   return import('../src/services/media.js');
@@ -48,6 +59,9 @@ function stubGitHub(latest: object | object[], files: Record<string, string>) {
 afterEach(() => {
   vi.unstubAllGlobals();
   delete process.env.MEDIA_DIR;
+  delete process.env.MEDIA_REPO;
+  db.docs.clear();
+  db.failWrites = false;
 });
 
 describe('media release cache', () => {
@@ -154,6 +168,130 @@ describe('which release', () => {
   it('has no videos when no release has them', async () => {
     stubGitHub([{ id: 301, tag_name: 'v9', html_url: 'https://github.com/x/y/releases/tag/v9', assets: [] }], {});
     expect(await (await fresh()).mediaIndex()).toEqual({ release: null, files: [] });
+  });
+});
+
+// On 2026-11-10 the repository went private: GitHub answered the anonymous lookup with "not found", the server took
+// that as "no release has videos", and /welcome told testers the videos were being recorded, though nothing was.
+describe('when GitHub can’t be read', () => {
+  /** GitHub's API answers `status`; downloads under the `playing` prefixes still work, everything else is gone. */
+  const failing = (status: number, playing: string[] = []) =>
+    vi.stubGlobal('fetch', async (url: string) => {
+      if (url.startsWith('https://api.github.com/')) return new Response('{"message":"Not Found"}', { status });
+      return playing.some((p) => url.startsWith(p)) ? new Response('x', { status: 206 }) : new Response('', { status: 404 });
+    });
+
+  it('treats "not found" for the repository as a failed lookup, not as "no videos"', async () => {
+    failing(404);
+    await expect((await fresh()).mediaIndex()).rejects.toThrow(/HTTP 404/);
+  });
+
+  it('keeps serving the last complete set when GitHub fails, says not found, or stops listing one', async () => {
+    stubGitHub(release(601, 'v6', 6001, 'https://dl.example/v6'), { 'https://dl.example/v6': 'WEBVTT v6' });
+    const first = await fresh();
+    const before = await first.mediaIndex();
+    expect(before.release?.tag).toBe('v6');
+    await first.mediaFile('concord-walkthrough.vtt');
+
+    for (const status of [404, 403, 500]) {
+      failing(status, ['https://dl.example/v6/']);
+      const media = await fresh();
+      expect(await media.mediaIndex()).toEqual(before);
+      // The files still come from that release (its captions were downloaded while GitHub could be read).
+      expect(fs.readFileSync((await media.mediaFile('concord-walkthrough.vtt'))!, 'utf8')).toBe('WEBVTT v6');
+    }
+
+    // A newer release whose recording failed, and the old one gone from the list: still the old set, while it plays.
+    vi.stubGlobal('fetch', async (url: string) =>
+      url.startsWith('https://api.github.com/')
+        ? Response.json([{ id: 602, tag_name: 'v7', html_url: 'https://github.com/x/y/releases/tag/v7', assets: [] }])
+        : url.startsWith('https://dl.example/v6/')
+          ? new Response('x', { status: 206 })
+          : new Response('', { status: 404 }),
+    );
+    expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v6');
+
+    // A newer complete set replaces the kept one.
+    stubGitHub(release(603, 'v8', 6003, 'https://dl.example/v8'), {});
+    expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v8');
+    failing(404, ['https://dl.example/v8/']);
+    expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v8');
+  });
+
+  // Sol review of #124: the kept set could point at a deleted release or a repository gone private, and the page
+  // showed players that couldn't play. Now a kept set that no longer plays counts as nothing kept.
+  it('doesn’t fall back to videos that no longer play', async () => {
+    stubGitHub(release(611, 'v1', 6011, 'https://dl.example/gone'), {});
+    await (await fresh()).mediaIndex();
+    failing(404); // the API and the downloads alike
+    await expect((await fresh()).mediaIndex()).rejects.toThrow(/no longer play/);
+    // Nor when the release just isn't listed any more.
+    vi.stubGlobal('fetch', async (url: string) => (url.startsWith('https://api.github.com/') ? Response.json([]) : new Response('', { status: 404 })));
+    await expect((await fresh()).mediaIndex()).rejects.toThrow(/no longer play/);
+  });
+
+  // Sol review of #124 (round 2): the check that a kept set still plays went to GitHub even on the VM, which serves
+  // the videos from its own disk, so an outage hid videos it had downloaded in full.
+  it('on a server with the videos on its own disk, keeps serving them through an outage, downloads included', async () => {
+    const urls = 'https://dl.example/disk';
+    const files = Object.fromEntries(['', '/concord-walkthrough.mp4', '/concord-feedback.mp4', '/concord-feedback.vtt'].map((p) => [`${urls}${p}`, `data${p}`]));
+    stubGitHub(release(631, 'v1', 6031, urls), files);
+    const first = await fresh();
+    const before = await first.mediaIndex();
+    for (const f of ['concord-walkthrough.mp4', 'concord-walkthrough.vtt', 'concord-feedback.mp4', 'concord-feedback.vtt']) await first.mediaFile(f);
+
+    failing(503); // the API and the downloads alike
+    const media = await fresh();
+    expect(await media.mediaIndex()).toEqual(before);
+    expect(fs.readFileSync((await media.mediaFile('concord-feedback.mp4'))!, 'utf8')).toBe('data/concord-feedback.mp4');
+
+    // On Vercel the browser is sent to GitHub, so there it counts as gone.
+    process.env.CONCORD_MEDIA_REDIRECT = 'true';
+    try {
+      await expect((await fresh()).mediaIndex()).rejects.toThrow(/no longer play/);
+    } finally {
+      delete process.env.CONCORD_MEDIA_REDIRECT;
+    }
+  });
+
+  // Sol review of #124: with the database refusing writes, a refresh that failed brought back the older set the
+  // database still held, and the newer set's files (its clips, say) went missing from the same instance.
+  it('never goes back to an older set after one it couldn’t save, in the same instance', async () => {
+    const now = Date.now();
+    vi.useFakeTimers({ now, toFake: ['Date'] });
+    try {
+      stubGitHub(release(621, 'v1', 6021, 'https://dl.example/old'), {});
+      const media = await fresh();
+      expect((await media.mediaIndex()).release?.tag).toBe('v1'); // saved
+      db.failWrites = true;
+      vi.setSystemTime(now + 11 * 60 * 1000);
+      stubGitHub(release(622, 'v2', 6022, 'https://dl.example/new'), {});
+      expect((await media.mediaIndex()).release?.tag).toBe('v2'); // couldn't be saved
+      vi.setSystemTime(now + 22 * 60 * 1000);
+      failing(500, ['https://dl.example/new/']);
+      expect((await media.mediaIndex()).release?.tag).toBe('v2');
+      process.env.CONCORD_MEDIA_REDIRECT = 'true';
+      expect(await media.mediaRedirect('concord-feedback.mp4')).toBe('https://dl.example/new/concord-feedback.mp4');
+    } finally {
+      delete process.env.CONCORD_MEDIA_REDIRECT;
+      vi.useRealTimers();
+    }
+  });
+
+  it('doesn’t serve a set kept from another repository', async () => {
+    stubGitHub(release(701, 'v1', 7001, 'https://dl.example/old-repo'), {});
+    await (await fresh()).mediaIndex();
+    process.env.MEDIA_REPO = 'someone/elsewhere';
+    stubGitHub([], {});
+    expect(await (await fresh()).mediaIndex()).toEqual({ release: null, files: [] });
+    failing(404, ['https://dl.example/old-repo/']);
+    await expect((await fresh()).mediaIndex()).rejects.toThrow(/someone\/elsewhere: HTTP 404/);
+  });
+
+  it('still shows the videos when the database can’t keep them', async () => {
+    db.failWrites = true;
+    stubGitHub(release(801, 'v1', 8001, 'https://dl.example/ro'), {});
+    expect((await (await fresh()).mediaIndex()).release?.tag).toBe('v1');
   });
 });
 

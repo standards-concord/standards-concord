@@ -16,6 +16,7 @@ import { reportGap } from './agents.js';
 import { baselineRevision, createApp as createConnectedApp, finishFollowUps, reportAs, revisionOf, startRunAs } from './appChecks.js';
 import { addReview, addVote, createChangeRequest, getCR, governanceFor, hasRespondedThisRound, hasVotedOnTheseEdits, merge, submit, tick as crTick } from './changeRequests.js';
 import { canApprove, canVote } from './governance.js';
+import { snapshotKeptMedia } from './media.js';
 import { createProject, rolesFor, setRoles, updateProject } from './ontologies.js';
 import { createFork, editFork } from './forks.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -548,14 +549,19 @@ export async function runTick() {
   return changed;
 }
 
-/** Wipe everything and re-seed. Demo mode only. The AI spending totals survive, or a reset would refill the budget. */
+/**
+ * Wipe everything and re-seed. Demo mode only. The AI spending totals survive, or a reset would refill the budget,
+ * and so does the list of the welcome page's videos kept in case GitHub can't be read (services/media.ts).
+ */
 export async function resetAll() {
   // Only while this server holds the repositories, and keeping its hold (see ontologyStore). What the deployment
   // has spent on Claude survives the reset.
   await ontologyStore.wipe(async () => {
     const spend = await snapshotSpending();
+    const restoreMedia = await snapshotKeptMedia();
     await clearAll();
     await restoreSpending(spend);
+    await restoreMedia();
   });
   clock.reset();
   await saveClock();
