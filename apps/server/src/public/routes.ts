@@ -343,12 +343,18 @@ export async function refreshReleasePages(): Promise<boolean> {
       complete = false;
       console.warn(`[public] could not check ${project.slug}: ${(err as Error).message}`);
     }
-    const versions = new Set(await ontologyStore.versions(project));
-    const releases = (await publishedReleases(project.id)).filter((r) => versions.has(r.version));
-    const pending: typeof releases = [];
-    for (const r of releases)
-      if (state[project.slug] !== PAGE_GENERATOR || (await readSnapshot(project, r.version)).state === 'absent' || (await ontologyStore.readReleaseFile(project, r.version, 'index.html')) === undefined)
-        pending.push(r);
+    const pending: Release[] = [];
+    // One ontology whose store can't be read (say, its repository is missing) mustn't stop the others' pages.
+    try {
+      const versions = new Set(await ontologyStore.versions(project));
+      for (const r of (await publishedReleases(project.id)).filter((r) => versions.has(r.version)))
+        if (state[project.slug] !== PAGE_GENERATOR || (await readSnapshot(project, r.version)).state === 'absent' || (await ontologyStore.readReleaseFile(project, r.version, 'index.html')) === undefined)
+          pending.push(r);
+    } catch (err) {
+      complete = false;
+      console.warn(`[public] could not read ${project.slug} releases: ${(err as Error).message}`);
+      continue;
+    }
     if (!pending.length) {
       state[project.slug] = PAGE_GENERATOR;
       continue;

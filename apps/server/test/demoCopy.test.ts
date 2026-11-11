@@ -123,6 +123,9 @@ describe('refreshing persisted demo copy', () => {
       await put('releases', release, p.id);
       releases.push(release);
     }
+    // An ontology whose repository is gone (in CI: one left in the shared per-worker database by an earlier test file,
+    // whose data directory was removed) used to make refreshReleasePages throw before reaching any other ontology.
+    await put('ontologies', { ...other, id: `copy-missing-${++n}`, slug: `copy-missing-${n}`, demo: false });
     // Both ontologies' pages count as written by the current renderer, so only a stale mark re-renders one.
     const pages = (await get<{ id: string; state: Record<string, string> }>('kv', 'public-pages'))?.state ?? {};
     await put('kv', { id: 'public-pages', state: { ...pages, [demo.slug]: PAGE_GENERATOR, [other.slug]: PAGE_GENERATOR } });
