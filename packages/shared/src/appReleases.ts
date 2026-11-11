@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.46.0',
+    version: '0.47.0',
     date: '2026-11-11',
     title: 'Check data in a SPARQL endpoint',
     changes: [{
@@ -65,6 +65,23 @@ export const APP_RELEASES: AppRelease[] = [
       to: '{o}/validate',
     }],
     pr: 131,
+  },
+  {
+    version: '0.46.0',
+    date: '2026-11-11',
+    title: 'Propose changes from the Diagram',
+    pr: 130,
+    changes: [
+      {
+        id: 'diagram-proposals',
+        type: 'feat',
+        title: 'Propose changes from the Diagram: add classes, attributes, relationships and superclasses, then open one change request',
+        detail: 'Build a proposal on the Diagram and review the proposed terms and links before opening one change request. Nothing changes until it is approved and merged. Unsent proposals stay on this device until sent, discarded or signed out.',
+        roles: ['contributor', 'member', 'steward'],
+        to: '{o}/browse?view=diagram',
+        ask: 'Could you propose the classes and relationships you needed, and was it clear what would change?',
+      },
+    ],
   },
   {
     version: '0.45.0',

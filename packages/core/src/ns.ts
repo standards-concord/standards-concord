@@ -241,14 +241,7 @@ export function namespaceOf(iri: string): string {
   return iri.slice(0, iri.length - localName(iri).length);
 }
 
-/** UpperCamelCase classes, lowerCamelCase properties, no spaces/underscores. */
-export function isValidLocalName(name: string, kind: 'class' | 'property' | 'individual'): boolean {
-  switch (kind) {
-    case 'class': return /^[A-Z][A-Za-z0-9]*$/.test(name);
-    case 'property': return /^[a-z][A-Za-z0-9]*$/.test(name);
-    case 'individual': return /^[A-Za-z0-9][A-Za-z0-9-]*$/.test(name);
-  }
-}
+export { isValidLocalName } from './termRules.js';
 
 /** Splits "VolunteeringOpportunity" / "hasSkill" into "volunteering opportunity" / "has skill". */
 export function humanize(name: string): string {

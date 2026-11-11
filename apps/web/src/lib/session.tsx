@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { SessionInfo } from '@concord/shared';
 import { api, ApiError } from '../api';
+import { clearDiagramProposalStorage } from './diagramProposalStorage';
 
 interface SessionCtx {
   session?: SessionInfo;
@@ -41,6 +42,12 @@ function setActiveAccount(next: string | undefined) {
   for (const fn of accountListeners) work.push(fn());
   accountSettling = Promise.allSettled(work);
 }
+// Initial session discovery on reload restores drafts; later account changes forget all proposals.
+let proposalAccountKnown = false;
+onAccountChange(() => {
+  if (proposalAccountKnown) clearDiagramProposalStorage();
+  proposalAccountKnown = true;
+});
 /** Waits for the last account change's listeners, but never longer than a moment. */
 function accountSettled(): Promise<unknown> {
   return Promise.race([accountSettling, new Promise((r) => setTimeout(r, 1500))]);
