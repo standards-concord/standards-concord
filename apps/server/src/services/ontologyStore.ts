@@ -607,7 +607,7 @@ export const gitStore = {
 
   /** A file stored beside a released version (releases/<version>/<name>) in the working draft, from git. */
   async readReleaseFile(project: Pick<OntologyProject, 'slug'>, version: string, name: string): Promise<string | undefined> {
-    if (!/^[\w.-]+$/.test(version) || !/^[\w.-]+$/.test(name)) return undefined;
+    if (!/^[\w.-]+$/.test(version) || !/^[\w.-]+(?:\/[\w.-]+)*$/.test(name) || name.split('/').some((part) => part === '.' || part === '..')) return undefined;
     await this.ensureSynced(project);
     try {
       return await git(repoDir(project), ['show', `${await this.head(project)}:releases/${version}/${name}`], {}, { raw: true });

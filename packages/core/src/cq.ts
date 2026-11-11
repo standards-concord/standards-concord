@@ -11,6 +11,8 @@ import { owlReasoner, structuralReasoner } from './reasoner.js';
 import { checkImports, type ImportClosure } from './imports.js';
 
 export interface CompetencyQuestion {
+  id?: string;
+  exampleAnswer?: string;
   question: string;
   sparql: string;
   exampleData?: string;
