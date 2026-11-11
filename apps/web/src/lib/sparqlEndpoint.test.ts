@@ -34,6 +34,11 @@ describe('fixed sample queries', () => {
       <https://other.test/Class> a owl:Class . <${ns}Property> a owl:ObjectProperty .`;
     expect(endpointClasses(source, ns)).toEqual([classes[0]]);
   });
+  it('reads RDFS classes too', () => {
+    const source = `@prefix owl: <http://www.w3.org/2002/07/owl#> . @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      <${classes[0]}> a rdfs:Class . <${classes[1]}> a owl:Class .`;
+    expect(endpointClasses(source, ns)).toEqual([classes[0], classes[1]]);
+  });
 });
 
 describe('URL rules and RDF responses', () => {
@@ -148,6 +153,30 @@ describe('bounded CORS transport', () => {
     expect(sample.triples).toBe(4);
     expect(sample.text.match(/_:q0_b_x/g)).toHaveLength(2);
     expect(sample.text.match(/_:q1_b_x/g)).toHaveLength(2);
+  });
+  it('keeps one description of a resource of two sampled classes, so its blank-node values are not doubled', async () => {
+    // Used to go wrong: both class queries returned <r> :address _:x, relabelled per response, so the
+    // merged sample had two addresses where the store has one (a false sh:maxCount failure).
+    const both = `<urn:r> <${type}> <${classes[0]}> .\n<urn:r> <${type}> <${classes[1]}> .\n<urn:r> <urn:address> _:x .\n`;
+    vi.stubGlobal('fetch', vi.fn(async () => response(both)));
+    const sample = await fetchEndpointSample({ ...options(), classes: classes.slice(0, 2) });
+    expect(sample.text.match(/<urn:address>/g)).toHaveLength(1);
+    expect(sample.triples).toBe(3);
+    // Both classes still count as having instances.
+    expect(endpointDrift([], ns, sample.counts).emptyClasses).toEqual([]);
+  });
+  it('leaves out a Turtle response cut short, which could end inside a statement', async () => {
+    // Used to go wrong: a cut after "12" in "12"^^xsd:integer kept "12" as a plain string.
+    const body = `<urn:s> <urn:n> "12"^^<http://www.w3.org/2001/XMLSchema#integer> .`;
+    vi.stubGlobal('fetch', vi.fn(async () => response(body, 'text/turtle')));
+    await expect(fetchEndpointSample({ ...options(), classes: [classes[0]], budgets: { triples: 10, bytes: body.indexOf('^^') } })).rejects.toThrow('sample limit');
+  });
+  it('stops writing a Turtle response out once it passes the budget, however far its prefixes expand', () => {
+    const long = 'https://example.test/' + 'n'.repeat(4000) + '/';
+    const body = `@prefix ex: <${long}> .\n` + Array.from({ length: 2000 }, (_, i) => `ex:s${i} ex:p ex:o .`).join('\n');
+    const lines = responseTriples(body, 0, 'https://store.test/', false, 100_000);
+    expect(lines.slice(0, -1).join('').length).toBeLessThanOrEqual(100_000);
+    expect(lines.length).toBeLessThan(2000);
   });
   it('accepts Turtle responses', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => response(`@prefix s: <${ns}> . <urn:r> a s:A; s:p [ s:q "value" ] .`, 'text/turtle')));

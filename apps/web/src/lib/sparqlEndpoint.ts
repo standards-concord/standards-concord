@@ -3,6 +3,7 @@ import type { DataValidation } from '../api';
 import { parseTurtle, RDF_TYPE, type RdfTerm } from './turtleDoc';
 
 const OWL = 'http://www.w3.org/2002/07/owl#';
+const RDFS_CLASS = 'http://www.w3.org/2000/01/rdf-schema#Class';
 
 /** Only absolute, unambiguous IRIREFs enter our fixed query templates. */
 export function iriRef(iri: string): string {
@@ -34,7 +35,7 @@ export function endpointClasses(turtle: string, namespace: string): string[] {
   const doc = parseTurtle(turtle);
   if (doc.error) throw new Error(`Could not read this version's classes: ${doc.error.message}`);
   const deprecated = new Set(doc.triples.filter((t) => t.p.term.value === `${OWL}deprecated` && ['true', '1'].includes(t.o.term.value)).map((t) => t.s.term.value));
-  return [...new Set(doc.triples.filter((t) => t.s.term.kind === 'iri' && t.s.term.value.startsWith(namespace) && t.p.term.value === RDF_TYPE && t.o.term.value === `${OWL}Class` && !deprecated.has(t.s.term.value)).map((t) => t.s.term.value))].sort();
+  return [...new Set(doc.triples.filter((t) => t.s.term.kind === 'iri' && t.s.term.value.startsWith(namespace) && t.p.term.value === RDF_TYPE && (t.o.term.value === `${OWL}Class` || t.o.term.value === RDFS_CLASS) && !deprecated.has(t.s.term.value)).map((t) => t.s.term.value))].sort();
 }
 
 export class EndpointNetworkError extends Error {}
@@ -50,7 +51,7 @@ export type EndpointSample = {
 };
 
 /** Parse RDF, then serialize terms: blank labels inside literals and IRIs are never touched. */
-export function responseTriples(text: string, queryIndex: number, base: string, partial = false): string[] {
+export function responseTriples(text: string, queryIndex: number, base: string, partial = false, maxChars = Infinity): string[] {
   const doc = parseTurtle(text, { base });
   if (doc.error && !partial) throw new Error(`The endpoint returned RDF that could not be read: ${doc.error.message}`);
   const blanks = new Map<string, string>();
@@ -63,7 +64,18 @@ export function responseTriples(text: string, queryIndex: number, base: string, 
     const literal = JSON.stringify(t.value);
     return t.lang ? `${literal}@${t.lang}` : t.datatype ? `${literal}^^${term({ kind: 'iri', value: t.datatype })}` : literal;
   };
-  return doc.triples.map((t) => `${term(t.s.term)} ${term(t.p.term)} ${term(t.o.term)} .\n`);
+  // Prefixed names expand when written out, so stop writing once the output passes the budget,
+  // rather than first building every line of a response that expands far beyond its own size.
+  const out: string[] = [];
+  let chars = 0;
+  for (const t of doc.triples) {
+    const line = `${term(t.s.term)} ${term(t.p.term)} ${term(t.o.term)} .\n`;
+    chars += line.length;
+    // The line that passes the budget is kept, so the caller sees the sample is full.
+    out.push(line);
+    if (chars > maxChars) break;
+  }
+  return out;
 }
 
 export function responseFormat(contentType: string | null, host: string): 'ntriples' | 'turtle' {
@@ -90,8 +102,18 @@ export async function fetchEndpointSample({ endpoint, graph = '', limit, classes
   const encoder = new TextEncoder();
   let received = 0, written = 0, next = 0, completed = 0;
   let cutShort: EndpointSample['cutShort'];
+  // Which query first described each named resource. A resource of two sampled classes comes back
+  // from both queries; its blank-node values get new labels in each response, so taking both
+  // descriptions would double those values (two addresses where there is one). Only the first is kept.
+  const describedBy = new Map<string, number>();
   const add = (triples: string[], index: number) => {
     for (const line of triples) {
+      const subject = line.startsWith('<') ? line.slice(0, line.indexOf('>') + 1) : '';
+      if (subject) {
+        const first = describedBy.get(subject);
+        if (first === undefined) describedBy.set(subject, index);
+        else if (first !== index) { counts[classes[index]]++; continue; }
+      }
       if (lines.has(line)) { counts[classes[index]]++; continue; }
       const size = encoder.encode(line).length;
       if (lines.size >= budgets.triples) { cutShort = 'triples'; break; }
@@ -140,14 +162,17 @@ export async function fetchEndpointSample({ endpoint, graph = '', limit, classes
         if (format === 'ntriples') {
           const end = pending.lastIndexOf('\n');
           if (end >= 0) {
-            add(responseTriples(pending.slice(0, end + 1), index, url.href), index);
+            add(responseTriples(pending.slice(0, end + 1), index, url.href, false, budgets.bytes - written + 1), index);
             pending = pending.slice(end + 1);
           }
         }
         if (byteStop) cutShort ??= 'bytes';
       }
       pending += decoder.decode();
-      if (!cutShort || format === 'turtle') add(responseTriples(pending, index, url.href, !!cutShort), index);
+      // A Turtle response cut short may end inside a statement ("12" before its ^^xsd:integer), which
+      // would read as a different value, so a cut Turtle response is left out altogether.
+      if (!cutShort) add(responseTriples(pending, index, url.href, false, budgets.bytes - written + 1), index);
+      else if (format === 'turtle') { /* left out: see above */ }
       else if (pending.trim()) {
         // A byte boundary may coincide with a complete final line without a newline.
         // Never salvage an incomplete N-Triples line (including a truncated literal).

@@ -550,7 +550,7 @@ export function ValidateTab() {
                 </label>
                 <label className="block space-y-1 text-sm">
                   <span className="font-medium">Graph (optional)</span>
-                  <Input placeholder="All graphs" value={endpoint.graph} onChange={(e) => setEndpoint({ ...endpoint, graph: e.target.value })} />
+                  <Input placeholder="The endpoint’s default graph" value={endpoint.graph} onChange={(e) => setEndpoint({ ...endpoint, graph: e.target.value })} />
                 </label>
                 <label className="block space-y-1 text-sm">
                   <span className="font-medium">Resources per class</span>

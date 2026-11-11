@@ -163,6 +163,26 @@ test.describe('Validate a SPARQL endpoint', () => {
     await expect(page.getByTestId('validate-editor')).toContainText('https://data.test/role');
   });
 
+  test('a resource of two sampled classes is taken once, so its blank-node values are not doubled', async ({ page }) => {
+    // Used to go wrong: each class query returned the resource's blank-node value under a new label,
+    // so the merged sample had two addresses where the store has one.
+    const both = `<https://data.test/r> <${TYPE}> <${VOL}VolunteeringOpportunity> .\n<https://data.test/r> <${TYPE}> <${VOL}Role> .\n<https://data.test/r> <${VOL}address> _:a .\n`;
+    await page.route('https://sparql.e2e.test/**', (route) => respond(route, [`${VOL}VolunteeringOpportunity`, `${VOL}Role`].includes(classOf(route)) ? both : ''));
+    await open(page);
+    await fetchButton(page).click();
+    await expect(summary(page)).toContainText('(3 triples from');
+    const downloaded = page.waitForEvent('download');
+    await summary(page).getByRole('button', { name: 'Download', exact: true }).click();
+    const text = fs.readFileSync((await (await downloaded).path())!, 'utf8');
+    expect(text.match(/address/g)).toHaveLength(1);
+    // Both classes still count as having instances.
+    const drift = page.getByRole('region', { name: /How the sample uses/ });
+    await expect(drift).toBeVisible();
+    const more = drift.getByRole('button', { name: /^and \d+ more$/ });
+    if (await more.count()) await more.click();
+    await expect(drift).not.toContainText(/vol:Role\b|vol:VolunteeringOpportunity\b/);
+  });
+
   test('Remove supersedes a refetch and a version change checks the same sample without refetching', async ({ page }) => {
     const held = hold(); let slow = false, requests = 0;
     await page.route('https://sparql.e2e.test/**', async (route) => {
