@@ -56,6 +56,7 @@ export const APP_RELEASES: AppRelease[] = [
     version: '0.45.0',
     date: '2026-11-10',
     title: 'Worked examples in every release',
+    pr: 132,
     changes: [
       {
         id: 'worked-examples',
@@ -64,6 +65,22 @@ export const APP_RELEASES: AppRelease[] = [
         detail: 'Public pages show worked examples with answers, queries and downloadable data, frozen with each release. On Validate data, use the version’s example data as a starting point.',
         roles: [],
         to: '/def/volunteering#tab-examples',
+      },
+    ],
+  },
+  {
+    version: '0.44.2',
+    date: '2026-11-10',
+    title: 'The welcome page keeps its videos',
+    changes: [
+      {
+        id: 'welcome-videos-kept',
+        type: 'fix',
+        title: 'The welcome page no longer says its videos are being recorded when they just couldn’t be loaded',
+        detail:
+          'When Concord couldn’t reach the place its videos are kept, the welcome page said they were being recorded for the next release, though nothing was. It now keeps showing the last videos it found, and if it has none, says plainly that they can’t be loaded right now.',
+        roles: [],
+        to: '/welcome',
       },
     ],
   },

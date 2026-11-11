@@ -2,7 +2,7 @@
 # End-to-end check of a live Concord deployment, through the same URL testers use.
 #   ./deploy/smoke.sh https://standards-concord.vercel.app
 # Signs in as a demo tester, then reads, validates (sparq OWL reasoner), queries, interviews,
-# raises a change request and checks the meeting stream and MCP endpoint.
+# raises a change request, checks the meeting stream and MCP endpoint, and checks the welcome page's videos play.
 set -uo pipefail
 base=${1:?Usage: smoke.sh <public url>}
 base=${base%/}
@@ -38,5 +38,7 @@ check 'MCP needs a token' 401 -X POST -H 'Content-Type: application/json' -d '{}
 check 'public ontology page' 200 "$base/def/volunteering"
 check 'version IRI as Turtle' 200 -H 'Accept: text/turtle' "$base/def/volunteering/1.0.0"
 post 'sign out' 200 /api/auth/logout '{}'
+# The welcome page's videos: listed, with captions, and playable where the browser is sent.
+node "$(dirname "$0")/../scripts/check-media.mjs" "$base" || fails=$((fails+1))
 
 [ "$fails" = 0 ] && echo "All checks passed." || { echo "$fails check(s) failed."; exit 1; }

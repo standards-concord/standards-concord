@@ -440,6 +440,76 @@ describe('a Solid account’s private data in its own pod', () => {
   });
 });
 
+describe('private data kept on this server for a Solid account', () => {
+  // Follow-up to step 5e: the cutover brings what Concord kept in the pods the VM made into this server's store
+  // (migrate --pods). For a Solid account that isn't where it belongs, and on Vercel it would never have been read
+  // again (their reads go to their own pod), so it was as good as lost.
+  it('moves into their own pod, never over what is there, and only then leaves this server', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    const row = (rel: string, body: string) => put('privateFiles', { id: `${a.id}/${rel}`, data: Buffer.from(body).toString('base64') }, a.id);
+    await row('use-cases/u.ttl', 'from the VM');
+    await row('interviews/i.ttl', 'transcript');
+    docs.set(`/${a.id}/concord/use-cases/u.ttl`, { body: Buffer.from('theirs'), type: 'text/turtle', etag: '"t"' });
+    refuse = (method, path) => (method === 'PUT' && path.endsWith('/i.ttl') ? 503 : undefined);
+    await expect(solid.carryIntoOwnPod(a.id)).rejects.toThrow(/503/);
+    // What did move is gone from here; the rest waits for the next try.
+    expect(await get('privateFiles', `${a.id}/use-cases/u.ttl`)).toBeUndefined();
+    expect(await get('privateFiles', `${a.id}/interviews/i.ttl`)).toBeDefined();
+    refuse = undefined;
+    expect(await solid.carryIntoOwnPod(a.id)).toBe(1);
+    expect(docs.get(`/${a.id}/concord/use-cases/u.ttl`)?.body.toString()).toBe('theirs');
+    expect(docs.get(`/${a.id}/concord/use-cases/u.from-concord-1.ttl`)?.body.toString()).toBe('from the VM');
+    expect(docs.get(`/${a.id}/concord/interviews/i.ttl`)?.body.toString()).toBe('transcript');
+    expect(await get('privateFiles', `${a.id}/interviews/i.ttl`)).toBeUndefined();
+    expect(await solid.carryIntoOwnPod(a.id)).toBe(0);
+  });
+
+  // Review r1 of the pod copy: when a document's move reached the pod but removing it here failed, the next try found
+  // its own copy in the way, as if someone else's. With the original name and the first three spare names taken, it
+  // then found no free name at all and stopped for good, holding up everything after it.
+  it('recognises a move that reached the pod but was never removed here, and finishes it', async () => {
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    await put('privateFiles', { id: `${a.id}/use-cases/u.ttl`, data: Buffer.from('from the VM').toString('base64') }, a.id);
+    await put('privateFiles', { id: `${a.id}/use-cases/v.ttl`, data: Buffer.from('next').toString('base64') }, a.id);
+    const at = (name: string) => `/${a.id}/concord/use-cases/${name}`;
+    docs.set(at('u.ttl'), { body: Buffer.from('theirs'), type: 'text/turtle', etag: '"0"' });
+    for (const n of [1, 2, 3]) docs.set(at(`u.from-concord-${n}.ttl`), { body: Buffer.from(`theirs ${n}`), type: 'text/turtle', etag: `"${n}"` });
+    // The last try wrote the fourth spare name, then couldn't remove the row.
+    docs.set(at('u.from-concord-4.ttl'), { body: Buffer.from('from the VM'), type: 'text/turtle', etag: '"4"' });
+    expect(await solid.carryIntoOwnPod(a.id)).toBe(2);
+    expect(await get('privateFiles', `${a.id}/use-cases/u.ttl`)).toBeUndefined();
+    expect(docs.get(at('v.ttl'))?.body.toString()).toBe('next');
+    // Nothing of theirs was touched, and no second copy was made.
+    expect(docs.get(at('u.ttl'))?.body.toString()).toBe('theirs');
+    expect([...docs.keys()].filter((k) => k.includes('/use-cases/u.from-concord-'))).toHaveLength(4);
+  });
+
+  it('stays here for Google and GitHub accounts', async () => {
+    const g = await account('github');
+    await put('privateFiles', { id: `${g.id}/use-cases/u.ttl`, data: Buffer.from('x').toString('base64') }, g.id);
+    expect(await solid.carryIntoOwnPod(g.id)).toBe(0);
+    expect(await get('privateFiles', `${g.id}/use-cases/u.ttl`)).toBeDefined();
+  });
+
+  // The testing record's state (kept aside, revision copied) came over from the VM, where it described the VM's pod.
+  // In their own pod nothing had been kept aside, so their own document at that path would have been replaced.
+  it('copies the testing record afresh in their own pod, keeping what is there aside first', async () => {
+    const { mirrorToPod } = await import('../src/services/alpha.js');
+    const a = await account();
+    await keepOwnPodLogin(a.id, await login(a.webId), a.pod);
+    await put('kv', { id: `alpha-history:${a.id}`, versions: [{ version: '0.9.0', firstSeen: '2026-11-01T00:00:00.000Z', lastSeen: '2026-11-01T00:00:00.000Z' }], rev: 3, mirroredRev: 3, keptExisting: true });
+    docs.set(`/${a.id}/concord/alpha/testing.jsonld`, { body: Buffer.from('{"mine":true}'), type: 'application/ld+json', etag: '"m"' });
+    await mirrorToPod((await get('users', a.id))!);
+    const aside = [...docs.keys()].filter((k) => /\/alpha\/testing\.previous-\d+-\d+\.jsonld$/.test(k));
+    expect(aside).toHaveLength(1);
+    expect(docs.get(aside[0]!)?.body.toString()).toBe('{"mine":true}');
+    expect(JSON.parse(docs.get(`/${a.id}/concord/alpha/testing.jsonld`)!.body.toString())).toMatchObject({ '@type': 'concord:AlphaTestingRecord', revision: 3 });
+    expect(await get('kv', `alpha-history:${a.id}`)).toMatchObject({ keptIn: `${a.pod}concord/alpha/`, mirroredRev: 3 });
+  });
+});
+
 describe('finding someone’s pod', () => {
   it('finds the folder above a WebID that says it is a pod, when the profile names none', async () => {
     expect(await storageAbove(`${base}/alice/profile/card#me`)).toBe(`${base}/alice/`);
