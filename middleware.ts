@@ -1,4 +1,4 @@
-import { rewrite } from '@vercel/functions/middleware';
+import { next, rewrite } from '@vercel/functions/middleware';
 
 /**
  * Vercel routing middleware. The web app is static on Vercel; everything that
@@ -6,6 +6,12 @@ import { rewrite } from '@vercel/functions/middleware';
  * WebIDs, public ontology pages and fork documents at /def, OAuth for MCP clients, live meeting streams, the governance clock) is forwarded to the
  * backend at BACKEND_URL (see deploy/aws). Cookies, bodies and streamed
  * responses pass through unchanged, so the browser only ever talks to one origin.
+ *
+ * Since step 5 the API can be a Vercel function in the same deployment (scripts/vercel-build.mjs). Vercel
+ * runs this middleware before the function's routes, so when the function serves the API it must let the
+ * request through. It decides as the build does: the function unless BACKEND_URL is set, and CONCORD_API
+ * (`function` or `backend`) overrides that. A preview of the function while BACKEND_URL is set for
+ * Preview needs CONCORD_API=function at build time and at run time.
  */
 export const config = {
   runtime: 'nodejs',
@@ -26,10 +32,19 @@ export const config = {
   ],
 };
 
+/** Whether this deployment's own function serves the API, decided as scripts/vercel-build.mjs decides it. */
+const functionServesApi = () => (process.env.CONCORD_API ?? (process.env.BACKEND_URL ? 'backend' : 'function')) === 'function';
+
 export default function middleware(request: Request): Response {
+  if (functionServesApi()) {
+    // On to the function, without a visitor's own x-concord-* headers (only this middleware may set them).
+    const headers = new Headers(request.headers);
+    for (const name of [...headers.keys()]) if (name.startsWith('x-concord-')) headers.delete(name);
+    return next({ request: { headers } });
+  }
   const backend = process.env.BACKEND_URL?.replace(/\/$/, '');
   if (!backend) {
-    return Response.json({ error: 'This deployment has no BACKEND_URL set. Add it in the Vercel project settings and redeploy.' }, { status: 503 });
+    return Response.json({ error: 'This deployment has CONCORD_API=backend but no BACKEND_URL. Add BACKEND_URL in the Vercel project settings, or remove CONCORD_API, and redeploy.' }, { status: 503 });
   }
   const url = new URL(request.url);
   const headers = new Headers(request.headers);
