@@ -62,7 +62,7 @@ function buildServer(user: User, agentName: string) {
     },
     {
       instructions:
-        'Concord hosts the Open Data Institute ontologies (strict OWL 2). Use list_ontologies and search_terms before inventing your own terms. When the ontology lacks something you need, or a term does not fit your data, call report_gap: you get an answer straight away (use these existing terms / define a local extension / a change request was opened), and the community decides on any change. ' +
+        'Concord hosts open data standards as strict OWL 2 ontologies. Use list_ontologies and search_terms before inventing your own terms. When the ontology lacks something you need, or a term does not fit your data, call report_gap: you get an answer straight away (use these existing terms / define a local extension / a change request was opened), and the community decides on any change. ' +
         FORK_INSTRUCTIONS,
     },
   );

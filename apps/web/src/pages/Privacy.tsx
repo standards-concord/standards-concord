@@ -35,7 +35,7 @@ export function PrivacyPage() {
           <div className="page-eyebrow mb-1 text-xs font-medium tracking-wide text-muted uppercase">Last updated {PRIVACY_UPDATED}</div>
           <h1 className="page-title text-2xl font-semibold tracking-tight">Privacy policy</h1>
           <p className="mt-3 text-sm leading-relaxed text-muted">
-            Concord is an alpha prototype, built for the Open Data Institute (ODI), where working groups design open data standards together. This page
+            Concord is an alpha prototype from the Open Data Institute (ODI) for working groups that design open data standards together. This page
             explains what Concord collects about you, where it is kept, who it is shared with, and how to have it deleted. If anything here is unclear, write to {mail}.
           </p>
         </header>

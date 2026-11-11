@@ -101,7 +101,7 @@ export const ROLE_INFO: Record<Role, { label: string; description: string }> = {
   member: { label: 'Voting member', description: 'Votes on changes and releases that the policy puts to a vote.' },
   contributor: { label: 'Contributor', description: 'Describes use cases, reports bugs and proposes changes.' },
   agent: { label: 'Agent', description: 'An AI or coding agent acting for someone through the MCP connector.' },
-  odi: { label: 'ODI oversight', description: 'Open Data Institute oversight; powers depend on the governance policy.' },
+  odi: { label: 'ODI oversight', description: 'ODI oversight of the standard; powers depend on the governance policy.' },
 };
 
 export interface Membership {

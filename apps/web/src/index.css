@@ -683,7 +683,6 @@
   color: var(--header-fg);
   border-top: var(--header-rule) solid var(--accent);
 }
-.app-header .app-brand-sub,
 .app-header .app-header-muted {
   color: var(--header-muted);
 }
@@ -710,9 +709,6 @@
 }
 [data-look='odi'] .brand-odi {
   display: block;
-}
-[data-look='odi'] .app-brand-sub {
-  display: none;
 }
 /* On a phone the two logos leave no room for the word, which was cut to "C…"; the Concord mark stands alone. */
 @media (max-width: 439px) {

@@ -369,6 +369,6 @@ export const featureActions: Record<string, Action> = {
   async 'f-outro-card'(c) {
     await c.d.clearHighlight();
     const site = c.shownHub.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    await c.d.chapter({ eyebrow: 'Concord', title: 'Thanks for watching', sub: `Try it: ${site}/welcome` }, 0);
+    await c.d.chapter({ eyebrow: 'Concord · Open Data Institute', title: 'Thanks for watching', sub: `Try it: ${site}/welcome` }, 0);
   },
 };

@@ -5,7 +5,7 @@
  * so components never name a look. `?look=<id>` in any URL switches and remembers it,
  * which is how reviewers compare them on the live site.
  *
- * `odi` is the Open Data Institute's own brand and the default for the Open Data Institute. The
+ * `odi` is the Open Data Institute's own brand and the default look. The
  * others carry no ODI branding, so a deployment outside the ODI can pick one of them instead.
  */
 export const LOOKS = [

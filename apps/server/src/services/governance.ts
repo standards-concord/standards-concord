@@ -121,7 +121,7 @@ export const GOVERNANCE_TEMPLATES: Record<GovernanceTemplateId, GovernancePolicy
     templateId: 'odi-stewarded',
     name: 'ODI stewarded',
     description:
-      'For standards the ODI stewards through the hub. The community works as in steward-led, and ODI oversight can veto any change and must approve major changes, releases and ownership transfers.',
+      'For standards the ODI stewards. The community works as in steward-led, and ODI oversight can veto any change and must approve major changes, releases and ownership transfers.',
     changes: {
       patch: rule({ approverRoles: ['steward', 'editor'], minApprovals: 1 }),
       minor: rule({ minApprovals: 2, reviewPeriodDays: 3, vetoRoles: ['owner', 'odi'] }),

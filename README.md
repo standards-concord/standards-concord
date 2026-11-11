@@ -1,6 +1,6 @@
 # Concord
 
-A prototype platform for designing data standards together, built for the Open Data Institute. Every standard is a strict OWL 2 ontology that is kept logically consistent and FAIR, and the whole lifecycle from a first conversation to a published release runs asynchronously, with AI help at each step.
+A prototype platform from the Open Data Institute (ODI) for designing data standards together. Every standard is a strict OWL 2 ontology that is kept logically consistent and FAIR, and the whole lifecycle from a first conversation to a published release runs asynchronously, with AI help at each step.
 
 - **Gather requirements three ways.** An AI interviewer works through a structured use case and asks for competency questions with example answers. Google Meet transcripts can be uploaded, or a co-facilitator bot can join a live call, invited by email like any other guest, and raise clarifying questions (in the Meet chat, if you want). Coding agents such as Claude Code and Codex connect over MCP, read the ontology and report missing or ill-fitting concepts.
 - **Turn requirements into changes.** Use cases are synthesised into a change request with structured edits and SPARQL tests for each competency question. The model never writes RDF directly: it proposes terms, and the server compiles them into validated edit operations.
@@ -115,5 +115,4 @@ Every feature comes with Playwright tests, and **every bug fix comes with a Play
 
 - [Alpha walkthrough](docs/alpha-walkthrough.md)
 - [Narrated walkthrough video](walkthrough/README.md): `pnpm walkthrough` records it from an editable script
-- [Questions for ODI colleagues](docs/odi-questions.md)
 - Research: [ontology practice, requirements, versioning and governance](docs/research/ontology-practice.md), [visual views of an ontology](docs/research/ontology-visualisation.md), [technical options](docs/research/tech.md), [ODI playbooks](docs/research/playbooks.md)

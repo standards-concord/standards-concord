@@ -122,7 +122,7 @@ export function HubPage() {
   return (
     <Page wide>
       <PageHeader
-        eyebrow="Open Data Institute"
+        eyebrow="Open data standards"
         title="Ontologies"
         subtitle="Shared vocabularies designed in the open: use cases first, every change validated, classified and governed."
         actions={

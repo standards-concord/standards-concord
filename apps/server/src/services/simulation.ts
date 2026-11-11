@@ -131,7 +131,7 @@ async function seedHistory() {
   const project = await createProject(
     {
       title: 'Volunteering opportunities',
-      description: 'A shared standard for publishing volunteering opportunities: who offers them, the roles, skills, sessions and locations involved, and how people apply. One of the Open Data Institute launch standards.',
+      description: 'A shared standard for publishing volunteering opportunities: who offers them, the roles, skills, sessions and locations involved, and how people apply.',
       prefix: 'vol',
       domain: 'volunteering in the UK (charities, councils, volunteering platforms)',
       governanceTemplate: 'working-group',
@@ -433,7 +433,7 @@ function scriptedReaction(p: PersonaSpec, cr: ChangeRequest): { decision: 'appro
     case 'priya':
       return { decision: 'approve', comment: 'Thanks all. Approving from the chair.', vote: 'yes' };
     case 'daniel':
-      return { decision: 'comment', comment: 'Checked against the hub quality bar: FAIR metadata and licence are fine.', vote: 'abstain' };
+      return { decision: 'comment', comment: 'Checked against the ODI quality bar: FAIR metadata and licence are fine.', vote: 'abstain' };
     default:
       return { decision: 'comment', comment: 'Looks reasonable.', vote: 'abstain' };
   }

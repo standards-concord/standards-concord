@@ -251,7 +251,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <span className="brand-odi h-6 w-px shrink-0 bg-line-strong" aria-hidden />
             <Logo className="shrink-0" />
             <span className="app-brand-name truncate text-sm font-semibold tracking-tight">
-              Concord<span className="app-brand-sub hidden sm:inline"></span>
+              Concord
             </span>
             <span className="rounded bg-warn-soft px-1.5 py-0.5 text-xs font-semibold text-warn">Alpha</span>
           </Link>
@@ -271,7 +271,7 @@ export function Shell({ children }: { children: ReactNode }) {
         {children}
       </main>
       <footer className="border-t border-line py-6 text-center text-xs text-subtle">
-        Concord is an alpha prototype by the Open Data Institute Standards Platform. Private data is saved to your own Solid pod, or to Concord’s private storage when no pod can be used. ·{' '}
+        Concord is an alpha prototype from the Open Data Institute (ODI). Private data is saved to your own Solid pod, or to Concord’s private storage when no pod can be used. ·{' '}
         <Link to="/privacy" className="underline-offset-2 hover:text-fg hover:underline">
           Privacy policy
         </Link>

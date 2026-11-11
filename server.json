@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.standards-concord/concord",
   "title": "Concord",
-  "description": "Read, query and check data against Open Data Institute ontologies (OWL, LinkML), and report gaps.",
-  "version": "0.1.1",
+  "description": "Read, query and check data against Concord's open data ontologies (OWL, LinkML), and report gaps.",
+  "version": "0.1.2",
   "websiteUrl": "https://standards-concord.vercel.app/connect",
   "icons": [
     {
