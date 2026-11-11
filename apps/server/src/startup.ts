@@ -101,6 +101,8 @@ export async function defaultStartupTasks(): Promise<StartupTask[]> {
             run: async () => {
               const counts = await refreshDemoCopy();
               if (Object.values(counts).some(Boolean)) console.log(`[seed] refreshed demo copy: ${Object.entries(counts).map(([name, count]) => `${count} ${name}`).join(', ')}`);
+              // An ontology whose repository couldn't be read is tried again by the next start.
+              return counts.unreadable === 0;
             },
           },
         ]

@@ -1,13 +1,14 @@
 import type { ChangeRequest, OntologyProject, Release, Review, User, Vote } from '@concord/shared';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
-import { closeDb, get, list, openDb, put } from '../src/db.js';
+import { closeDb, get, list, openDb, put, remove } from '../src/db.js';
 import { PAGE_GENERATOR } from '../src/public/render.js';
 import { refreshReleasePages } from '../src/public/routes.js';
-import { LEGACY_DEMO_COPY as copy, refreshDemoCopy } from '../src/services/demoCopy.js';
+import { type DemoCopy, LEGACY_DEMO_COPY, refreshDemoCopy } from '../src/services/demoCopy.js';
 import { createProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { PERSONAS } from '../src/services/personas.js';
+import { DEMO_REVIEW_COMMENT } from '../src/services/simulation.js';
 import { createUser } from '../src/services/users.js';
 import { defaultStartupTasks, runStartupTasks } from '../src/startup.js';
 
@@ -18,18 +19,26 @@ beforeAll(async () => {
 });
 afterAll(() => closeDb());
 
+// Stand-ins for the retired wording, so a failing assertion never prints that wording in a public CI log.
+const copy: DemoCopy = {
+  description: { from: ' One of the retired launch standards.', to: '' },
+  readme: { from: 'Managed on the retired platform with Concord.', to: 'Managed with Concord.' },
+  comment: { from: 'Checked against the retired quality bar.', to: DEMO_REVIEW_COMMENT },
+};
+const refresh = () => refreshDemoCopy(copy);
 const description = 'An owner’s description.';
 const oldDescription = description + copy.description.from;
 const oldReadme = `# Demo\n\n${oldDescription}\n\n${copy.readme.from}\n\nOwner’s extra notes.\n`;
 const newReadme = `# Demo\n\n${description}\n\n${copy.readme.to}\n\nOwner’s extra notes.\n`;
 let n = 0;
-async function project(owner: User, demo: boolean, desc = oldDescription) {
+async function project(owner: User, demo: boolean, desc = oldDescription, legacy = copy) {
   const p = await createProject({
     title: `Demo copy ${++n}`, description: desc, prefix: 'ex', demo,
     // The real demo uses a supplied ontology, whose metadata has its own description.
     seedTurtle: '@prefix owl: <http://www.w3.org/2002/07/owl#> . <urn:demo:> a owl:Ontology .',
   }, owner);
-  await ontologyStore.updateRepoFile(p, 'README.md', oldReadme, 'Seed legacy demo wording');
+  const readme = legacy === copy ? oldReadme : `# Demo\n\n${desc}\n\n${legacy.readme.from}\n`;
+  await ontologyStore.updateRepoFile(p, 'README.md', readme, 'Seed legacy demo wording');
   return p;
 }
 
@@ -61,12 +70,12 @@ describe('refreshing persisted demo copy', () => {
   it('updates only demo records, preserves history, and changes nothing on a second run', async () => {
     const people = await Promise.all(PERSONAS.map((p) => createUser({
       name: p.name, simulated: true, provider: 'demo', subject: `persona:${p.key}`,
-      persona: p.key === 'priya' ? copy.priya.from : p.key === 'daniel' ? copy.daniel.from : p.persona,
+      persona: p.key === 'priya' || p.key === 'daniel' ? `An older description of ${p.name}.` : p.persona,
     })));
     const priya = people[0];
     const daniel = people.find((u) => u.name === 'Daniel Brooks')!;
-    const real = await createUser({ name: priya.name, provider: 'demo', subject: 'persona:priya', persona: copy.priya.from });
-    const unknown = await createUser({ name: 'Another simulation', simulated: true, provider: 'demo', subject: 'persona:unknown', persona: copy.daniel.from });
+    const real = await createUser({ name: priya.name, provider: 'demo', subject: 'persona:priya', persona: 'An older description of Priya.' });
+    const unknown = await createUser({ name: 'Another simulation', simulated: true, provider: 'demo', subject: 'persona:unknown', persona: 'An older description of Daniel.' });
     const demo = await project(priya, true);
     const other = await project(real, false);
     const edited = await project(priya, true, `${oldDescription} Owner added a sentence.`);
@@ -77,7 +86,7 @@ describe('refreshing persisted demo copy', () => {
     const oldHead = await ontologyStore.head(demo);
     const turtle = await ontologyStore.readWorkingText(demo);
 
-    expect(await refreshDemoCopy()).toMatchObject({ personas: 2, descriptions: 1, readmes: 2, reviews: 1, votes: 1, timeline: 2 });
+    expect(await refresh()).toMatchObject({ personas: 2, descriptions: 1, readmes: 2, reviews: 1, votes: 1, timeline: 2 });
     for (const [i, p] of PERSONAS.entries()) expect((await get<User>('users', people[i].id))?.persona).toBe(p.persona);
     expect(await get('users', real.id)).toEqual(real);
     expect(await get('users', unknown.id)).toEqual(unknown);
@@ -101,7 +110,8 @@ describe('refreshing persisted demo copy', () => {
     }
     const head = await ontologyStore.head(demo);
     const records = await list('ontologies');
-    expect(await refreshDemoCopy()).toEqual({ personas: 0, descriptions: 0, readmes: 0, reviews: 0, votes: 0, timeline: 0, releasePages: 0 });
+    // The shared per-worker database may hold demo ontologies from other test files whose repositories are gone.
+    expect(await refresh()).toEqual({ personas: 0, descriptions: 0, readmes: 0, reviews: 0, votes: 0, timeline: 0, releasePages: 0, unreadable: expect.any(Number) });
     expect(await ontologyStore.head(demo)).toBe(head);
     expect(await list('ontologies')).toEqual(records);
   });
@@ -132,7 +142,7 @@ describe('refreshing persisted demo copy', () => {
 
     // An earlier start-up may already have recorded release-pages as done for this version.
     await put('kv', { id: 'startup:release-pages', appVersion: 'test', deployment: 'test', at: owner.createdAt });
-    expect((await refreshDemoCopy()).releasePages).toBe(1);
+    expect((await refresh()).releasePages).toBe(1);
     expect(await get('kv', 'startup:release-pages')).toBeUndefined();
     // demo-copy itself writes no release files: the release-pages task (which runs after it) does.
     expect(await ontologyStore.readReleaseFile(demo, '1.0.0', 'index.html')).toBe(oldPage);
@@ -144,7 +154,7 @@ describe('refreshing persisted demo copy', () => {
     expect(await ontologyStore.readReleaseFile(demo, '1.0.0', 'requirements.json')).toBe(snapshot);
     expect(await ontologyStore.readReleaseFile(demo, '1.0.0', 'examples.json')).toBe('[]\n');
     for (const r of releases) expect(await get('releases', r.id)).toEqual(r);
-    expect((await refreshDemoCopy()).releasePages).toBe(0);
+    expect((await refresh()).releasePages).toBe(0);
   });
 
   it('registers the task after the seed and serialises concurrent startup instances', async () => {
@@ -155,10 +165,16 @@ describe('refreshing persisted demo copy', () => {
     // release-pages re-renders what demo-copy marks stale, so it must run after it.
     expect(tasks.findIndex((t) => t.name === 'release-pages')).toBeGreaterThan(tasks.findIndex((t) => t.name === 'demo-copy'));
     const owner = await createUser({ name: 'Concurrency owner', provider: 'demo', subject: 'copy-concurrency-owner' });
-    const demo = await project(owner, true);
+    // The task repairs the real retired wording; compare without printing it.
+    const demo = await project(owner, true, description + LEGACY_DEMO_COPY.description.from, LEGACY_DEMO_COPY);
     const head = await ontologyStore.head(demo);
+    // An earlier run on the same database (CI runs the server tests twice, once per ontology store) recorded the task as done.
+    await remove('kv', 'startup:demo-copy');
     await Promise.all([runStartupTasks([copyTask!], { appVersion: '0.48.1' }), runStartupTasks([copyTask!], { appVersion: '0.48.1' })]);
-    expect((await get<OntologyProject>('ontologies', demo.id))?.description).toBe(description);
+    const stored = await get<OntologyProject>('ontologies', demo.id);
+    expect(stored?.description === description, 'the description still ends with the retired sentence').toBe(true);
+    const readme = await ontologyStore.readRepoFile(demo, 'README.md');
+    expect(readme === `# Demo\n\n${description}\n\n${LEGACY_DEMO_COPY.readme.to}\n`, 'the README still has the retired wording').toBe(true);
     expect((await ontologyStore.commitOf(demo, await ontologyStore.head(demo))).parent).toBe(head);
     expect(await runStartupTasks([copyTask!], { appVersion: '0.48.1' })).toEqual([]);
   });
@@ -177,15 +193,31 @@ describe('refreshing persisted demo copy', () => {
       return content;
     });
     try {
-      await expect(refreshDemoCopy()).rejects.toMatchObject({ status: 409 });
+      await expect(refresh()).rejects.toMatchObject({ status: 409 });
     } finally {
       spy.mockRestore();
     }
     expect((await get<OntologyProject>('ontologies', demo.id))?.description).toBe(description);
     expect(await ontologyStore.readRepoFile(demo, 'README.md')).toBe(ownerReadme);
     const head = await ontologyStore.head(demo);
-    expect((await refreshDemoCopy()).readmes).toBe(0);
+    expect((await refresh()).readmes).toBe(0);
     expect(await ontologyStore.head(demo)).toBe(head);
+  });
+
+  it('keeps repairing other demo ontologies when one demo ontology’s repository can’t be read', async () => {
+    // In CI the database-backed store run reused demo ontologies the git-store run left behind; reading the first
+    // one's README threw, so no demo ontology after it was repaired and the start-up task failed every time.
+    const owner = await createUser({ name: 'Unreadable owner', provider: 'demo', subject: 'copy-unreadable-owner' });
+    const template = await project(owner, false, description);
+    const missing = { ...template, id: `copy-unreadable-${++n}`, slug: `copy-unreadable-${n}`, demo: true, description: oldDescription };
+    await put('ontologies', missing);
+    const demo = await project(owner, true);
+    const counts = await refresh();
+    expect(counts.unreadable).toBeGreaterThanOrEqual(1);
+    expect((await get<OntologyProject>('ontologies', demo.id))?.description).toBe(description);
+    expect(await ontologyStore.readRepoFile(demo, 'README.md')).toBe(newReadme);
+    // Its database record is still repaired; its README waits for a run that can read it.
+    expect((await get<OntologyProject>('ontologies', missing.id))?.description).toBe(description);
   });
 
   it('does not register a copy refresh outside demo mode', async () => {
