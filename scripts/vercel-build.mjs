@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { outputConfig } from './vercel-output.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const out = path.join(root, '.vercel/output');
@@ -133,25 +134,5 @@ if (mb > 240) throw new Error('The function is too close to Vercel’s 250 MB li
 
 /* ----------------------------------------------------------------- routing */
 
-// What the API answers (the same paths middleware.ts forwarded to the VM). Everything else is the web app.
-const API = '^/(api(/.*)?|auth/.*|mcp(/.*)?|people/.*|def(/.*)?|healthz|\\.well-known/.*|authorize|token|register|revoke)$';
-fs.writeFileSync(
-  path.join(out, 'config.json'),
-  JSON.stringify(
-    {
-      version: 3,
-      routes: [
-        { src: API, dest: '/api' },
-        { src: '^/assets/(.*)$', headers: { 'Cache-Control': 'public, max-age=31536000, immutable' }, continue: true },
-        { src: '^/avatars/(.*)$', headers: { 'Cache-Control': 'public, max-age=86400' }, continue: true },
-        { handle: 'filesystem' },
-        { src: '^/.*$', dest: '/index.html' },
-      ],
-      // Once a day (the Hobby plan's limit): every scheduled job, due or not (docs/deploy.md, Scheduled work).
-      crons: [{ path: '/api/cron/daily', schedule: '17 4 * * *' }],
-    },
-    null,
-    2,
-  ),
-);
+fs.writeFileSync(path.join(out, 'config.json'), JSON.stringify(outputConfig(), null, 2));
 console.log(`Wrote ${path.relative(root, out)}.`);

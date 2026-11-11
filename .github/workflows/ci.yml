@@ -149,6 +149,44 @@ jobs:
             test-results
           retention-days: 7
 
+  # Several Vercel instances share Neon: exercise that boundary through the browser,
+  # using two processes serving the same function package and a fresh Postgres database.
+  e2e-vercel:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: concord_e2e
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+        with:
+          playwright: 'true'
+      - name: Build the web app
+        run: pnpm --filter @concord/web build
+      - name: Playwright (two packaged API servers on one database)
+        run: pnpm exec playwright test -c e2e --project=local --retries=0 e2e/meetings.spec.ts e2e/two-servers.spec.ts
+        env:
+          E2E_MODE: preview
+          E2E_API: vercel
+          E2E_DATABASE_URL: postgres://postgres:postgres@localhost:5432/concord_e2e
+          E2E_TWO_SERVERS: '1'
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-vercel
+          path: |
+            playwright-report
+            test-results
+          retention-days: 7
+
   # Signing in with a WebID and admins reading testers' feedback in their pods, against a
   # real Community Solid Server (the same major version and WAC setup the deployment runs).
   e2e-solid:
@@ -206,7 +244,7 @@ jobs:
   # minutes, so merging to main is the deploy. Only main builds an image (and a manual
   # run, which tags the image with its branch).
   image:
-    needs: [test, e2e, e2e-solid]
+    needs: [test, e2e, e2e-vercel, e2e-solid]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 20
