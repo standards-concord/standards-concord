@@ -4,11 +4,18 @@
  * latest release's copies from our own origin, so the page can embed them with captions
  * (cross-origin caption tracks need CORS, which GitHub doesn't send) and seek within them.
  *
- *   MEDIA_REPO  owner/name of the repository whose releases hold the videos (the newest release that has them is used)
+ *   MEDIA_REPO  owner/name of the public repository whose releases hold the videos (the newest release that has them
+ *               is used; default standards-concord/concord-media)
  *   MEDIA_DIR   serve files from this local folder instead (tests, or a recording you just made)
  *
  * Downloads are cached in the data directory per release tag, so a file is fetched from
  * GitHub once per release.
+ *
+ * The page must never lose its videos (it did on 2026-11-10, when the repository went private and GitHub answered
+ * "not found"). So the last complete set found is kept, in memory and in the database: when GitHub can't be read, or
+ * no longer lists a release with a complete set, that set is served instead, as long as its videos still play. Only
+ * when there has never been one does the index come back empty; a failed lookup with nothing that still plays says
+ * `unavailable` (the route sets it).
  */
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -16,6 +23,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { config } from '../config.js';
+import { get, put } from '../db.js';
 
 /** The two main videos with their captions and transcripts. */
 export const MEDIA_FILES = [
@@ -43,9 +51,12 @@ export interface MediaIndex {
   /** The release the videos were recorded for; null when serving a local folder or none exists. */
   release: { tag: string; name?: string; publishedAt?: string; url: string } | null;
   files: { name: string; size: number; url: string }[];
+  /** The videos couldn't be looked up and none were kept from before (the route sets this). */
+  unavailable?: true;
 }
 
-const repo = () => process.env.MEDIA_REPO ?? 'standards-concord/standards-concord';
+// A public repository of its own, so the videos stay playable whatever the main repository's visibility.
+const repo = () => process.env.MEDIA_REPO ?? 'standards-concord/concord-media';
 const localDir = () => (process.env.MEDIA_DIR ? path.resolve(process.env.MEDIA_DIR) : undefined);
 const cacheRoot = () => path.join(config.dataDir, 'media');
 const INDEX_TTL_MS = 10 * 60 * 1000;
@@ -89,8 +100,10 @@ async function fromGitHub(): Promise<{ index: MediaIndex; assets: Map<string, As
       headers: { accept: 'application/vnd.github+json', 'user-agent': 'concord-media' },
       signal: AbortSignal.timeout(8000),
     });
-    if (res.status === 404) break;
-    if (!res.ok) throw new Error(`GitHub releases: HTTP ${res.status}`);
+    // A repository that has no releases lists none; "not found" means it can't be read (gone private, renamed, or
+    // MEDIA_REPO is wrong), which is a failed lookup, not "no videos". Past the first page, it is just the end.
+    if (res.status === 404 && page > 1) break;
+    if (!res.ok) throw new Error(`GitHub releases of ${repo()}: HTTP ${res.status}`);
     const releases = (await res.json()) as GitHubRelease[];
     r = releases.find(complete);
     if (releases.length < 100) break;
@@ -148,13 +161,110 @@ function fromFolder(dir: string): MediaIndex {
   return { release: null, files };
 }
 
+/** The last complete set of videos found, kept so a failed or empty lookup doesn't empty the page. */
+interface LastGood {
+  id: typeof LAST_GOOD;
+  repo: string;
+  index: MediaIndex;
+  assets: [string, Asset][];
+  savedAt: string;
+}
+const LAST_GOOD = 'media-last-good';
+
+async function keep(found: { index: MediaIndex; assets: Map<string, Asset> }) {
+  const was = await get<LastGood>('kv', LAST_GOOD).catch(() => undefined);
+  const assets = [...found.assets];
+  if (was?.repo === repo() && JSON.stringify([was.index, was.assets]) === JSON.stringify([found.index, assets])) return;
+  await put<LastGood>('kv', { id: LAST_GOOD, repo: repo(), index: found.index, assets, savedAt: new Date().toISOString() });
+}
+
+type Found = { index: MediaIndex; assets: Map<string, Asset> };
+
+/**
+ * The newest complete set this instance has found, in memory: the database copy is for other and later instances,
+ * and a write to it can fail, so a failed save must never bring back an older set here.
+ */
+let latest: { repo: string; found: Found } | undefined;
+
+/** The set kept from before, if it came from the repository we read now (another one's links may not work). */
+async function kept(): Promise<Found | undefined> {
+  if (latest?.repo === repo()) return latest.found;
+  const was = await get<LastGood>('kv', LAST_GOOD).catch(() => undefined);
+  if (!was || was.repo !== repo() || !was.index?.release) return undefined;
+  return { index: was.index, assets: new Map(was.assets) };
+}
+
+/**
+ * Whether a kept set still plays from GitHub: its tour's MP4 answers a one-byte request. A release that
+ * was deleted, or a repository that went private, would otherwise leave the page showing players that can't play.
+ */
+async function stillPlays(set: Found): Promise<boolean> {
+  const mp4 = set.assets.get('concord-walkthrough.mp4');
+  if (!mp4) return false;
+  try {
+    const res = await fetch(mp4.url, { headers: { range: 'bytes=0-0' }, redirect: 'follow', signal: AbortSignal.timeout(8000) });
+    await res.body?.cancel().catch(() => undefined);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether this server can play a kept set from its own disk: it serves videos itself (not on Vercel) and has both
+ * videos and their captions downloaded already. Then an outage at GitHub, downloads included, changes nothing.
+ */
+function servedFromDisk(set: Found): boolean {
+  if (redirectsVideos()) return false;
+  return REQUIRED.every((name) => {
+    const asset = set.assets.get(name);
+    return !!asset && !!regularFileIn(path.join(cacheRoot(), asset.key), name, cacheRoot());
+  });
+}
+
+/** The kept set, if it still plays; otherwise the lookup has failed. */
+async function fallBack(why: Error): Promise<Found> {
+  const before = await kept();
+  if (!before) throw why;
+  if (!servedFromDisk(before) && !(await stillPlays(before))) throw new Error(`${why.message}; the videos of ${before.index.release?.tag} kept from before no longer play either`);
+  console.warn(`media: ${why.message}; serving the videos of ${before.index.release?.tag} kept from before`);
+  return before;
+}
+
+/** The kept set, for a demo reset to put back after it wipes the database (the videos aren't demo data). */
+export async function snapshotKeptMedia(): Promise<() => Promise<void>> {
+  const was = await get<LastGood>('kv', LAST_GOOD);
+  return async () => {
+    if (was) await put('kv', was);
+  };
+}
+
+/** What GitHub lists now, or else the last complete set found, as long as it still plays. */
+async function lookup(): Promise<Found> {
+  let found: Found;
+  try {
+    found = await fromGitHub();
+  } catch (err) {
+    return fallBack(err as Error);
+  }
+  if (found.index.release) {
+    latest = { repo: repo(), found };
+    // Remembering it is a bonus: a read-only or busy database mustn't stop the page showing the videos.
+    await keep(found).catch((err) => console.warn(`media: couldn't keep the video list: ${(err as Error).message}`));
+    return found;
+  }
+  // No release lists a complete set any more (say, the newest recording failed and the older release was deleted).
+  if (!(await kept())) return found;
+  return fallBack(new Error(`no release of ${repo()} has a complete set of videos`));
+}
+
 /** Which videos exist, and for which release. Cached for ten minutes. */
 export async function mediaIndex(): Promise<MediaIndex> {
   const dir = localDir();
   if (dir) return fromFolder(dir);
   if (!cached || Date.now() - cached.at > INDEX_TTL_MS) {
     const assets = new Map<string, Asset>();
-    const index = fromGitHub().then((r) => {
+    const index = lookup().then((r) => {
       for (const [k, v] of r.assets) assets.set(k, v);
       return r.index;
     });
