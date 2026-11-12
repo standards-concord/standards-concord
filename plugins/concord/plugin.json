@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "concord",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read, query and check data against Concord's open data ontologies (OWL, LinkML), and report what's missing. Sign in with your Concord account on first use.",
   "author": { "name": "Concord (Open Data Institute)" },
   "homepage": "https://standards-concord.vercel.app/connect",

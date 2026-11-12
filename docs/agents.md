@@ -13,6 +13,16 @@ In Claude (web, desktop, mobile, and Claude Code when signed in with a Claude ac
 
 This repo is also a plugin marketplace for Claude Code (`/plugin marketplace add standards-concord/standards-concord`) and Codex (`codex plugin marketplace add standards-concord/standards-concord`), and `server.json` is its [MCP Registry](https://registry.modelcontextprotocol.io) entry. **When Concord moves domain**, run `node scripts/public-url.mjs https://<new-origin>` and merge: that updates every listing and republishes the registry entry. The site itself needs no change: every URL it shows and every OAuth endpoint is derived from the address it is served on (set `CONCORD_PROXY_SECRET` in Vercel and on the backend so the backend trusts the forwarded address; see [deploy.md](deploy.md)). Installed plugins follow when they update, and agents sign in again at the new address, so keep the old one working for a while. Listing details and what to submit where: [mcp-listings.md](mcp-listings.md).
 
+## Ontology development skills
+
+The plugin also ships three [Agent Skills](https://agentskills.io) in [`plugins/concord/skills`](../plugins/concord/skills). The first two are general ontology development skills that don't depend on Concord, so they can be shared with anyone who builds OWL ontologies; the third adds what is specific to Concord:
+
+- [`ontology-term-drafting`](../plugins/concord/skills/ontology-term-drafting/SKILL.md) (general): writing and reviewing terms (reuse first, naming, labels, genus–differentia definitions, placement, alignment, code lists, patch/minor/major changes to published terms).
+- [`ontology-checking`](../plugins/concord/skills/ontology-checking/SKILL.md) (general): checking an ontology layer by layer (lint, OWL 2 DL reasoning with sparq or another reasoner, imports, FAIR, competency questions, SHACL, data validation, change impact).
+- [`concord-change-governance`](../plugins/concord/skills/concord-change-governance/SKILL.md) (Concord): the MCP tools, `report_gap` vs `propose_change` vs forks, how Concord checks and classifies a change, checking data, following a change request, governance templates, reviewing and releases.
+
+The rules come from `packages/core` (lint, classifier, SHACL derivation), the modelling prompts in `apps/server/src/llm/prompts.ts`, the MCP tool descriptions and the governance templates. When one of those changes, update the matching skill, and keep Concord specifics out of the two general ones. To use a skill without the plugin, upload its folder as a zip in Claude's settings (Capabilities → Skills).
+
 ## Development forks
 
 Need a term the standard doesn't have yet? Fork it, add the term, and keep building while the change is reviewed. A fork is your own pre-release of the ontology:
