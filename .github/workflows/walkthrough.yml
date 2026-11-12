@@ -136,16 +136,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          MEDIA_REPO: ${{ vars.MEDIA_REPO || 'standards-concord/concord-media' }}
         run: |
           # The newest release that kept its narration (a re-run for a release reuses its own).
+          # This repository's releases come first; the public media repository that /welcome
+          # plays from is the fallback, since its releases also keep the narration (and a
+          # fresh copy of this repository has no releases of its own).
           mkdir -p walkthrough/.cache/voice
-          for t in $(gh release list --repo "$REPO" --limit 10 --json tagName --jq '.[].tagName'); do
-            if gh release download "$t" --repo "$REPO" --pattern walkthrough-voice.tar.gz --dir "$RUNNER_TEMP" --clobber 2>/dev/null; then
-              bash walkthrough/unpack-voice.sh "$RUNNER_TEMP/walkthrough-voice.tar.gz" walkthrough/.cache/voice
-              echo "Restored narration from $t"
-              break
-            fi
+          restored=
+          for repo in "$REPO" "$MEDIA_REPO"; do
+            for t in $(gh release list --repo "$repo" --limit 10 --json tagName --jq '.[].tagName' 2>/dev/null); do
+              if gh release download "$t" --repo "$repo" --pattern walkthrough-voice.tar.gz --dir "$RUNNER_TEMP" --clobber 2>/dev/null; then
+                bash walkthrough/unpack-voice.sh "$RUNNER_TEMP/walkthrough-voice.tar.gz" walkthrough/.cache/voice
+                echo "Restored narration from $repo $t"
+                restored=1
+                break 2
+              fi
+            done
           done
+          [ -n "$restored" ] || echo "::notice::No release kept its narration, so every paragraph will be voiced."
       # Narration from a run that attached nothing (the features video is only ever recorded
       # on demand) is kept only in that run's artifact. seed-voice.sh accepts it only from a
       # walkthrough.yml run of this repository started by hand or by a release, and adds only
