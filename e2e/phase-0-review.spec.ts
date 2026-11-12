@@ -1,0 +1,164 @@
+import type { ChangeRequestDetail, OntologyProject, Role } from '@concord/shared';
+import type { Page } from '@playwright/test';
+import { test, expect, demoOntology, settle, signIn, uniq } from './fixtures';
+
+async function person(page: Page, label: string, role: Role) {
+  const { user } = await signIn(page, { name: `${label} ${uniq()}`, role });
+  const cookies = (await page.context().cookies()).filter((c) => c.name === 'concord_session');
+  return { ...user, async restore() {
+    await page.context().clearCookies({ name: 'concord_session' });
+    await page.context().addCookies(cookies);
+  } };
+}
+
+async function project(page: Page) {
+  const response = await page.request.post('/api/ontologies', { data: { title: `Review regressions ${uniq()}`, description: 'Checks who made each decision.', prefix: `rr${uniq()}` } });
+  expect(response.status()).toBe(201);
+  const o = await response.json() as OntologyProject;
+  o.governance.requireValidation = false;
+  o.governance.automation.autoDraftRelease = false;
+  for (const rule of Object.values(o.governance.changes)) Object.assign(rule, {
+    minApprovals: 1, reviewPeriodDays: 0, autoMerge: false, lazyConsensus: false,
+    approverRoles: ['owner', 'editor', 'reviewer'], vetoRoles: ['owner'], vote: undefined,
+  });
+  expect((await page.request.put(`/api/ontologies/${o.id}/governance`, { data: { policy: o.governance } })).ok()).toBeTruthy();
+  return o;
+}
+
+async function addMember(page: Page, id: string, userId: string, roles: Role[]) {
+  expect((await page.request.put(`/api/ontologies/${id}/members/${userId}`, { data: { roles } })).ok()).toBeTruthy();
+}
+
+async function change(page: Page, o: OntologyProject) {
+  const response = await page.request.post(`/api/ontologies/${o.id}/change-requests`, { data: {
+    title: `Reviewed change ${uniq()}`, description: 'Check who made the decision.', kind: 'editorial',
+    ops: [{ op: 'addClass', localName: 'Reviewed', label: 'Reviewed', definition: 'A reviewed term.' }],
+  } });
+  expect(response.status()).toBe(201);
+  return response.json() as Promise<ChangeRequestDetail>;
+}
+
+test('restricted activity cannot reorder the member summary for an outside viewer', async ({ page }) => {
+  // A group-only action used to move its author above other members even for an outside contributor.
+  const owner = await person(page, 'Owner', 'owner');
+  const o = await project(page);
+  const author = await person(page, 'Private author', 'member');
+  const peer = await person(page, 'Visible peer', 'member');
+  const outsider = await person(page, 'Outside contributor', 'contributor');
+  await owner.restore();
+  for (const p of [author, peer]) await addMember(page, o.id, p.id, ['member']);
+  await addMember(page, o.id, outsider.id, ['contributor']);
+  await peer.restore();
+  expect((await page.request.post('/api/simulation/clock', { data: { advanceDays: 1 } })).ok()).toBeTruthy();
+  await change(page, o); // Public, attributed activity places the peer first among voting members.
+  await outsider.restore();
+  await page.goto(`/o/${o.id}/governance`);
+  const summary = page.locator('#roles').getByRole('button', { name: /Members and roles/ });
+  await expect(summary).toHaveAccessibleDescription(new RegExp(`${peer.name}.*${author.name}`));
+  const descriptionId = await summary.getAttribute('aria-describedby');
+  const outsideSummary = (await page.locator(`[id="${descriptionId}"]`).innerText()).replace(/\s+/g, ' ').trim();
+  await author.restore();
+  expect((await page.request.post('/api/simulation/clock', { data: { advanceDays: 1 } })).ok()).toBeTruthy();
+  const interview = await page.request.post(`/api/ontologies/${o.id}/interviews`, { data: {} });
+  expect(interview.ok()).toBeTruthy();
+  const { useCaseId } = await interview.json();
+  expect((await page.request.post(`/api/use-cases/${useCaseId}/visibility`, { data: { visibility: 'group' } })).ok()).toBeTruthy();
+  await outsider.restore();
+  await page.reload();
+  await expect(summary).toHaveAccessibleDescription(outsideSummary);
+  await peer.restore();
+  await page.reload();
+  await expect(summary).toHaveAccessibleDescription(new RegExp(`${author.name}.*${peer.name}`));
+  await expect(page.locator('#roles').getByRole('button', { name: 'Edit roles' })).toHaveCount(0);
+});
+
+test('phone Health anchor stays in view when the cached tab strip resizes', async ({ page, request }) => {
+  // scrollIntoView on a tab used to pull the document back to the header after Health received focus.
+  const demo = await demoOntology(request);
+  await signIn(page, { name: `Health reader ${uniq()}`, role: 'member' });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/o/${demo.id}`);
+  await settle(page);
+  await page.getByRole('navigation', { name: 'Ontology sections' }).getByRole('link', { name: 'Explore', exact: true }).click();
+  await page.getByRole('button', { name: /^Health: / }).click();
+  await page.getByRole('dialog', { name: /^Health: / }).getByRole('link', { name: /full report/ }).click();
+  await expect(page).toHaveURL(new RegExp(`/o/${demo.id}#health$`));
+  const health = page.locator('#health');
+  await expect(health).toBeFocused();
+  await settle(page);
+  await page.evaluate(() => document.fonts.ready);
+  // A resize after cached content mounts also covers delayed font/layout changes.
+  await page.setViewportSize({ width: 389, height: 844 });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await settle(page);
+  await expect(health).toBeFocused();
+  await expect(health.getByRole('heading', { name: 'Health of the working draft' })).toBeInViewport({ ratio: 1 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test('a request for changes does not claim another owner’s veto', async ({ page }) => {
+  // The decision used to credit the first owner to request changes instead of the actual objector.
+  const author = await person(page, 'Author', 'owner');
+  const o = await project(page);
+  const requester = await person(page, 'Requests changes', 'owner');
+  const vetoer = await person(page, 'Vetoes', 'owner');
+  const reader = await person(page, 'Reader', 'member');
+  await author.restore();
+  for (const p of [requester, vetoer]) await addMember(page, o.id, p.id, ['owner']);
+  await addMember(page, o.id, reader.id, ['member']);
+  const cr = await change(page, o);
+  expect((await page.request.post(`/api/change-requests/${cr.id}/submit`)).ok()).toBeTruthy();
+  await requester.restore();
+  await page.goto(`/o/${o.id}/changes/${cr.id}`);
+  await page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Request changes', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Status: Needs work/ })).toBeVisible();
+  await vetoer.restore();
+  await page.reload();
+  await page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Object', exact: true }).click();
+  await expect(page.getByTestId('decision-outcome')).toContainText(`Rejected by ${vetoer.name} (owner veto) on`);
+  await reader.restore();
+  await page.reload();
+  await expect(page.getByTestId('decision-outcome')).toContainText(`Rejected by ${vetoer.name} (owner veto) on`);
+  await expect(page.getByRole('group', { name: 'Your actions' })).toHaveCount(0);
+});
+
+test('a merged change names only the independent approver as its sign-off', async ({ page }) => {
+  // The merge summary used to name author and co-author approvals even though neither counted.
+  const author = await person(page, 'Author', 'owner');
+  const o = await project(page);
+  const coauthor = await person(page, 'Co-author', 'editor');
+  const approver = await person(page, 'Approver', 'reviewer');
+  const reader = await person(page, 'Reader', 'member');
+  await author.restore();
+  await addMember(page, o.id, coauthor.id, ['editor']);
+  await addMember(page, o.id, approver.id, ['reviewer']);
+  await addMember(page, o.id, reader.id, ['member']);
+  let cr = await change(page, o);
+  await coauthor.restore();
+  const edited = await page.request.patch(`/api/change-requests/${cr.id}`, { data: { ops: [
+    { op: 'addClass', localName: 'Rewritten', label: 'Rewritten', definition: 'A rewritten term.' },
+  ] } });
+  expect(edited.ok()).toBeTruthy();
+  cr = await edited.json();
+  expect(cr.revisedBy).toContain(coauthor.id);
+  expect((await page.request.post(`/api/change-requests/${cr.id}/submit`)).ok()).toBeTruthy();
+  for (const p of [author, coauthor, approver]) {
+    await p.restore();
+    await page.goto('/'); // Refresh the client session when switching fresh testers.
+    await page.goto(`/o/${o.id}/changes/${cr.id}`);
+    await page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Approve', exact: true }).click();
+    if (p !== approver) await expect(page.getByRole('button', { name: /^Status: In review/ })).toBeVisible();
+  }
+  await author.restore();
+  await page.reload();
+  await page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Merge into working draft', exact: true }).click();
+  const outcome = page.getByTestId('decision-outcome');
+  await expect(outcome).toContainText(`after sign-off from ${approver.name}.`);
+  await expect(outcome).not.toContainText(author.name);
+  await expect(outcome).not.toContainText(coauthor.name);
+  await reader.restore();
+  await page.reload();
+  await expect(outcome).toContainText(`after sign-off from ${approver.name}.`);
+  await expect(page.getByRole('group', { name: 'Your actions' })).toHaveCount(0);
+});

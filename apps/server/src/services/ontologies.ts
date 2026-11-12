@@ -279,9 +279,12 @@ export async function summary(p: OntologyProject, { withHealth = true, withGraph
   };
 }
 
-export async function membersWithUsers(ontologyId: string) {
+export async function membersWithUsers(ontologyId: string, viewer?: User) {
+  // Use cases depend on this service too; load their projection after both services have initialised.
+  const { visibleActivity } = await import('./useCases.js');
   const active = new Map<string, string>();
-  for (const a of await list<ActivityItem>('activity', ontologyId)) {
+  // Use the feed's visibility and actor redaction before deriving any per-person timestamps.
+  for (const a of await visibleActivity(await list<ActivityItem>('activity', ontologyId), viewer)) {
     if (a.actorId && a.at > (active.get(a.actorId) ?? '')) active.set(a.actorId, a.at);
   }
   return (await Promise.all((await members(ontologyId))

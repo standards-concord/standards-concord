@@ -1017,6 +1017,8 @@ export interface GovernanceEvaluation {
   rule: ApprovalRule;
   level: ChangeLevel;
   approvals: number;
+  /** People whose effective approvals count, excluding the author and anyone who rewrote the edits. */
+  approvedBy: string[];
   requiredApprovals: number;
   reviewPeriodEndsAt: string;
   reviewPeriodOver: boolean;

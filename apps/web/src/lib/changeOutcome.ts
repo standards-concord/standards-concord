@@ -12,18 +12,14 @@ export function changeOutcome(cr: ChangeRequestDetail, name: (id?: string) => st
   const join = (ids: string[]) => new Intl.ListFormat('en-GB', { style: 'long', type: 'conjunction' }).format(ids.map(who));
   if (cr.status === 'withdrawn') return `Withdrawn${event?.actorId ? ` by ${who(event.actorId)}` : ''} on ${date}.`;
 
-  const latest = new Map<string, ChangeRequestDetail['reviews'][number]>();
-  for (const r of [...cr.reviews].sort((a, b) => a.at.localeCompare(b.at) || (a.seq ?? 0) - (b.seq ?? 0))) {
-    if (!r.stale && r.at <= at && r.decision !== 'comment') latest.set(r.userId, r);
-  }
-  const reviews = [...latest.values()].filter((r) => !r.withdrawnAt);
-  const vetoes = reviews.filter((r) => ['object', 'request-changes'].includes(r.decision) && r.roles.some((role) => cr.governance.rule.vetoRoles.includes(role)));
+  // The evaluator has already selected the effective decisions, including rounds and autopilot.
+  const vetoes = cr.reviews.filter((r) => r.decision === 'object' && cr.governance.vetoedBy.includes(r.userId));
   if (!merged && (event?.message.includes('vetoed') || cr.governance.vetoedBy.length)) {
     const veto = vetoes[0];
     if (veto) {
-      const role = veto.roles.find((r) => cr.governance.rule.vetoRoles.includes(r))!;
-      const label = role === 'odi' ? 'ODI' : roleLabel(role).toLowerCase();
-      return `Rejected by ${who(veto.userId)} (${label} veto) on ${date}.`;
+      const role = veto.roles.find((r) => cr.governance.rule.vetoRoles.includes(r));
+      const label = role === 'odi' ? 'ODI' : role ? roleLabel(role).toLowerCase() : undefined;
+      return `Rejected by ${who(veto.userId)} (${label ? `${label} ` : ''}veto) on ${date}.`;
     }
     return `Rejected on ${date} after a veto.`;
   }
@@ -31,6 +27,6 @@ export function changeOutcome(cr: ChangeRequestDetail, name: (id?: string) => st
   const tally = vote ? `${vote.yes} in favour, ${vote.no} against${vote.abstain ? `, ${plural(vote.abstain, 'abstention')}` : ''}` : '';
   if (!merged) return vote ? `Rejected by vote on ${date}: ${tally}.` : `Rejected on ${date}.`;
   if (cr.approvedAs?.voted && vote) return `Merged on ${date} after a vote: ${tally}.`;
-  const signoffs = reviews.filter((r) => r.decision === 'approve' && r.roles.some((role) => cr.governance.rule.approverRoles.includes(role))).map((r) => r.userId);
+  const signoffs = cr.governance.approvedBy;
   return `Merged on ${date}${signoffs.length ? ` after sign-off from ${join(signoffs)}` : ''}.`;
 }

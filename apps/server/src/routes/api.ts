@@ -279,7 +279,7 @@ export function apiRouter(): Router {
     const p = await project(req);
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
-    res.json({ ...(await summaryFor(req, p)), members: signedIn ? await membersWithUsers(p.id) : [], versions: await ontologyStore.versions(p), history: signedIn ? await crs.withRequesters(p.id, await ontologyStore.log(p, 30)) : [] });
+    res.json({ ...(await summaryFor(req, p)), members: signedIn ? await membersWithUsers(p.id, req.user) : [], versions: await ontologyStore.versions(p), history: signedIn ? await crs.withRequesters(p.id, await ontologyStore.log(p, 30)) : [] });
   });
 
   // The query assistant: plain language in, SPARQL out. Counts of sample records only, never the data.

@@ -75,7 +75,16 @@ function ScrollNav({ label, activeKey, className, children }: { label: string; a
     const active = el.querySelector<HTMLElement>('[aria-current="page"]');
     const measure = () => setEdges({ before: el.scrollLeft > 1, after: el.scrollLeft + el.clientWidth < el.scrollWidth - 1 });
     const reveal = () => {
-      active?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      if (active) {
+        const nav = el.getBoundingClientRect();
+        const tab = active.getBoundingClientRect();
+        // Leave the whole active tab beyond the 16px fades, including fractional pixel rounding.
+        const inset = 20;
+        const left = nav.left + inset;
+        const right = nav.left + el.clientWidth - inset;
+        if (tab.right > right) el.scrollLeft += tab.right - right;
+        else if (tab.left < left) el.scrollLeft -= left - tab.left;
+      }
       measure();
     };
     reveal();

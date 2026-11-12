@@ -248,7 +248,8 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
   const approverRoles: Role[] = r.approverRoles.length ? r.approverRoles : ['owner', 'steward', 'editor', 'reviewer'];
   const writers = new Set([input.authorId, ...(input.coAuthorIds ?? [])]);
   const counts = (rev: Review) => !writers.has(rev.userId) && rolesOf(members, rev.userId).some((role) => approverRoles.includes(role));
-  const approvals = latest.filter((rev) => rev.decision === 'approve' && counts(rev)).length;
+  const approvedBy = latest.filter((rev) => rev.decision === 'approve' && counts(rev)).map((rev) => rev.userId);
+  const approvals = approvedBy.length;
 
   const odiFinalSay = policy.odiPrivilege === 'final-say' && level === 'major';
   const odiApproved = latest.some((rev) => rev.decision === 'approve' && rolesOf(members, rev.userId).includes('odi'));
@@ -372,6 +373,7 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
     rule: r,
     level,
     approvals,
+    approvedBy,
     requiredApprovals,
     reviewPeriodEndsAt,
     reviewPeriodOver,
