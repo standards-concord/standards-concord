@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll } from 'vitest';
+import { testDatabaseName } from './testDatabase.js';
 
 // Isolated data dir, simulated LLM and no external services, before config is imported.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'concord-test-'));
@@ -20,10 +21,14 @@ process.env.GIT_CONFIG_NOSYSTEM = '1';
 // Test files run in parallel, one per worker. Those that use a real Postgres server
 // (TEST_DATABASE_URL) get a database of their own per worker, so two files never reset or
 // lock each other's tables. Files in the same worker run one after another and share it.
+// Each ontology store gets its own set too, and each run starts with them empty (globalSetup.ts).
+// CI runs the suite twice on one server, with the git store and then with the database store, and
+// the second run used to find the first run's demo ontology, whose history was in a git repository
+// it doesn't have ("No ontology at <commit>").
 const baseDatabaseUrl = process.env.TEST_DATABASE_URL;
 if (baseDatabaseUrl) {
   const url = new URL(baseDatabaseUrl);
-  const name = `${url.pathname.slice(1) || 'postgres'}_w${process.env.VITEST_POOL_ID ?? '1'}`;
+  const name = testDatabaseName(url.pathname.slice(1) || 'postgres', process.env.ONTOLOGY_STORE, process.env.VITEST_POOL_ID);
   const { default: pg } = await import('pg');
   const admin = new pg.Client({ connectionString: baseDatabaseUrl, application_name: 'concord-test-setup' });
   await admin.connect();
