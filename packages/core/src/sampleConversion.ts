@@ -8,8 +8,9 @@ const { namedNode: n, literal: l, quad, defaultGraph } = DataFactory;
 const type = NS.rdf + 'type';
 const cls = NS.owl + 'Class', obj = NS.owl + 'ObjectProperty', data = NS.owl + 'DatatypeProperty', ann = NS.owl + 'AnnotationProperty';
 export interface ConversionSample {
-  title: string; description: string; prefix: string; namespace: string; source: string; publisher: string;
-  licence: { name: string; url: string }; upstreamCopy: string; changes: string;
+  title: string; sourceTitle?: string; description: string; prefix: string; namespace: string; source: string; publisher: string;
+  licence: { name: string; url: string; noticePath?: string; copyPath?: string }; upstreamCopy: string; changes: string;
+  copyrightNotice?: string; authors?: readonly string[];
 }
 
 /** Only the workflow copy uses N3's obsolete @keywords/default-name syntax. Tokenise so strings stay verbatim. */
@@ -25,7 +26,8 @@ export function parseSampleSource(upstream: string, sample: ConversionSample): S
   return new Store(parser.parse(sample.upstreamCopy === 'wf.ttl' ? workflowTurtle(upstream) : upstream));
 }
 
-export function convertSample(upstream: string, sample: ConversionSample): string {
+export function convertSample(upstream: string, sample: ConversionSample, licenceText?: string): string {
+  if (sample.copyrightNotice && !licenceText) throw new Error('The full W3C notice is required for converted copies');
   const parsed = parseSampleSource(upstream, sample).getQuads(null, null, null, null);
   const metadataNodes = new Map<string, ReturnType<typeof n>>();
   const skolem = (term: Term) => {
@@ -97,15 +99,7 @@ export function convertSample(upstream: string, sample: ConversionSample): strin
       const ks = kinds.get(sample.namespace + iri); if (ks) { ks.delete(obj); ks.delete(data); ks.add(ann); }
     }
   }
-  // Property hierarchies must use the same kind. Ambiguous families become annotations, preserving their IRIs.
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const q of raw) if (propPreds.includes(q.predicate.value) && q.subject.termType === 'NamedNode' && q.object.termType === 'NamedNode') {
-      const a = kinds.get(q.subject.value)!, b = kinds.get(q.object.value)!;
-      const ak = [obj, data, ann].find((k) => a.has(k)), bk = [obj, data, ann].find((k) => b.has(k));
-      if (ak !== bk) for (const ks of [a, b]) if (!ks.has(ann)) { ks.delete(obj); ks.delete(data); ks.add(ann); changed = true; }
-    }
-  }
+  // Preserve each property's kind. An incompatible edge must not retype its whole family.
   // RDF collections used as application data have no OWL axiom consuming them. Omit those embedded forms;
   // keep every named vocabulary term and the original descriptions, with the complete forms in upstream/.
   const axiomLists = new Set<string>();
@@ -126,7 +120,12 @@ export function convertSample(upstream: string, sample: ConversionSample): strin
     if (p === type && q.object.value === NS.owl + 'InverseFunctionalProperty' && ks?.has(data)) continue;
     if ([...classPreds, NS.rdfs + 'range'].includes(p) && q.object.termType === 'NamedNode' && [NS.rdf, NS.rdfs, NS.owl].some((ns) => q.object.value.startsWith(ns)) && ![NS.owl + 'Thing', NS.owl + 'Nothing', NS.rdfs + 'Literal'].includes(q.object.value)) continue;
     if (p === NS.owl + 'imports') continue; // The offline sample declares its references locally.
-    if (ks?.has(ann) && [NS.rdfs + 'domain', NS.rdfs + 'range', ...propPreds].includes(p)) continue;
+    if (ks?.has(ann) && [NS.rdfs + 'domain', NS.rdfs + 'range'].includes(p)) continue;
+    if (propPreds.includes(p) && q.object.termType === 'NamedNode') {
+      const a = [obj, data, ann].find((k) => ks?.has(k));
+      const b = [obj, data, ann].find((k) => kinds.get(q.object.value)?.has(k));
+      if (!a || a !== b || (p === NS.owl + 'inverseOf' && a !== obj) || (p === NS.owl + 'equivalentProperty' && a === ann)) continue;
+    }
     if (p === type && q.object.value.endsWith('Property') && ks?.has(ann)) continue;
     if (p === NS.owl + 'inverseOf' && q.object.termType === 'BlankNode') continue;
     // ui:Color's named facet node is invalid in the OWL RDF mapping; keep its description, widen its value space.
@@ -148,6 +147,16 @@ export function convertSample(upstream: string, sample: ConversionSample): strin
     [NS.rdfs + 'comment', l(`Concord sample copy for trying Concord. ${sample.changes}`, 'en')],
     [NS.vann + 'preferredNamespacePrefix', l(sample.prefix)], [NS.vann + 'preferredNamespaceUri', n(sample.namespace)],
   ] as const) { s.addQuad(n(sample.source), n(p), value); if (![NS.rdfs, NS.owl].some((ns) => p.startsWith(ns))) s.addQuad(n(p), n(type), n(ann)); }
+  // Rights are RDF too: parsing, stamping and serialising a release must retain the complete notice.
+  for (const text of [sample.copyrightNotice, sample.copyrightNotice ? licenceText : undefined]) {
+    if (text) s.addQuad(n(sample.source), n(NS.dcterms + 'rights'), l(text));
+  }
+  for (const author of sample.authors ?? []) {
+    s.addQuad(n(sample.source), n(NS.dcterms + 'creator'), l(author));
+    s.addQuad(n(NS.dcterms + 'creator'), n(type), n(ann));
+  }
+  if (sample.authors?.length) s.addQuad(n(sample.source), n(NS.dcterms + 'rights'), l(`Modified from ${sample.sourceTitle ?? sample.title} by ${sample.authors.join(' and ')} (${sample.source}).`));
+  if (sample.licence.noticePath) s.addQuad(n(sample.source), n(NS.dcterms + 'rights'), l(`Full licence notice: ${sample.licence.noticePath}. Bundled copy: ${sample.licence.copyPath}.`));
   // Remove anonymous form fragments whose only incoming edge was an omitted application list.
   const reached = new Set<string>();
   const visit = (term: Term) => {
@@ -165,5 +174,8 @@ export function convertSample(upstream: string, sample: ConversionSample): strin
     const original = raw.getObjects(n(iri), n(sample.namespace + 'label'), null).find((t) => t.termType === 'Literal');
     s.addQuad(n(iri), n(NS.rdfs + 'label'), original ?? l(iri.slice(sample.namespace.length), 'en'));
   }
-  return `# Concord sample copy for trying Concord: ${sample.title}\n# Source: ${sample.source}\n# Publisher: ${sample.publisher}\n# Licence: ${sample.licence.name} <${sample.licence.url}>\n# Upstream copy: upstream/${sample.upstreamCopy} (see upstream/SOURCES.md)\n# Changes: ${sample.changes}\n\n` + writeTurtle(s, { ...STANDARD_PREFIXES, [sample.prefix]: sample.namespace }, { ontologyIRI: sample.source });
+  // These sources currently contain no IP notices. Carry any future ones verbatim in addition to their RDF.
+  const existingNotices = upstream.split('\n').filter((line) => /^\s*#.*(?:copyright|licen[cs]e|warrant|disclaim)/i.test(line)).join('\n');
+  const notice = [sample.copyrightNotice, sample.authors?.length ? `Modified from ${sample.sourceTitle ?? sample.title} by ${sample.authors.join(' and ')} (${sample.source}).` : undefined, sample.licence.copyPath ? `Full licence: ${sample.licence.noticePath}; repository copy: ${sample.licence.copyPath}` : undefined, sample.copyrightNotice ? licenceText : undefined].filter(Boolean).join('\n\n');
+  return `# Concord sample copy for trying Concord: ${sample.title}\n# Source: ${sample.source}\n# Publisher: ${sample.publisher}\n# Licence: ${sample.licence.name} <${sample.licence.url}>\n# Upstream copy: upstream/${sample.upstreamCopy} (see upstream/SOURCES.md)\n# Changes: ${sample.changes}\n${existingNotices ? existingNotices + '\n' : ''}${notice ? notice.split('\n').map((line) => line ? `# ${line}` : '#').join('\n') + '\n' : ''}\n` + writeTurtle(s, { ...STANDARD_PREFIXES, [sample.prefix]: sample.namespace }, { ontologyIRI: sample.source });
 }

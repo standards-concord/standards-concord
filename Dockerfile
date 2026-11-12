@@ -5,6 +5,7 @@ WORKDIR /app
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json ./
 COPY packages ./packages
 COPY apps ./apps
+COPY docs/licences ./docs/licences
 RUN pnpm install --frozen-lockfile && pnpm --filter @concord/web build
 
 FROM node:22-bookworm-slim

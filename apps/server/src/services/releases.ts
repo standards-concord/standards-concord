@@ -29,7 +29,7 @@ import { crForViewer, crWithheld, withConsentLock } from './useCases.js';
 import { someAsync } from '../asyncList.js';
 import { syncUseCasesForCR } from './traceability.js';
 import { logActivity } from './users.js';
-import { projectVersionIRI } from './releaseIri.js';
+import { projectVersionIRI, publishedVersionIRI } from './releaseIri.js';
 
 const LEVEL_ORDER: ChangeLevel[] = ['patch', 'minor', 'major'];
 const maxLevel = (levels: ChangeLevel[]) => levels.reduce<ChangeLevel>((m, l) => (LEVEL_ORDER.indexOf(l) > LEVEL_ORDER.indexOf(m) ? l : m), 'patch');
@@ -178,8 +178,9 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   const allCrs = (await Promise.all(all.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id))));
   r.changeRequestIds = all;
   r.level = maxLevel(allCrs.map((c) => c.classification?.level ?? 'minor'));
-  r.version = bumpVersion(project.currentVersion, r.level);
-  r.versionIRI = projectVersionIRI(project, r.version);
+  const revisedVersion = bumpVersion(project.currentVersion, r.level);
+  if (r.version !== revisedVersion) r.versionIRI = projectVersionIRI(project, revisedVersion);
+  r.version = revisedVersion;
   r.notes = notes ?? draftNotes(project, allCrs, r.level, r.version);
   // Notes a steward wrote are theirs to publish; drafted ones are rebuilt as the release is published.
   r.notesBy = notes !== undefined && actor ? actor.id : undefined;
@@ -275,7 +276,7 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   const stamped = stampRelease(working, {
     version: r.version,
     versionIRI: r.versionIRI,
-    priorVersionIRI: priorVersion ? projectVersionIRI(project, priorVersion) : undefined,
+    priorVersionIRI: priorVersion ? await publishedVersionIRI(project, priorVersion) : undefined,
     level: r.level,
     date: clock.iso().slice(0, 10),
     backwardCompatible: r.level !== 'major',

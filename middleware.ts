@@ -22,6 +22,8 @@ export const config = {
     '/mcp/:path*',
     '/people/:path*',
     '/def/:path*',
+    '/licences/:path*',
+    '/docs/licences/:path*',
     '/healthz',
     // OAuth for MCP clients (discovery, client registration, sign-in, tokens).
     '/.well-known/:path*',

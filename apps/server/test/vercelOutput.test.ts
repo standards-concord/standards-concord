@@ -36,7 +36,7 @@ describe('the function build’s routing', () => {
 
   it('sends the API’s paths to the function and everything else to the web app', () => {
     const to = (p: string) => routes.find((r) => r.src && r.dest && new RegExp(r.src).test(p))?.dest;
-    for (const p of ['/api/cron/daily', '/auth/google/callback', '/mcp', '/healthz', '/.well-known/oauth-authorization-server', '/token']) expect(to(p), p).toBe('/api');
+    for (const p of ['/api/cron/daily', '/auth/google/callback', '/mcp', '/healthz', '/.well-known/oauth-authorization-server', '/token', '/licences/W3C-20150513', '/docs/licences/CC-BY-1.0.md']) expect(to(p), p).toBe('/api');
     for (const p of ['/', '/o/x/terms', '/welcome', '/apiary']) expect(to(p), p).toBe('/index.html');
   });
 });

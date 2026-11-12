@@ -3,7 +3,9 @@ export interface SampleAttribution {
   source: string;
   sourceTitle: string;
   publisher: string;
-  licence: { name: string; url: string };
+  licence: { name: string; url: string; noticePath?: string; copyPath?: string };
+  copyrightNotice?: string;
+  authors?: readonly string[];
   upstreamCopy: string;
   changes: string;
   usedBy: string;
@@ -19,7 +21,8 @@ export interface SampleVocabulary extends SampleAttribution {
 
 export const SAMPLE_HEALTH_NOTE = "Concord's checks flag some wording inherited from the original; it is kept as published so the copy stays faithful.";
 
-const w3c = { name: 'W3C Software and Document License', url: 'https://www.w3.org/copyright/software-license-2023/' };
+const w3c = { name: 'W3C Software and Document License (2015)', url: 'https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document', noticePath: '/licences/W3C-20150513', copyPath: '/docs/licences/W3C-20150513.md' };
+const w3cNotice = (title: string, uri: string, year?: string) => `This document includes material copied from or derived from ${title} (${uri}). Copyright (c) ${year ? year + ' ' : ''}W3C® (MIT, ERCIM, Keio, Beihang).`;
 const cc0 = { name: 'CC0 1.0', url: 'https://creativecommons.org/publicdomain/zero/1.0/' };
 const common = 'Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings.';
 
@@ -37,6 +40,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Rules describing who can read, write or share a resource in a Solid pod.',
     usedBy: 'SolidOS sharing and permissions', publisher: 'W3C',
     source: 'http://www.w3.org/ns/auth/acl', sourceTitle: 'Web Access Control', licence: w3c,
+    copyrightNotice: w3cNotice('Web Access Control', 'http://www.w3.org/ns/auth/acl'),
     upstreamCopy: 'acl.ttl', changes: `${common} Promoted RDFS classes and properties to OWL declarations.`,
   },
   {
@@ -44,6 +48,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Resources and containers used to organise linked data on the web.',
     usedBy: 'SolidOS pod folders and resource browsing', publisher: 'W3C',
     source: 'http://www.w3.org/ns/ldp', sourceTitle: 'Linked Data Platform vocabulary', licence: w3c,
+    copyrightNotice: w3cNotice('Linked Data Platform vocabulary', 'http://www.w3.org/ns/ldp', '2015'),
     upstreamCopy: 'ldp.ttl', changes: `${common} Preserved container hierarchies and resource links. Named anonymous publisher and author records with stable URNs; normalised owl:Individual declarations.`,
   },
   {
@@ -51,6 +56,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Personal, shared and public places for keeping data and preferences.',
     usedBy: 'SolidOS workspaces, storage and preferences', publisher: 'W3C',
     source: 'http://www.w3.org/ns/pim/space', sourceTitle: 'Workspace Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('Workspace Ontology', 'http://www.w3.org/ns/pim/space'),
     upstreamCopy: 'space.ttl', changes: `${common} Declared classes previously described only through their superclass.`,
   },
   {
@@ -58,6 +64,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Agendas, notes, participants and calls for people meeting online.',
     usedBy: 'SolidOS meeting pane', publisher: 'W3C',
     source: 'http://www.w3.org/ns/pim/meeting', sourceTitle: 'Meeting Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('Meeting Ontology', 'http://www.w3.org/ns/pim/meeting', '2016'),
     upstreamCopy: 'meeting.ttl', changes: `${common} Retained meeting:label and also supplied an rdfs:label for Meeting.`,
   },
   {
@@ -72,6 +79,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Tasks, issues, assignments and the states a piece of work moves through.',
     usedBy: 'SolidOS issue pane and meeting action items', publisher: 'W3C / Tim Berners-Lee; upstream copy maintained by SolidOS',
     source: 'http://www.w3.org/2005/01/wf/flow', sourceTitle: 'Issue Tracking Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('Issue Tracking Ontology', 'http://www.w3.org/2005/01/wf/flow'),
     upstreamCopy: 'wf.ttl', changes: `${common} Expanded legacy N3 bare names in the original namespace. Removed label-only anonymous inverse properties, which do not identify an OWL inverse.`,
   },
   {
@@ -79,14 +87,16 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Names, addresses and contact details for people and organisations.',
     usedBy: 'SolidOS address book and contacts', publisher: 'W3C',
     source: 'http://www.w3.org/2006/vcard/ns', sourceTitle: 'vCard Ontology', licence: w3c,
-    upstreamCopy: 'vcard.nq', changes: `${common} Flattened the N-Quads document into one ontology graph and retained OWL class restrictions. Widened non-OWL date members in datatype unions to rdfs:Literal.`,
+    copyrightNotice: w3cNotice('vCard Ontology', 'http://www.w3.org/2006/vcard/ns'),
+    upstreamCopy: 'vcard.nq', changes: `${common} Flattened the N-Quads document into one ontology graph and retained OWL class restrictions. Widened non-OWL date members in datatype unions to rdfs:Literal. Omitted incompatible equivalence edges while keeping original datatype property kinds.`,
   },
   {
     slug: 'foaf', title: 'FOAF', prefix: 'foaf', namespace: 'http://xmlns.com/foaf/0.1/',
     description: 'People, organisations, their profiles and the connections between them.',
     usedBy: 'SolidOS profiles, people and social links', publisher: 'FOAF Project / Dan Brickley and Libby Miller',
     source: 'http://xmlns.com/foaf/0.1/', sourceTitle: 'FOAF Vocabulary Specification',
-    licence: { name: 'CC BY 1.0', url: 'https://creativecommons.org/licenses/by/1.0/' },
-    upstreamCopy: 'foaf.nq', changes: `${common} Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible characteristics and property axioms on those annotations.`,
+    licence: { name: 'CC BY 1.0', url: 'https://creativecommons.org/licenses/by/1.0/', noticePath: '/licences/CC-BY-1.0', copyPath: '/docs/licences/CC-BY-1.0.md' },
+    authors: ['Dan Brickley', 'Libby Miller'],
+    upstreamCopy: 'foaf.nq', changes: `${common} Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible equivalence edges; kept object-property inverses and compatible property hierarchies.`,
   },
 ];

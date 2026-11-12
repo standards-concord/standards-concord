@@ -1,7 +1,7 @@
 import { test, expect, settle, signIn, signInAsPersona, uniq } from './fixtures';
 
 const SOURCE = 'http://www.w3.org/ns/auth/acl';
-const LICENCE = 'https://www.w3.org/copyright/software-license-2023/';
+const LICENCE = 'https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document';
 const ACL = 'http://www.w3.org/ns/auth/acl#';
 const HEALTH_NOTE = "Concord's checks flag some wording inherited from the original; it is kept as published so the copy stays faithful.";
 
@@ -23,7 +23,9 @@ test('a tester finds compact sample standards after the demo, reads attribution 
   await expect(notice).toContainText('W3C');
   await expect(notice).toContainText(HEALTH_NOTE);
   await expect(notice.getByRole('link', { name: 'Web Access Control', exact: true })).toHaveAttribute('href', SOURCE);
-  await expect(notice.getByRole('link', { name: 'W3C Software and Document License' })).toHaveAttribute('href', LICENCE);
+  await expect(notice.getByRole('link', { name: 'W3C Software and Document License (2015)' })).toHaveAttribute('href', LICENCE);
+  await expect(notice.getByRole('link', { name: 'Full licence notice' })).toHaveAttribute('href', '/licences/W3C-20150513');
+  await expect(notice).toContainText('Copyright (c) W3C® (MIT, ERCIM, Keio, Beihang).');
   await notice.locator('summary', { hasText: 'What the conversion changed' }).click();
   await expect(notice.getByText(/Promoted RDFS classes and properties/)).toBeVisible();
   const health = page.getByRole('button', { name: /^Health:/ });
@@ -48,9 +50,13 @@ test('an anonymous visitor reads the released public sample with source, licence
   await expect(notice).toContainText('sample copy for trying Concord');
   await expect(notice).toContainText(HEALTH_NOTE);
   await expect(notice.getByRole('link', { name: 'Web Access Control', exact: true })).toHaveAttribute('href', SOURCE);
-  await expect(notice.getByRole('link', { name: 'W3C Software and Document License' })).toHaveAttribute('href', LICENCE);
+  await expect(notice.getByRole('link', { name: 'W3C Software and Document License (2015)' })).toHaveAttribute('href', LICENCE);
+  await expect(notice.getByRole('link', { name: 'Full licence notice' })).toHaveAttribute('href', '/licences/W3C-20150513');
+  await expect(notice).toContainText('Copyright (c) W3C® (MIT, ERCIM, Keio, Beihang).');
   await notice.locator('summary', { hasText: 'What the conversion changed' }).click();
   await expect(notice.getByText(/Promoted RDFS classes and properties/)).toBeVisible();
+  await notice.getByRole('link', { name: 'Full licence notice' }).click();
+  await expect(page.getByText('COPYRIGHT HOLDERS WILL NOT BE LIABLE', { exact: false })).toBeVisible();
   await page.goto('/def/acl/1.0.0#Authorization');
   await expect(page.getByRole('heading', { name: /authorization$/, level: 3 })).toBeVisible();
 });

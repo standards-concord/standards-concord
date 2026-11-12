@@ -12,6 +12,9 @@ export function SampleNotice({ sample }: { sample: SampleAttribution }) {
         <a className={link} href={sample.source}>{sample.sourceTitle}</a>. Licence: {' '}
         <a className={link} href={sample.licence.url}>{sample.licence.name}</a>.
       </p>
+      {sample.copyrightNotice && <p className="mt-1">{sample.copyrightNotice}</p>}
+      {sample.authors?.length ? <p className="mt-1">Modified from {sample.sourceTitle} by {sample.authors.join(' and ')}.</p> : null}
+      {sample.licence.noticePath && <p className="mt-1"><a className={link} href={sample.licence.noticePath}>Full licence notice</a> · <a className={link} href={sample.licence.copyPath}>docs/licences/{sample.licence.copyPath?.split('/').pop()}</a></p>}
       <p className="mt-1 text-muted">Used by {sample.usedBy}.</p>
       <p className="mt-1 text-muted">{SAMPLE_HEALTH_NOTE}</p>
       <details className="mt-2">

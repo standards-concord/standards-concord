@@ -3,7 +3,10 @@
 # Publisher: FOAF Project / Dan Brickley and Libby Miller
 # Licence: CC BY 1.0 <https://creativecommons.org/licenses/by/1.0/>
 # Upstream copy: upstream/foaf.nq (see upstream/SOURCES.md)
-# Changes: Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible characteristics and property axioms on those annotations.
+# Changes: Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible equivalence edges; kept object-property inverses and compatible property hierarchies.
+# Modified from FOAF Vocabulary Specification by Dan Brickley and Libby Miller (http://xmlns.com/foaf/0.1/).
+#
+# Full licence: /licences/CC-BY-1.0; repository copy: /docs/licences/CC-BY-1.0.md
 
 @prefix dc: <http://purl.org/dc/elements/1.1/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
@@ -21,12 +24,15 @@
 foaf: a owl:Ontology ;
     dcterms:title "FOAF"@en ;
     dcterms:description "People, organisations, their profiles and the connections between them."@en ;
-    rdfs:comment "Concord sample copy for trying Concord. Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible characteristics and property axioms on those annotations."@en ;
+    rdfs:comment "Concord sample copy for trying Concord. Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible equivalence edges; kept object-property inverses and compatible property hierarchies."@en ;
     dcterms:source foaf: ;
     dc:description "The Friend of a Friend (FOAF) RDF vocabulary, described using W3C RDF Schema and the Web Ontology Language." ;
     dc:title "Friend of a Friend (FOAF) vocabulary" ;
+    dcterms:creator "Dan Brickley" , "Libby Miller" ;
     dcterms:license <https://creativecommons.org/licenses/by/1.0/> ;
-    dcterms:rights "Original vocabulary published by FOAF Project / Dan Brickley and Libby Miller." ;
+    dcterms:rights "Full licence notice: /licences/CC-BY-1.0. Bundled copy: /docs/licences/CC-BY-1.0.md." ,
+        "Modified from FOAF Vocabulary Specification by Dan Brickley and Libby Miller (http://xmlns.com/foaf/0.1/)." ,
+        "Original vocabulary published by FOAF Project / Dan Brickley and Libby Miller." ;
     vann:preferredNamespacePrefix "foaf" ;
     vann:preferredNamespaceUri foaf: ;
     prov:wasDerivedFrom foaf: .
@@ -266,6 +272,24 @@ foaf:logo a owl:ObjectProperty , owl:InverseFunctionalProperty ;
     rdfs:range owl:Thing ;
     rdfs:isDefinedBy foaf: ;
     <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "testing" .
+
+foaf:made a owl:ObjectProperty ;
+    rdfs:label "made" ;
+    rdfs:comment "Something that was made by this agent." ;
+    owl:inverseOf foaf:maker ;
+    rdfs:domain foaf:Agent ;
+    rdfs:range owl:Thing ;
+    rdfs:isDefinedBy foaf: ;
+    <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "stable" .
+
+foaf:maker a owl:ObjectProperty ;
+    rdfs:label "maker" ;
+    rdfs:comment "An agent that made this thing." ;
+    owl:inverseOf foaf:made ;
+    rdfs:domain owl:Thing ;
+    rdfs:range foaf:Agent ;
+    rdfs:isDefinedBy foaf: ;
+    <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "stable" .
 
 foaf:mbox a owl:ObjectProperty , owl:InverseFunctionalProperty ;
     rdfs:label "personal mailbox" ;
@@ -553,6 +577,14 @@ foaf:myersBriggs a owl:DatatypeProperty ;
     rdfs:isDefinedBy foaf: ;
     <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "testing" .
 
+foaf:name a owl:DatatypeProperty ;
+    rdfs:label "name" ;
+    rdfs:comment "A name for some thing." ;
+    rdfs:domain owl:Thing ;
+    rdfs:range rdfs:Literal ;
+    rdfs:isDefinedBy foaf: ;
+    <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "testing" .
+
 foaf:nick a owl:DatatypeProperty ;
     rdfs:label "nickname" ;
     rdfs:comment "A short informal nickname characterising an agent (includes login identifiers, IRC and other chat nicknames)." ;
@@ -650,26 +682,8 @@ rdfs:seeAlso a owl:AnnotationProperty .
 
 prov:wasDerivedFrom a owl:AnnotationProperty .
 
-foaf:made a owl:AnnotationProperty ;
-    rdfs:label "made" ;
-    rdfs:comment "Something that was made by this agent." ;
-    rdfs:isDefinedBy foaf: ;
-    <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "stable" .
-
-foaf:maker a owl:AnnotationProperty ;
-    rdfs:label "maker" ;
-    rdfs:comment "An agent that made this thing." ;
-    rdfs:isDefinedBy foaf: ;
-    <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "stable" .
-
 foaf:membershipClass a owl:AnnotationProperty ;
     rdfs:label "membershipClass" ;
     rdfs:comment "Indicates the class of individuals that are a member of a Group" ;
     rdfs:isDefinedBy foaf: ;
     <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "unstable" .
-
-foaf:name a owl:AnnotationProperty ;
-    rdfs:label "name" ;
-    rdfs:comment "A name for some thing." ;
-    rdfs:isDefinedBy foaf: ;
-    <http://www.w3.org/2003/06/sw-vocab-status/ns#term_status> "testing" .

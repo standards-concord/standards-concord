@@ -29,11 +29,21 @@ describe('samples through the API and MCP', () => {
     expect(page.status).toBe(200);
     expect(page.text).toContain('aria-label="About this sample"');
     expect(page.text).toContain('http://www.w3.org/ns/auth/acl');
-    expect(page.text).toContain('W3C Software and Document License');
+    expect(page.text).toContain('W3C Software and Document License (2015)');
+    expect(page.text).toContain('href="/licences/W3C-20150513"');
+    const notice = await request(app).get('/licences/W3C-20150513');
+    expect(notice.status).toBe(200);
+    expect(notice.text).toContain('COPYRIGHT HOLDERS WILL NOT BE LIABLE');
+    const markdown = await request(app).get('/docs/licences/CC-BY-1.0.md');
+    expect(markdown.status).toBe(200);
+    expect(markdown.text).toContain('Creative Commons Attribution 1.0');
     const source = await request(app).get('/def/acl/1.0.0.ttl');
     expect(source.status).toBe(200);
     expect(source.text).toContain('acl:Authorization');
     expect(source.text).toContain('acl:agent');
+    expect(source.text).toContain('Copyright (c) W3C® (MIT, ERCIM, Keio, Beihang).');
+    expect(source.text).toContain('COPYRIGHT HOLDERS WILL NOT BE LIABLE');
+    expect(source.text).toContain('https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document');
   });
 
   it('does not give a demo tester ownership of a sample; they may propose a change', async () => {

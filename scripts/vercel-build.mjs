@@ -46,6 +46,7 @@ if (!functionOnly) {
 const fn = path.join(out, 'functions/api.func');
 const copy = (rel, to = rel) => fs.cpSync(path.join(root, rel), path.join(fn, to), { recursive: true, dereference: true });
 copy('tsconfig.base.json');
+copy('docs/licences');
 for (const f of ['package.json', 'tsconfig.json', 'vercel-entry.mjs', 'src']) copy(`apps/server/${f}`);
 for (const pkg of ['core', 'shared'])
   for (const f of ['package.json', 'src', 'fixtures'])

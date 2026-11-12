@@ -5,7 +5,8 @@ import type { OutputFormat } from '@concord/core/types';
 import type { ActivityItem, ChangeRequest, Meeting, OntologyProject, Release, TranscriptLine, UseCase, User } from '@concord/shared';
 import { clock, DAY_MS, saveClock, syncClock } from '../clock.js';
 import { config } from '../config.js';
-import { clearAll, get, HttpError, list, put, remove, transaction, type Collection } from '../db.js';
+import { checkFence, clearAll, get, HttpError, list, put, putFenced, remove, transaction, type Collection } from '../db.js';
+import { resetGeneration, saveResetGeneration } from './resetGeneration.js';
 import { restoreSpending, snapshotSpending } from '../llm/budget.js';
 import { newId } from '../ids.js';
 import { PERSONA_ACTOR, UNTRUSTED_TEXT } from '../llm/prompts.js';
@@ -292,7 +293,10 @@ async function seedConnectedApp(project: OntologyProject, owner: User, passesId:
 }
 
 export async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string, beforeWrite?: (r: Release) => Promise<void>) {
-  const working = await ontologyStore.working(project);
+  const working = await transaction(async () => {
+    await checkFence();
+    return ontologyStore.working(project);
+  });
   const stamped = stampRelease(working, { version, versionIRI: projectVersionIRI(project, version), level: 'major', date: clock.iso().slice(0, 10), backwardCompatible: true });
   const files: Record<string, string> = {};
   for (const f of Object.keys(FORMAT_INFO) as OutputFormat[]) {
@@ -318,13 +322,16 @@ export async function bootstrapRelease(project: OntologyProject, steward: User, 
     publishedAt: now,
     statusSince: now,
   };
-  await put('releases', r, project.id);
+  await putFenced('releases', r, project.id);
   await beforeWrite?.(r);
   Object.assign(files, await releasePageFiles(project, r, stamped));
-  r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: 'Concord' });
-  await put('releases', r, project.id);
-  project.currentVersion = version;
-  await updateProject(project);
+  await transaction(async () => {
+    await checkFence();
+    r.commit = await ontologyStore.writeRelease(project, version, stamped, files, notes, { name: 'Concord' });
+    await put('releases', r, project.id);
+    project.currentVersion = version;
+    await updateProject(project);
+  });
   return r;
 }
 
@@ -558,9 +565,11 @@ export async function resetAll() {
   // Only while this server holds the repositories, and keeping its hold (see ontologyStore). What the deployment
   // has spent on Claude survives the reset.
   await ontologyStore.wipe(async () => {
+    const generation = await resetGeneration();
     const spend = await snapshotSpending();
     const restoreMedia = await snapshotKeptMedia();
     await clearAll();
+    await saveResetGeneration(generation);
     await restoreSpending(spend);
     await restoreMedia();
   });

@@ -263,6 +263,7 @@ solid:inbox a owl:AnnotationProperty ;
     rdfs:label "inbox (deprecated)"@en ;
     rdfs:comment "Deprecated pointer to a Linked Data Notifications inbox; please use http://www.w3.org/ns/ldp#inbox instead."@en ;
     owl:deprecated true ;
+    rdfs:subPropertyOf <http://www.w3.org/ns/ldp#inbox> ;
     rdfs:isDefinedBy solid: ;
     dcterms:issued "2015-11-16" ;
     dcterms:modified "2016-02-05" , "2018-10-25" .
@@ -301,6 +302,7 @@ solid:notification a owl:AnnotationProperty ;
 solid:oidcIssuer a owl:AnnotationProperty ;
     rdfs:label "OIDC issuer"@en ;
     rdfs:comment "The preferred OpenID Connect issuer URI for a given WebID."@en ;
+    rdfs:subPropertyOf <http://openid.net/specs/connect/1.0/issuer> ;
     rdfs:isDefinedBy solid: ;
     dcterms:issued "2017-08-15" ;
     dcterms:modified "2017-08-16" .

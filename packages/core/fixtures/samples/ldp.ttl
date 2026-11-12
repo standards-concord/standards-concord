@@ -1,9 +1,35 @@
 # Concord sample copy for trying Concord: Linked Data Platform
 # Source: http://www.w3.org/ns/ldp
 # Publisher: W3C
-# Licence: W3C Software and Document License <https://www.w3.org/copyright/software-license-2023/>
+# Licence: W3C Software and Document License (2015) <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>
 # Upstream copy: upstream/ldp.ttl (see upstream/SOURCES.md)
 # Changes: Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Preserved container hierarchies and resource links. Named anonymous publisher and author records with stable URNs; normalised owl:Individual declarations.
+# This document includes material copied from or derived from Linked Data Platform vocabulary (http://www.w3.org/ns/ldp). Copyright (c) 2015 W3C® (MIT, ERCIM, Keio, Beihang).
+#
+# Full licence: /licences/W3C-20150513; repository copy: /docs/licences/W3C-20150513.md
+#
+# # W3C Software and Document Notice and License (2015-05-13)
+#
+# Source: <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>. Text as recorded by SPDX (identifier `W3C-20150513`, spdx-license-list 6.12.0).
+#
+# This work is being provided by the copyright holders under the following license.
+#
+# License
+# By obtaining and/or copying this work, you (the licensee) agree that you have read, understood, and will comply with the following terms and conditions.
+#
+# Permission to copy, modify, and distribute this work, with or without modification, for any purpose and without fee or royalty is hereby granted, provided that you include the following on ALL copies of the work or portions thereof, including modifications:
+#
+# - The full text of this NOTICE in a location viewable to users of the redistributed or derivative work.
+# - Any pre-existing intellectual property disclaimers, notices, or terms and conditions. If none exist, the W3C Software and Document Short Notice should be included.
+# - Notice of any changes or modifications, through a copyright statement on the new code or document such as "This software or document includes material copied from or derived from [title and URI of the W3C document]. Copyright (c) [YEAR] W3C® (MIT, ERCIM, Keio, Beihang)."
+#
+# Disclaimers
+# THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+#
+# COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+#
+# The name and trademarks of copyright holders may NOT be used in advertising or publicity pertaining to the work without specific, written prior permission. Title to copyright in this work will at all times remain with copyright holders.
+#
 
 @prefix dcterms: <http://purl.org/dc/terms/> .
 @prefix foaf: <http://xmlns.com/foaf/0.1/> .
@@ -30,9 +56,33 @@
     dcterms:creator <urn:concord:sample:ldp:metadata-1> ,
         <urn:concord:sample:ldp:metadata-2> ,
         <urn:concord:sample:ldp:metadata-3> ;
-    dcterms:license <https://www.w3.org/copyright/software-license-2023/> ;
+    dcterms:license <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document> ;
     dcterms:publisher <http://www.w3.org/data#W3C> ;
-    dcterms:rights "Original vocabulary published by W3C." ;
+    dcterms:rights """# W3C Software and Document Notice and License (2015-05-13)
+
+Source: <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>. Text as recorded by SPDX (identifier `W3C-20150513`, spdx-license-list 6.12.0).
+
+This work is being provided by the copyright holders under the following license.
+
+License
+By obtaining and/or copying this work, you (the licensee) agree that you have read, understood, and will comply with the following terms and conditions.
+
+Permission to copy, modify, and distribute this work, with or without modification, for any purpose and without fee or royalty is hereby granted, provided that you include the following on ALL copies of the work or portions thereof, including modifications:
+
+- The full text of this NOTICE in a location viewable to users of the redistributed or derivative work.
+- Any pre-existing intellectual property disclaimers, notices, or terms and conditions. If none exist, the W3C Software and Document Short Notice should be included.
+- Notice of any changes or modifications, through a copyright statement on the new code or document such as \"This software or document includes material copied from or derived from [title and URI of the W3C document]. Copyright (c) [YEAR] W3C® (MIT, ERCIM, Keio, Beihang).\"
+
+Disclaimers
+THIS WORK IS PROVIDED \"AS IS,\" AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+
+COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+
+The name and trademarks of copyright holders may NOT be used in advertising or publicity pertaining to the work without specific, written prior permission. Title to copyright in this work will at all times remain with copyright holders.
+""" ,
+        "Full licence notice: /licences/W3C-20150513. Bundled copy: /docs/licences/W3C-20150513.md." ,
+        "Original vocabulary published by W3C." ,
+        "This document includes material copied from or derived from Linked Data Platform vocabulary (http://www.w3.org/ns/ldp). Copyright (c) 2015 W3C® (MIT, ERCIM, Keio, Beihang)." ;
     vann:preferredNamespacePrefix "ldp" ;
     vann:preferredNamespaceUri "http://www.w3.org/ns/ldp#" , ldp: ;
     rdfs:seeAlso <http://www.w3.org/2011/09/LinkedData/> ,

@@ -8,7 +8,7 @@
  * reports are public). Anything else is not hosted here, and is listed as not checked.
  */
 import { resolveImportClosure, type ImportClosure, type ImportResolver, type OntologyGraph } from '@concord/core';
-import type { OntologyProject } from '@concord/shared';
+import type { OntologyProject, Release } from '@concord/shared';
 import { config } from '../config.js';
 import { list } from '../db.js';
 import { isHeld } from '../public/holds.js';
@@ -43,7 +43,9 @@ export interface DraftOverride {
 
 export function hostedImportResolver(projects: OntologyProject[], override?: DraftOverride): ImportResolver {
   return async (iri) => {
-    const m = matchImport(iri, projects);
+    const recorded = (await list<Release>('releases')).find((r) => r.versionIRI && trim(r.versionIRI) === trim(iri));
+    const historical = recorded && projects.find((p) => p.id === recorded.ontologyId);
+    const m = historical ? { project: historical, version: recorded.version } : matchImport(iri, projects);
     if (!m) return null;
     const { project } = m;
     let version = m.version;

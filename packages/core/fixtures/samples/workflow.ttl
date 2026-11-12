@@ -1,9 +1,35 @@
 # Concord sample copy for trying Concord: Workflow and issue tracking
 # Source: http://www.w3.org/2005/01/wf/flow
 # Publisher: W3C / Tim Berners-Lee; upstream copy maintained by SolidOS
-# Licence: W3C Software and Document License <https://www.w3.org/copyright/software-license-2023/>
+# Licence: W3C Software and Document License (2015) <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>
 # Upstream copy: upstream/wf.ttl (see upstream/SOURCES.md)
 # Changes: Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Expanded legacy N3 bare names in the original namespace. Removed label-only anonymous inverse properties, which do not identify an OWL inverse.
+# This document includes material copied from or derived from Issue Tracking Ontology (http://www.w3.org/2005/01/wf/flow). Copyright (c) W3C® (MIT, ERCIM, Keio, Beihang).
+#
+# Full licence: /licences/W3C-20150513; repository copy: /docs/licences/W3C-20150513.md
+#
+# # W3C Software and Document Notice and License (2015-05-13)
+#
+# Source: <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>. Text as recorded by SPDX (identifier `W3C-20150513`, spdx-license-list 6.12.0).
+#
+# This work is being provided by the copyright holders under the following license.
+#
+# License
+# By obtaining and/or copying this work, you (the licensee) agree that you have read, understood, and will comply with the following terms and conditions.
+#
+# Permission to copy, modify, and distribute this work, with or without modification, for any purpose and without fee or royalty is hereby granted, provided that you include the following on ALL copies of the work or portions thereof, including modifications:
+#
+# - The full text of this NOTICE in a location viewable to users of the redistributed or derivative work.
+# - Any pre-existing intellectual property disclaimers, notices, or terms and conditions. If none exist, the W3C Software and Document Short Notice should be included.
+# - Notice of any changes or modifications, through a copyright statement on the new code or document such as "This software or document includes material copied from or derived from [title and URI of the W3C document]. Copyright (c) [YEAR] W3C® (MIT, ERCIM, Keio, Beihang)."
+#
+# Disclaimers
+# THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+#
+# COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+#
+# The name and trademarks of copyright holders may NOT be used in advertising or publicity pertaining to the work without specific, written prior permission. Title to copyright in this work will at all times remain with copyright holders.
+#
 
 @prefix dc: <http://purl.org/dc/elements/1.1/> .
 @prefix dcterms: <http://purl.org/dc/terms/> .
@@ -41,8 +67,32 @@
     dcterms:source <http://www.w3.org/2005/01/wf/flow> ;
     dc:title "Issue Tracking Ontology" ;
     dcterms:creator <http://www.w3.org/People/Berners-Lee/card#i> ;
-    dcterms:license <https://www.w3.org/copyright/software-license-2023/> ;
-    dcterms:rights "Original vocabulary published by W3C / Tim Berners-Lee; upstream copy maintained by SolidOS." ;
+    dcterms:license <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document> ;
+    dcterms:rights """# W3C Software and Document Notice and License (2015-05-13)
+
+Source: <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>. Text as recorded by SPDX (identifier `W3C-20150513`, spdx-license-list 6.12.0).
+
+This work is being provided by the copyright holders under the following license.
+
+License
+By obtaining and/or copying this work, you (the licensee) agree that you have read, understood, and will comply with the following terms and conditions.
+
+Permission to copy, modify, and distribute this work, with or without modification, for any purpose and without fee or royalty is hereby granted, provided that you include the following on ALL copies of the work or portions thereof, including modifications:
+
+- The full text of this NOTICE in a location viewable to users of the redistributed or derivative work.
+- Any pre-existing intellectual property disclaimers, notices, or terms and conditions. If none exist, the W3C Software and Document Short Notice should be included.
+- Notice of any changes or modifications, through a copyright statement on the new code or document such as \"This software or document includes material copied from or derived from [title and URI of the W3C document]. Copyright (c) [YEAR] W3C® (MIT, ERCIM, Keio, Beihang).\"
+
+Disclaimers
+THIS WORK IS PROVIDED \"AS IS,\" AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+
+COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+
+The name and trademarks of copyright holders may NOT be used in advertising or publicity pertaining to the work without specific, written prior permission. Title to copyright in this work will at all times remain with copyright holders.
+""" ,
+        "Full licence notice: /licences/W3C-20150513. Bundled copy: /docs/licences/W3C-20150513.md." ,
+        "Original vocabulary published by W3C / Tim Berners-Lee; upstream copy maintained by SolidOS." ,
+        "This document includes material copied from or derived from Issue Tracking Ontology (http://www.w3.org/2005/01/wf/flow). Copyright (c) W3C® (MIT, ERCIM, Keio, Beihang)." ;
     vann:preferredNamespacePrefix "wf" ;
     vann:preferredNamespaceUri wf: ;
     prov:wasDerivedFrom <http://www.w3.org/2005/01/wf/flow> .
@@ -351,7 +401,8 @@ wf:issueClass a owl:AnnotationProperty ;
 
 wf:message a owl:AnnotationProperty ;
     rdfs:label "message"@en ;
-    rdfs:comment "A message about this. Attached for information." .
+    rdfs:comment "A message about this. Attached for information." ;
+    rdfs:subPropertyOf wf:attachment .
 
 wf:requires a owl:AnnotationProperty ;
     rdfs:label "requires" ;
@@ -362,17 +413,20 @@ wf:requires a owl:AnnotationProperty ;
 wf:screenShot a owl:AnnotationProperty ;
     rdfs:label "screen shot"@en ;
     rdfs:comment """An image taken by capturing the state of a
-                 computer screen, for example to demonstrate a problem""" .
+                 computer screen, for example to demonstrate a problem""" ;
+    rdfs:subPropertyOf wf:attachment .
 
 wf:terminalOutput a owl:AnnotationProperty ;
     rdfs:label "terminal output"@en ;
     rdfs:comment """A file showing user interaction from a
-                text terminal or console etc. """ .
+                text terminal or console etc. """ ;
+    rdfs:subPropertyOf wf:attachment .
 
 wf:testData a owl:AnnotationProperty ;
     rdfs:label "test data"@en ;
     rdfs:comment """A file which can be used as inpiut to a test
-                or to demonstrate a problem. """ .
+                or to demonstrate a problem. """ ;
+    rdfs:subPropertyOf wf:attachment .
 
 prov:wasDerivedFrom a owl:AnnotationProperty .
 

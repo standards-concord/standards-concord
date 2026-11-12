@@ -27,7 +27,7 @@ import { competencyTests, findProject, getProject, rolesFor, setRoles } from './
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
-import { projectVersionIRI } from './releaseIri.js';
+import { publishedVersionIRI } from './releaseIri.js';
 
 /**
  * Development forks.
@@ -201,12 +201,12 @@ export const versionUrl = (p: Pick<OntologyProject, 'slug'>, version: string | '
 export const forkVersion = (f: Pick<OntologyFork, 'baseVersion' | 'slug' | 'revision'>) => `${f.baseVersion}-fork.${f.slug}.${f.revision}`;
 
 /** The fork document's own version metadata, so tools can tell it apart from a release. (Not an edit: `modified` is refused in edits.) */
-function stamp(graph: OntologyGraph, p: OntologyProject, f: OntologyFork): OntologyGraph {
+async function stamp(graph: OntologyGraph, p: OntologyProject, f: OntologyFork): Promise<OntologyGraph> {
   const g = graph.clone();
   setMetadata(g, {
     versionIRI: forkUrls(p, f).iri,
     versionInfo: forkVersion(f),
-    ...(f.baseVersion !== '0.0.0' ? { priorVersion: projectVersionIRI(p, f.baseVersion) } : {}),
+    ...(f.baseVersion !== '0.0.0' ? { priorVersion: await publishedVersionIRI(p, f.baseVersion) } : {}),
     modified: clock.iso().slice(0, 10),
   });
   return g;
@@ -526,7 +526,7 @@ export async function createFork(p: OntologyProject, owner: User, input: { name:
   await ontologyStore.commitFork(
     p,
     slug,
-    stamp(working, p, fork),
+    await stamp(working, p, fork),
     `Fork ${p.title} ${p.currentVersion} as “${name}”${fork.purpose ? `\n\n${fork.purpose}` : ''}`,
     { name: owner.name, email: owner.email },
     { parent: base, create: true },
@@ -627,7 +627,7 @@ export async function editFork(fork: OntologyFork, user: User | undefined, input
     const subject = (message || input.description?.split('\n')[0] || 'Edit the fork').slice(0, 120);
     // Keep only the edits that still make a difference (an edit undone later drops out).
     f.ops = outstanding(await ontologyStore.graphAt(p, f.baseCommit), after, [...f.ops, ...ops]).ops;
-    await commitAndSave(p, f, from, stamp(after, p, f), subject, user);
+    await commitAndSave(p, f, from, await stamp(after, p, f), subject, user);
     await logActivity({ ontologyId: p.id, actorId: user.id, type: 'fork.edited', message: `edited the fork “${f.title}”: ${subject}`, link: `/o/${p.slug}/forks/${f.slug}` });
     const summary = await forkSummary(f);
     const edited = new Set(keysPerOp(current, ops).flat());
@@ -781,7 +781,7 @@ export async function syncFork(fork: OntologyFork, user: User | undefined): Prom
       for (const k of plan.landed) if (!landed.has(k)) landed.set(k, { key: k, change: changeKind(describe(before, k), describe(fork, k)) });
       f.landed = [...landed.values()];
     }
-    await commitAndSave(p, f, from, stamp(result, p, f), `Sync with ${p.title} ${p.currentVersion} (${plan.upstreamHead.slice(0, 7)})`, user, [plan.upstreamHead]);
+    await commitAndSave(p, f, from, await stamp(result, p, f), `Sync with ${p.title} ${p.currentVersion} (${plan.upstreamHead.slice(0, 7)})`, user, [plan.upstreamHead]);
     const landed = plan.landed.map((k) => keyLabel(k, result.prefixes));
     return {
       synced: true,
@@ -845,7 +845,7 @@ export async function discardForkChanges(fork: OntologyFork, user: User | undefi
     const named = drop ? [...drop, ...related].map(label).join(', ') : 'everything';
     f.revision += 1;
     f.ops = keep;
-    await commitAndSave(p, f, from, stamp(graph, p, f), `Discard the fork's changes to ${named}`, user);
+    await commitAndSave(p, f, from, await stamp(graph, p, f), `Discard the fork's changes to ${named}`, user);
     return forkSummary(f);
   });
 }

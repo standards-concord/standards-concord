@@ -1,5 +1,7 @@
 import { applyChangeOps, fairCheck, owlReasoner, toWrapperClasses, type ChangeOp } from '@concord/core';
 import { DataFactory } from 'n3';
+import fs from 'node:fs';
+import path from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { SAMPLE_VOCABULARIES, type OntologyProject, type Release } from '@concord/shared';
 import { list, openDb, put, remove } from '../src/db.js';
@@ -15,6 +17,7 @@ import { createFederation } from '../src/services/federations.js';
 import { publishFederationRelease } from '../src/services/federationReleases.js';
 import { getUser } from '../src/services/users.js';
 import { defaultStartupTasks } from '../src/startup.js';
+import { pageInput, releasePageFiles } from '../src/public/routes.js';
 
 const samples = async () => (await list<OntologyProject>('ontologies')).filter((p) => p.sample);
 beforeAll(async () => { await openDb(); });
@@ -42,6 +45,12 @@ describe('sample seeding through the selected ontology store', () => {
       expect(releases).toHaveLength(1);
       expect(releases[0]).toMatchObject({ status: 'published', notes: expect.stringContaining(definition.source) });
       const released = await ontologyStore.at(p, '1.0.0');
+      const n = DataFactory.namedNode;
+      const rights = released.store.getObjects(n(definition.source), n('http://purl.org/dc/terms/rights'), null).map((t) => t.value);
+      if (definition.copyrightNotice) {
+        expect(rights).toContain(definition.copyrightNotice);
+        expect(rights).toContain(fs.readFileSync(path.join(config.repoRoot, 'docs/licences/W3C-20150513.md'), 'utf8'));
+      }
       expect(releases[0].versionIRI).toBe(`${config.publicUrl}/def/${p.slug}/1.0.0`);
       expect(new URL(releases[0].versionIRI).host).not.toBe(new URL(p.namespace).host);
       expect(releases[0].versionIRI).toBe(released.metadata().versionIRI);
@@ -60,6 +69,21 @@ describe('sample seeding through the selected ontology store', () => {
       expect(readme).toContain(`[${definition.licence.name}](${definition.licence.url})`);
       expect(readme).toContain('[What the conversion changed](#conversion-changes)');
       expect(readme).not.toContain('Licence: CC BY 4.0');
+      if (definition.licence.noticePath) {
+        expect(page).toContain(`href="${definition.licence.noticePath}"`);
+        expect(page).toContain(`href="${definition.licence.copyPath}"`);
+        expect(readme).toContain(`${config.publicUrl}${definition.licence.noticePath}`);
+        expect(readme).toContain(`${config.publicUrl}${definition.licence.copyPath}`);
+      }
+      if (definition.copyrightNotice) {
+        expect(page).toContain(definition.copyrightNotice);
+        expect(readme).toContain(definition.copyrightNotice);
+      }
+      if (definition.authors) for (const author of definition.authors) {
+        expect(released.store.getObjects(n(definition.source), n('http://purl.org/dc/terms/creator'), null).map((t) => t.value)).toContain(author);
+        expect(readme).toContain(author);
+        expect(page).toContain(author);
+      }
     }
     init.mockRestore();
   });
@@ -82,6 +106,10 @@ describe('sample seeding through the selected ontology store', () => {
   it('keeps a sample on Concord URLs when a normal release is drafted, re-versioned and published', async () => {
     const p = (await samples()).find((o) => o.slug === 'acl')!;
     const owner = (await getUser(p.ownerIds[0]))!;
+    const previousUrl = config.publicUrl;
+    const first = (await list<Release>('releases', p.id)).find((r) => r.version === '1.0.0')!;
+    config.publicUrl = 'https://new.concord.example';
+    try {
     // Queue merged edits as release fixtures; samples retain the source's inherited lint errors.
     const queueEdit = async (ops: ChangeOp[]) => {
       const cr = await createChangeRequest(p, owner, { title: 'Sample clarification', kind: 'editorial', origin: { type: 'direct' }, description: '', ops });
@@ -101,32 +129,44 @@ describe('sample seeding through the selected ontology store', () => {
     const released = await ontologyStore.at(p, release.version);
     expect(released.metadata()).toMatchObject({
       versionIRI: `${config.publicUrl}/def/acl/1.1.0`,
-      priorVersion: `${config.publicUrl}/def/acl/1.0.0`,
-      backwardCompatibleWith: [`${config.publicUrl}/def/acl/1.0.0`],
+      priorVersion: first.versionIRI,
+      backwardCompatibleWith: [first.versionIRI],
     });
     expect(new URL(released.metadata().versionIRI!).host).not.toBe(new URL(p.namespace).host);
     expect(await ontologyStore.readReleaseFile(p, release.version, 'index.html')).toContain(`<code>${release.versionIRI}</code>`);
+    const historical = await pageInput(p, first.version, config.publicUrl);
+    expect(historical.pageUrl).toBe(first.versionIRI);
+    expect((await releasePageFiles(p, first, await ontologyStore.at(p, first.version)))['index.html']).toContain(`href="${first.versionIRI}"><code>${first.versionIRI}</code>`);
+    } finally { config.publicUrl = previousUrl; }
   });
 
   it('uses Concord release IRIs in sample fork ancestry and federation member and import pins', async () => {
     const acl = (await samples()).find((p) => p.slug === 'acl')!;
     const vcard = (await samples()).find((p) => p.slug === 'vcard')!;
     const owner = (await getUser(acl.ownerIds[0]))!;
+    const aclReleases = await list<Release>('releases', acl.id);
+    const aclFirst = aclReleases.find((r) => r.version === '1.0.0')!;
+    const aclLatest = aclReleases.find((r) => r.version === acl.currentVersion)!;
+    const vcardFirst = (await list<Release>('releases', vcard.id)).find((r) => r.version === '1.0.0')!;
+    const previousUrl = config.publicUrl;
+    config.publicUrl = 'https://another.concord.example';
+    try {
     const fork = await createFork(acl, owner, { name: 'Sample ancestry' });
-    expect((await ontologyStore.graphAt(acl, fork.head)).metadata().priorVersion).toBe(`${config.publicUrl}/def/acl/${acl.currentVersion}`);
+    expect((await ontologyStore.graphAt(acl, fork.head)).metadata().priorVersion).toBe(aclLatest.versionIRI);
     const consumer = await createProject({ title: 'Sample importer', prefix: 'si', description: '' }, owner);
     const graph = await ontologyStore.working(consumer);
-    graph.store.addQuad(DataFactory.namedNode(consumer.ontologyIRI), DataFactory.namedNode('http://www.w3.org/2002/07/owl#imports'), DataFactory.namedNode(`${config.publicUrl}/def/acl/1.0.0`));
+    graph.store.addQuad(DataFactory.namedNode(consumer.ontologyIRI), DataFactory.namedNode('http://www.w3.org/2002/07/owl#imports'), DataFactory.namedNode(aclFirst.versionIRI));
     await ontologyStore.commitWorking(consumer, graph, 'Import the sample release', { name: owner.name });
     await bootstrapRelease(consumer, owner, '1.0.0', 'Imports the sample.');
     const fed = await createFederation(owner, { title: 'Sample release pins', members: [{ ontologyId: vcard.id, version: '1.0.0' }, { ontologyId: consumer.id, version: '1.0.0' }] });
     const release = await publishFederationRelease(fed, owner, {});
     expect(release.pins).toEqual(expect.arrayContaining([
-      expect.objectContaining({ role: 'member', ontologyId: vcard.id, versionIRI: `${config.publicUrl}/def/vcard/1.0.0` }),
-      expect.objectContaining({ role: 'import', ontologyId: acl.id, versionIRI: `${config.publicUrl}/def/acl/1.0.0` }),
+      expect.objectContaining({ role: 'member', ontologyId: vcard.id, versionIRI: vcardFirst.versionIRI }),
+      expect.objectContaining({ role: 'import', ontologyId: acl.id, versionIRI: aclFirst.versionIRI }),
     ]));
-    expect(release.manifest).toContain(`${config.publicUrl}/def/vcard/1.0.0`);
-    expect(release.manifest).toContain(`${config.publicUrl}/def/acl/1.0.0`);
+    expect(release.manifest).toContain(vcardFirst.versionIRI);
+    expect(release.manifest).toContain(aclFirst.versionIRI);
+    } finally { config.publicUrl = previousUrl; }
   });
 
   it('does not touch a pre-existing project whose slug is reserved for a sample', async () => {

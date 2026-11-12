@@ -145,6 +145,11 @@ export function withFence<T>(guard: () => Promise<void>, fn: () => Promise<T>): 
   return fences.run(guard, fn);
 }
 
+/** Check the caller's fence inside the transaction that will perform its writes (including store writes). */
+export async function checkFence(): Promise<void> {
+  await fences.getStore()?.();
+}
+
 /** put(), checked against the current fence (if any) in the same transaction. */
 export async function putFenced<T extends { id: string }>(collection: Collection, doc: T, parent?: string): Promise<T> {
   const guard = fences.getStore();
