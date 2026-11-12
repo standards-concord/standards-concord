@@ -54,6 +54,7 @@ it('names only the sign-offs counted by governance, excluding the author and co-
 
 it('uses the evaluator’s sign-off list even when other approval reviews remain in the discussion', () => {
   const cr = base({ status: 'merged', timeline: [{ type: 'status', at, message: 'merged into the working draft' }] });
+  cr.approvedAs = { level: 'minor', confirmation: false }; // Merged before sign-offs were recorded.
   cr.governance.vote = undefined;
   cr.governance.rule.approverRoles = ['steward', 'editor'];
   cr.governance.approvedBy = ['owner', 'author'];
@@ -77,4 +78,27 @@ it('reads withdrawal and merge dates from history, including after release', () 
   const released = base({ status: 'released', statusSince: '2026-11-10T12:00:00Z', timeline: [{ type: 'status', at, message: 'merged into the working draft' }] });
   released.governance.vote = undefined;
   expect(changeOutcome(released, names)).toBe('Merged on 8 Nov 2026.');
+});
+
+it.each(['merged', 'released'] as const)('opens a previous-version %s payload without sign-off fields', (status) => {
+  // Saved details from before approvedBy existed used to crash before the refresh could finish.
+  const cr = base({ status, timeline: [{ type: 'status', at, message: 'merged into the working draft' }] });
+  const legacy = JSON.parse(JSON.stringify(cr));
+  delete legacy.governance.approvedBy;
+  delete legacy.approvedAs;
+  expect(changeOutcome(legacy, names)).toBe('Merged on 8 Nov 2026.');
+  legacy.approvedAs = { level: 'minor', confirmation: false };
+  expect(changeOutcome(legacy, names)).toBe('Merged on 8 Nov 2026.');
+});
+
+it.each(['merged', 'released'] as const)('keeps the recorded %s sign-offs when live approvals and membership change', (status) => {
+  // Live evaluation used to erase autopilot sign-offs on merge and human sign-offs after departure.
+  const cr = base({ status, timeline: [{ type: 'status', at, message: 'merged into the working draft' }] });
+  cr.governance.vote = undefined;
+  cr.approvedAs = { level: 'minor', confirmation: false, approvers: [{ userId: 'owner', name: 'Priya Shah' }] };
+  expect(changeOutcome(cr, () => undefined)).toBe('Merged on 8 Nov 2026 after sign-off from Priya Shah.');
+  cr.governance.approvedBy = ['author'];
+  expect(changeOutcome(cr, names)).toBe('Merged on 8 Nov 2026 after sign-off from Priya Shah.');
+  cr.approvedAs.approvers = [];
+  expect(changeOutcome(cr, names)).toBe('Merged on 8 Nov 2026.');
 });

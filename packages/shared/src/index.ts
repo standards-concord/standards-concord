@@ -1077,7 +1077,13 @@ export interface ChangeRequest {
    * time, it is a bigger change than this (or now rewords a definition), it goes
    * back to review instead of merging.
    */
-  approvedAs?: { level: ChangeLevel; confirmation: boolean; voted?: boolean };
+  approvedAs?: {
+    level: ChangeLevel;
+    confirmation: boolean;
+    voted?: boolean;
+    /** Effective sign-offs recorded at merge time, with names kept for people who later leave. Absent on older requests. */
+    approvers?: { userId: string; name?: string }[];
+  };
   /** Whose action approved it for an automatic merge that is waiting for their triage budget; the merge is charged to them. */
   autoMergeBy?: string;
   /** Bumped on every write; a merge only lands if the revision it checked is still current. */

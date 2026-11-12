@@ -123,7 +123,7 @@ test('a request for changes does not claim another owner’s veto', async ({ pag
   await expect(page.getByRole('group', { name: 'Your actions' })).toHaveCount(0);
 });
 
-test('a merged change names only the independent approver as its sign-off', async ({ page }) => {
+test('a merged change names its independent approver even after they leave', async ({ page }) => {
   // The merge summary used to name author and co-author approvals even though neither counted.
   const author = await person(page, 'Author', 'owner');
   const o = await project(page);
@@ -157,8 +157,58 @@ test('a merged change names only the independent approver as its sign-off', asyn
   await expect(outcome).toContainText(`after sign-off from ${approver.name}.`);
   await expect(outcome).not.toContainText(author.name);
   await expect(outcome).not.toContainText(coauthor.name);
+  // Live evaluation used to erase this historical sign-off when the member was removed.
+  await page.goto(`/o/${o.id}/governance#roles`);
+  const member = page.locator('#roles .divide-y > div').filter({ hasText: approver.name });
+  page.once('dialog', (dialog) => void dialog.accept());
+  await member.getByRole('button', { name: 'Remove member' }).click();
+  await expect(member).toHaveCount(0);
+  await page.goto(`/o/${o.id}/changes/${cr.id}`);
+  await expect(outcome).toContainText(`after sign-off from ${approver.name}.`);
   await reader.restore();
   await page.reload();
   await expect(outcome).toContainText(`after sign-off from ${approver.name}.`);
   await expect(page.getByRole('group', { name: 'Your actions' })).toHaveCount(0);
+});
+
+test('a previous-version saved merged request opens while its refresh waits', async ({ page, request }) => {
+  // IndexedDB details without approvedBy used to crash the page before fresh details arrived.
+  const reader = await signIn(page, { name: `Saved change reader ${uniq()}`, role: 'member' });
+  const o = await demoOntology(request);
+  const response = await page.request.get(`/api/ontologies/${o.id}/change-requests`);
+  const merged = (await response.json() as ChangeRequestDetail[]).find((c) => ['merged', 'released'].includes(c.status));
+  expect(merged).toBeTruthy();
+  const url = `/api/change-requests/${merged!.id}`;
+  const legacy = await (await page.request.get(url)).json();
+  delete legacy.governance.approvedBy;
+  delete legacy.approvedAs;
+  await page.goto('/');
+  await settle(page);
+  await page.evaluate(({ key, value }) => new Promise<void>((resolve, reject) => {
+    const opening = indexedDB.open('concord-offline', 1);
+    opening.onupgradeneeded = () => opening.result.createObjectStore('kept');
+    opening.onerror = () => reject(opening.error);
+    opening.onsuccess = () => {
+      const db = opening.result;
+      const tx = db.transaction('kept', 'readwrite');
+      tx.objectStore('kept').put({ value, at: Date.now() }, key);
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    };
+  }), { key: `${reader.user.id}|changeRequest|${merged!.id}`, value: legacy });
+  let release!: () => void;
+  const refreshing = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`**${url}`, async (route) => { await refreshing; await route.continue(); });
+  try {
+    await page.goto(`/o/${o.id}/changes/${merged!.id}`);
+    await expect(page.getByTestId('decision-outcome')).toHaveText(/^Merged on .+\.$/);
+    await expect(page.getByTestId('decision-outcome')).not.toContainText('after sign-off');
+    await expect(page.getByRole('group', { name: 'Your actions' })).toHaveCount(0);
+    const refreshed = page.waitForResponse(`**${url}`);
+    release();
+    await refreshed;
+  } finally {
+    release();
+  }
+  await page.unroute(`**${url}`);
 });

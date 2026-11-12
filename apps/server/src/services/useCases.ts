@@ -732,7 +732,11 @@ export async function crForViewer<T extends ChangeRequest>(cr: T, viewer?: User)
       withheld: true,
     };
     const d = cr as unknown as Partial<ChangeRequestDetail>;
-    return { ...shown, ...('reviews' in d ? { reviews: [], votes: [], governance: d.governance, author: d.author } : {}) } as unknown as T;
+    return { ...shown, ...('reviews' in d ? {
+      reviews: [], votes: [],
+      governance: d.governance ? { ...d.governance, approvedBy: [], vetoedBy: [] } : undefined,
+      author: d.author,
+    } : {}) } as unknown as T;
   }
   const meetingShown = async (meetingId: string) => {
     const m = await get<MeetingRecord>('meetings', meetingId);

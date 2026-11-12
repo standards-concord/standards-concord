@@ -977,6 +977,46 @@ describe('seventh review: nothing is rewritten, every read and write checks cons
     return cr;
   };
 
+  it('withholds live and recorded reviewer identities with the reviews', async () => {
+    // Withheld details used to return the hidden approver IDs in governance.approvedBy.
+    const { agent: author, id } = await publicCase('Sign-off source author', 'Private sign-off source');
+    const approver = await login('steward', 'Private sign-off approver');
+    const approverId = (await approver.get('/api/session')).body.user.id;
+    const vetoer = await login('owner', 'Private veto reviewer');
+    const vetoerId = (await vetoer.get('/api/session')).body.user.id;
+    const cr = await derived(id, {
+      status: 'merged',
+      approvedAs: { level: 'minor', confirmation: false, approvers: [{ userId: approverId, name: 'Private sign-off approver' }] },
+    });
+    for (const [userId, roles, decision] of [[approverId, ['steward'], 'approve'], [vetoerId, ['owner'], 'object']] as const) {
+      await put('reviews', { id: `rev_${cr.id}_${userId}`, changeRequestId: cr.id, userId, roles, decision, at: clock.iso(), round: cr.round ?? 1 }, cr.id);
+    }
+    const visible = await author.get(`/api/change-requests/${cr.id}`);
+    expect(visible.body.governance.approvedBy).toContain(approverId);
+    expect(visible.body.governance.vetoedBy).toContain(vetoerId);
+    expect(visible.body.approvedAs.approvers).toEqual([{ userId: approverId, name: 'Private sign-off approver' }]);
+    await withdrawUseCase(await getUseCase(id), await userNamed('Sign-off source author'));
+    const outsider = await login('contributor');
+    const hidden = await outsider.get(`/api/change-requests/${cr.id}`);
+    expect(hidden.status).toBe(200);
+    expect(hidden.body.withheld).toBe(true);
+    expect(hidden.body.reviews).toEqual([]);
+    expect(hidden.body.governance.approvedBy).toEqual([]);
+    expect(hidden.body.governance.vetoedBy).toEqual([]);
+    expect(hidden.body.approvedAs).toBeUndefined();
+    expect(hidden.text).not.toContain(approverId);
+    expect(hidden.text).not.toContain(vetoerId);
+    expect(hidden.text).not.toContain('Private sign-off approver');
+    const listed = await outsider.get(`/api/ontologies/${demoId}/change-requests`);
+    const row = listed.body.find((c: ChangeRequest) => c.id === cr.id);
+    expect(row.withheld).toBe(true);
+    expect(row.approvedAs).toBeUndefined();
+    // Projection must leave the original record available to the source's author.
+    const stillVisible = await author.get(`/api/change-requests/${cr.id}`);
+    expect(stillVisible.body.approvedAs).toEqual(visible.body.approvedAs);
+    expect(stillVisible.body.governance.approvedBy).toContain(approverId);
+  });
+
   it('a transcript saved after a withdrawal does not undo it (finding 1)', async () => {
     const { solid } = await import('../src/services/solid.js');
     const { agent, id } = await publicCase('Transcript Author', 'Transcript race case');

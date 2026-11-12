@@ -1,7 +1,7 @@
 import type { ChangeRequestDetail } from '@concord/shared';
 import { formatDate, plural, roleLabel } from './format';
 
-/** Read a closed request's decision from its history and the decisions that still stand. */
+/** Read a closed request's decision from its history, using recorded sign-offs when available. */
 export function changeOutcome(cr: ChangeRequestDetail, name: (id?: string) => string | undefined): string | undefined {
   if (!['merged', 'released', 'rejected', 'withdrawn'].includes(cr.status)) return undefined;
   const merged = cr.status === 'merged' || cr.status === 'released';
@@ -9,7 +9,6 @@ export function changeOutcome(cr: ChangeRequestDetail, name: (id?: string) => st
   const at = event?.at ?? cr.statusSince;
   const date = formatDate(at);
   const who = (id?: string) => name(id) ?? 'a former member';
-  const join = (ids: string[]) => new Intl.ListFormat('en-GB', { style: 'long', type: 'conjunction' }).format(ids.map(who));
   if (cr.status === 'withdrawn') return `Withdrawn${event?.actorId ? ` by ${who(event.actorId)}` : ''} on ${date}.`;
 
   // The evaluator has already selected the effective decisions, including rounds and autopilot.
@@ -27,6 +26,8 @@ export function changeOutcome(cr: ChangeRequestDetail, name: (id?: string) => st
   const tally = vote ? `${vote.yes} in favour, ${vote.no} against${vote.abstain ? `, ${plural(vote.abstain, 'abstention')}` : ''}` : '';
   if (!merged) return vote ? `Rejected by vote on ${date}: ${tally}.` : `Rejected on ${date}.`;
   if (cr.approvedAs?.voted && vote) return `Merged on ${date} after a vote: ${tally}.`;
-  const signoffs = cr.governance.approvedBy;
-  return `Merged on ${date}${signoffs.length ? ` after sign-off from ${join(signoffs)}` : ''}.`;
+  // Older server records fall back to live evaluation; older device copies may have neither field.
+  const signoffs = cr.approvedAs?.approvers?.map((a) => a.name ?? who(a.userId)) ?? (cr.governance.approvedBy ?? []).map(who);
+  const signedBy = new Intl.ListFormat('en-GB', { style: 'long', type: 'conjunction' }).format(signoffs);
+  return `Merged on ${date}${signoffs.length ? ` after sign-off from ${signedBy}` : ''}.`;
 }
