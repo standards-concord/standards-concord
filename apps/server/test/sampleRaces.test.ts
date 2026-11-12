@@ -1,11 +1,13 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SAMPLE_VOCABULARIES, type OntologyProject, type Release } from '@concord/shared';
-import { list, openDb } from '../src/db.js';
+import { get, list, openDb } from '../src/db.js';
 import { createProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedSamples } from '../src/services/samples.js';
 import * as simulation from '../src/services/simulation.js';
 import * as pages from '../src/public/routes.js';
+import * as users from '../src/services/users.js';
+import * as db from '../src/db.js';
 
 const deferred = () => {
   let resolve!: () => void;
@@ -16,6 +18,44 @@ beforeAll(async () => { await openDb(); });
 beforeEach(async () => { await ontologyStore.wipe(); });
 
 describe('sample creation races on the selected ontology store', () => {
+  it('also discards initialization when the creation transaction fails after its callback', async () => {
+    const owner = (await simulation.ensurePersonas()).get('priya')!;
+    const input = { title: 'Retry transaction', slug: 'retry-transaction', prefix: 'retry', description: '' };
+    const init = vi.spyOn(ontologyStore, 'init');
+    const realTransaction = db.transaction;
+    const transaction = vi.spyOn(db, 'transaction').mockImplementationOnce(async (fn) => realTransaction(async () => {
+      await fn();
+      throw new Error('commit failed');
+    }));
+    try {
+      await expect(createProject(input, owner)).rejects.toThrow('commit failed');
+      expect(init).toHaveResolved();
+      expect(await get('ontologies', init.mock.calls[0][0].id)).toBeUndefined();
+      const retry = await createProject(input, owner);
+      expect(await ontologyStore.log(retry)).toHaveLength(1);
+    } finally { init.mockRestore(); transaction.mockRestore(); }
+  });
+
+  it('discards initialization if activity creation fails, so the same slug can be retried with fresh history', async () => {
+    const owner = (await simulation.ensurePersonas()).get('priya')!;
+    const input = { title: 'Retry creation', slug: 'retry-creation', prefix: 'retry', description: 'A clean retry' };
+    const init = vi.spyOn(ontologyStore, 'init');
+    const activity = vi.spyOn(users, 'logActivity').mockRejectedValueOnce(new Error('activity insert failed'));
+    try {
+      await expect(createProject(input, owner)).rejects.toThrow('activity insert failed');
+      expect(init).toHaveResolved();
+      const failed = init.mock.calls[0][0];
+      expect(await get('ontologies', failed.id)).toBeUndefined();
+      expect(await list('memberships', failed.id)).toEqual([]);
+      expect(await get('kv', `draft-head:${failed.slug}`)).toBeUndefined();
+      await expect(ontologyStore.head(failed)).rejects.toThrow();
+      const retry = await createProject(input, owner);
+      expect(retry.id).not.toBe(failed.id);
+      expect(await ontologyStore.log(retry)).toHaveLength(1);
+      expect((await ontologyStore.working(retry)).metadata().title).toBe(input.title);
+    } finally { init.mockRestore(); activity.mockRestore(); }
+  });
+
   it('reserves sample names for ordinary titles, and atomically refuses competing explicit slugs before store writes', async () => {
     const owner = (await simulation.ensurePersonas()).get('priya')!;
     const ordinary = await createProject({ title: 'FOAF', prefix: 'my', description: '' }, owner);

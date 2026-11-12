@@ -17,6 +17,7 @@ import { writeTurtle } from './turtle.js';
 import { codeModel, derivesFrom, type PropertyInfo } from './codemodel.js';
 import { boundDatatype, datatypeDefinitions, family, intersect, uncheckable, WHOLE_NUMBER_PATTERN } from './valuespace.js';
 import { derivedTypes } from './xsdTypes.js';
+import { distributionNotice, noticeComment } from './notices.js';
 export { identifierFrom } from './codemodel.js';
 
 const SH = NS.sh;
@@ -270,7 +271,7 @@ function datatypeBases(graph: OntologyGraph): Map<string, string[]> {
 
 export async function toShacl(graph: OntologyGraph): Promise<string> {
   const derived = deriveShapes(graph);
-  return noteLines(derived.notes) + (await writeTurtle(shaclStore(derived), derived.prefixes, { ontologyIRI: derived.shapesIRI }));
+  return noticeComment(distributionNotice(graph)) + noteLines(derived.notes) + (await writeTurtle(shaclStore(derived), derived.prefixes, { ontologyIRI: derived.shapesIRI }));
 }
 
 /** Notes as comment lines, for the top of the Turtle or SHACLC shapes. */
@@ -319,7 +320,7 @@ export async function toShaclc(graph: OntologyGraph, opts: ShaclcOptions = {}): 
     : `# SHACL shapes for ${commentLine(derived.title ?? '')}, in SHACL compact syntax.\n# Shape names and the shapes graph's label are in the Turtle shapes (.shacl.ttl); SHACLC has no place for them.\n`;
   const notes = noteLines(derived.notes);
   const body = restore(explicitDatatypes(rawUnicodeEscapes(text), new Store(quads), prefixes));
-  const out = header + notes + body + (body.endsWith('\n') ? '' : '\n');
+  const out = header + noticeComment(distributionNotice(graph)) + notes + body + (body.endsWith('\n') ? '' : '\n');
 
   // Check: the SHACLC must parse back to exactly the shapes it was written from.
   const back = new Store(await parseShaclc(out, Boolean(opts.extended)));
@@ -340,7 +341,11 @@ function shieldUnsafeIris(store: Store): { quads: Quad[]; restore: (text: string
   const nonce = randomBytes(8).toString('hex');
   const swap = new Map<string, string>();
   const shield = <T extends Term>(t: T): T => {
-    if (t.termType !== 'NamedNode' || SAFE_LOCAL.test(t.value.slice(writerNamespace(t.value).length))) return t;
+    if (t.termType !== 'NamedNode') return t;
+    const local = t.value.slice(writerNamespace(t.value).length);
+    // shaclc-parse 2.0.0 treats an underscore within a local name as a word boundary.
+    // Full IRIs keep names such as FOAF's mbox_sha1sum readable by that parser too.
+    if (SAFE_LOCAL.test(local) && !local.includes('_')) return t;
     if (!swap.has(t.value)) swap.set(t.value, `urn:x-concord-iri:${nonce}:${swap.size}`);
     return nn(swap.get(t.value)!) as unknown as T;
   };

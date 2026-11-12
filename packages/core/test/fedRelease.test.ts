@@ -35,7 +35,7 @@ describe('federation releases', () => {
       version: '1.0.0',
       title: 'UK',
       issued: '2026-11-06T12:00:00Z',
-      previousVersion: '0.9.0',
+      previousVersionIRI: 'https://old.concord.example/def/fed/uk/0.9.0',
       pins: [
         { role: 'member', title: 'Gov', ontologyIRI: 'https://ex.org/gov', version: '2.0.0', versionIRI: 'https://ex.org/gov/2.0.0', hash: 'sha256:' + 'a'.repeat(64) },
         { role: 'import', title: 'Base', ontologyIRI: 'https://ex.org/base', version: '1.0.0', versionIRI: 'https://ex.org/base/1.0.0', hash: 'sha256:' + 'b'.repeat(64) },
@@ -49,7 +49,7 @@ describe('federation releases', () => {
     expect(ttl).toContain('dcterms:hasPart <https://ex.org/gov/2.0.0>');
     expect(ttl).toContain('dcterms:requires <https://ex.org/base/1.0.0>');
     expect(ttl).toContain('d'.repeat(64));
-    expect(ttl).toContain('owl:priorVersion <https://concord.example/def/fed/uk/0.9.0>');
+    expect(ttl).toContain('owl:priorVersion <https://old.concord.example/def/fed/uk/0.9.0>');
     expect(ttl).toContain('a'.repeat(64));
     expect(ttl).toContain('b'.repeat(64));
     expect(ttl).toContain('c'.repeat(64));

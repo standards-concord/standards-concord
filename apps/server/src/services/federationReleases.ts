@@ -134,7 +134,7 @@ export async function publishFederationRelease(f: Federation, user: User | undef
     title: fed.title,
     description: fed.description || undefined,
     issued: clock.iso(),
-    previousVersion: latest?.version,
+    previousVersionIRI: latest ? (await OntologyGraph.fromTurtle(latest.manifest)).metadata().versionIRI : undefined,
     pins: plan.pins,
     shapes: { iri: `${fedVersionIRI(iri, version)}/shapes`, hash: shapesHash },
     closure: { iri: closureIRI, hash: closureHash },

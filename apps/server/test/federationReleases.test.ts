@@ -7,6 +7,9 @@ import { config } from '../src/config.js';
 import { findProject } from '../src/services/ontologies.js';
 import { ontologyStore } from '../src/services/ontologyStore.js';
 import { seedDemo } from '../src/services/simulation.js';
+import { createUser } from '../src/services/users.js';
+import { createFederation } from '../src/services/federations.js';
+import { publishFederationRelease } from '../src/services/federationReleases.js';
 
 const app = createApp();
 let volId: string;
@@ -23,6 +26,24 @@ async function login(name: string) {
 }
 
 describe('federation releases', () => {
+  it('keeps the previous manifest version IRI when PUBLIC_URL changes', async () => {
+    const owner = await createUser({ name: 'Federation ancestry owner', provider: 'demo', subject: 'fed-ancestry' });
+    const fed = await createFederation(owner, { title: 'Federation ancestry', members: [{ ontologyId: volId, version: '1.0.0' }] });
+    const originalUrl = config.publicUrl;
+    try {
+      config.publicUrl = 'https://old.concord.example';
+      const first = await publishFederationRelease(fed, owner, {});
+      const previousIRI = (await OntologyGraph.fromTurtle(first.manifest)).metadata().versionIRI;
+      expect(previousIRI).toBe(`https://old.concord.example/def/fed/${fed.slug}/1.0.0`);
+      config.publicUrl = 'https://new.concord.example';
+      const second = await publishFederationRelease(fed, owner, {});
+      expect((await OntologyGraph.fromTurtle(second.manifest)).metadata()).toMatchObject({
+        versionIRI: `https://new.concord.example/def/fed/${fed.slug}/1.0.1`,
+        priorVersion: previousIRI,
+      });
+    } finally { config.publicUrl = originalUrl; }
+  });
+
   it('pins every member to its release and RDFC-1.0 hash, and publishes the manifest at /def/fed', async () => {
     const owner = await login('Release owner');
     const mine = (await owner.post('/api/ontologies').send({ title: `Draft only ${Date.now()}`, description: 'Not released yet.', prefix: 'dro' })).body;

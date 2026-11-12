@@ -27,7 +27,7 @@ export interface ManifestInput {
   title: string;
   description?: string;
   issued: string;
-  previousVersion?: string;
+  previousVersionIRI?: string;
   pins: FederationPin[];
   /** Where the derived shapes are published, and their hash. */
   shapes: { iri: string; hash: string };
@@ -55,7 +55,7 @@ export function manifestGraph(m: ManifestInput): OntologyGraph {
   add(fed, NS.dcterms + 'title', literal(m.title, 'en'));
   if (m.description) add(fed, NS.dcterms + 'description', literal(m.description, 'en'));
   add(fed, NS.dcterms + 'issued', literal(m.issued.slice(0, 10), nn(NS.xsd + 'date')));
-  if (m.previousVersion) add(fed, NS.owl + 'priorVersion', nn(fedVersionIRI(m.iri, m.previousVersion)));
+  if (m.previousVersionIRI) add(fed, NS.owl + 'priorVersion', nn(m.previousVersionIRI));
   for (const p of m.pins) {
     const v = nn(p.versionIRI);
     add(fed, p.role === 'member' ? NS.dcterms + 'hasPart' : NS.dcterms + 'requires', v);

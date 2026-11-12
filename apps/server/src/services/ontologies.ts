@@ -81,7 +81,9 @@ export async function createProject(
     slug?: string;
   },
   owner: User,
-): Promise<OntologyProject> { return transaction(async () => {
+): Promise<OntologyProject> {
+  let initialized: OntologyProject | undefined;
+  try { return await transaction(async () => {
   await checkFence();
   const slug = input.slug ?? await uniqueSlug(slugify(input.title));
   // The writer lock reserves this slug through store initialisation and metadata creation, on both stores.
@@ -136,11 +138,33 @@ export async function createProject(
   ].filter((p) => p !== undefined).join('\n\n') : '';
   const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: ${input.sample ? `[${input.sample.licence.name}](${input.sample.licence.url})` : 'CC BY 4.0'}\n\n${sampleNotice}Managed with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
   await ontologyStore.init(project, await graph.toTurtle(), readme);
-  await put('ontologies', project);
-  await setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);
-  await logActivity({ ontologyId: project.id, actorId: owner.id, type: 'ontology.created', message: `created the ontology ${project.title}`, link: `/o/${project.id}` });
-  return project;
-}); }
+  initialized = project;
+  try {
+    await put('ontologies', project);
+    await setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);
+    await logActivity({ ontologyId: project.id, actorId: owner.id, type: 'ontology.created', message: `created the ontology ${project.title}`, link: `/o/${project.id}` });
+    return project;
+  } catch (err) {
+    // Metadata rolls back with this transaction. Git files do not: discard them before the
+    // writer lock releases the slug, so a retry starts with a fresh history on either store.
+    try {
+      await ontologyStore.forget(project);
+      initialized = undefined;
+    } catch { /* An aborted database transaction may prevent cleanup; retry after rollback below. */ }
+    throw err;
+  }
+  }); } catch (err) {
+    if (initialized) {
+      const failed = initialized;
+      // Also covers COMMIT failing after the callback succeeded. Recheck under the writer lock:
+      // an ambiguous commit or another creator may already have reserved this slug.
+      await transaction(async () => {
+        if (!(await list<OntologyProject>('ontologies')).some((p) => p.slug === failed.slug)) await ontologyStore.forget(failed);
+      });
+    }
+    throw err;
+  }
+}
 
 async function uniqueSlug(base: string) {
   // "fed" is taken by federation releases (/def/fed/...).

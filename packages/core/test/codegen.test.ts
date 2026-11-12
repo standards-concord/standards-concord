@@ -586,7 +586,7 @@ e:code a owl:DatatypeProperty .`);
       }
       off += 512 + Math.ceil(size / 512) * 512;
     }
-    expect(names).toEqual(['package/package.json', 'package/README.md', 'package/index.js', 'package/index.d.ts', 'package/index.ts', 'package/shapes.ttl']);
+    expect(names).toEqual(['package/package.json', 'package/README.md', 'package/NOTICE', 'package/index.js', 'package/index.d.ts', 'package/index.ts', 'package/shapes.ttl']);
     // Reproducible bytes for the same input.
     expect(npmPackage(mod, { name: 'volunteering-ontology', version: '1.1.0-fork.activity.2', shapes: await toShacl(g) }).equals(tgz)).toBe(true);
   });

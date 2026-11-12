@@ -6,6 +6,7 @@ import { NS, RDF_TYPE } from './ns.js';
 import { manchesterExpr, nn, objects, readList, renderLiteral, renderName, subjects } from './rdf.js';
 import { ANNOTATION_PREDICATES, MAPPING_PROPERTIES, P, T } from './graph.js';
 import type { OntologyGraph } from './graph.js';
+import { distributionNotice, noticeComment } from './notices.js';
 
 const CHARACTERISTIC_NAMES: Record<string, string> = {
   functional: 'Functional', inverseFunctional: 'InverseFunctional', transitive: 'Transitive', symmetric: 'Symmetric',
@@ -127,5 +128,5 @@ export function toManchester(graph: OntologyGraph): string {
     .filter(([p]) => used.has(p))
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([p, ns]) => `Prefix: ${p}: <${ns}>`);
-  return prefixLines.join('\n') + '\n\n' + body + '\n';
+  return prefixLines.join('\n') + '\n\n' + noticeComment(distributionNotice(graph)) + body + '\n';
 }

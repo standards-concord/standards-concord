@@ -19,6 +19,7 @@ import { NS, RDF_TYPE, compactIRI, expandIRI, humanize, isBuiltinDatatype, local
 import { blankNode, langLit, literal, nn, objects, readList, typedLit, writeList } from './rdf.js';
 import { OntologyGraph, P, T, declareAnnotationProperties } from './graph.js';
 import { writeRestriction } from './changes.js';
+import { distributionNotice, noticeComment } from './notices.js';
 
 const XSD_TO_LINKML: Record<string, string> = {
   string: 'string', normalizedString: 'string', token: 'string', language: 'string',
@@ -217,7 +218,7 @@ export function toLinkML(graph: OntologyGraph): string {
     slots: sortObj(slots),
     enums: Object.keys(enums).length ? sortObj(enums) : undefined,
   });
-  return YAML.stringify(schema, { lineWidth: 0 });
+  return noticeComment(distributionNotice(graph)) + YAML.stringify(schema, { lineWidth: 0 });
 }
 
 /* ------------------------------------------------------------------------ */
