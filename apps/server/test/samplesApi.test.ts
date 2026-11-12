@@ -1,10 +1,12 @@
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { SAMPLE_VOCABULARIES } from '@concord/shared';
 import { createApp } from '../src/app.js';
-import { openDb } from '../src/db.js';
+import { openDb, remove } from '../src/db.js';
 import { findProject } from '../src/services/ontologies.js';
 import { seedSamples } from '../src/services/samples.js';
+import * as samples from '../src/services/samples.js';
+import { runStartupTasks } from '../src/startup.js';
 
 const app = createApp();
 beforeAll(async () => { await openDb(); await seedSamples(); });
@@ -66,5 +68,25 @@ describe('samples through the API and MCP', () => {
     const rows = JSON.parse(payload.result.content[0].text);
     for (const s of SAMPLE_VOCABULARIES) expect(rows.find((row: { slug: string }) => row.slug === s.slug)).toMatchObject({ isSample: true, sample: { source: s.source, licence: s.licence } });
     expect(rows.find((row: { slug: string }) => row.slug === 'volunteering').isSample).toBe(false);
+  });
+
+  it('uses only sign-in as a sample-seed fallback until start-up has finished', async () => {
+    const seed = vi.spyOn(samples, 'seedSamples');
+    try {
+      const ps = await request(app).get('/api/personas');
+      expect(ps.status).toBe(200);
+      expect(seed).not.toHaveBeenCalled();
+      const cold = await request(app).post('/api/auth/demo').send({ name: 'Cold-start tester' });
+      expect(cold.status).toBe(200);
+      expect(seed).toHaveBeenCalledOnce();
+      await runStartupTasks([{ name: 'sample-seed', run: async () => void await seedSamples() }]);
+      seed.mockClear();
+      const warm = await request(app).post('/api/auth/demo').send({ name: 'Warm-start tester' });
+      expect(warm.status).toBe(200);
+      expect(seed).not.toHaveBeenCalled();
+    } finally {
+      seed.mockRestore();
+      await remove('kv', 'startup:sample-seed');
+    }
   });
 });

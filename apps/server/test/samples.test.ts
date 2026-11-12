@@ -40,6 +40,9 @@ describe('sample seeding through the selected ontology store', () => {
       expect(await owlReasoner(released)).toMatchObject({ available: true, checked: 'complete', consistent: true, unsatisfiable: [] });
       const page = await ontologyStore.readReleaseFile(p, '1.0.0', 'index.html');
       expect(page).toContain('About this sample');
+      expect(page).toContain('checks flag some wording inherited from the original');
+      expect(page).toContain('<summary>What the conversion changed</summary>');
+      expect(page).not.toContain('href="#sample-conversion-changes"');
       expect(page).toContain(`href="${definition.licence.url}"`);
       expect(page).toContain(`href="${definition.source}"`);
       const readme = init.mock.calls.find(([project]) => project.id === p.id)![2];

@@ -5,7 +5,7 @@ import { api, ApiError } from '../api';
 import { beginSignOut, finishSignOut, markSignOutPending, useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
 import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
-import { useAction, useTick } from '../lib/hooks';
+import { useAction, useAsync, useTick } from '../lib/hooks';
 import { formatDate, roleLabel } from '../lib/format';
 import { Logo, OdiLogo } from './badges';
 import { Avatar, Button, buttonClasses, cx, LinkButton } from './ui';
@@ -178,10 +178,24 @@ function DemoBanner() {
   const { session, setSession, now, isDemo } = useSession();
   const w = useWalkthrough();
   const nav = useNavigate();
+  const ontologyId = useLocation().pathname.match(/^\/o\/([^/]+)/)?.[1];
+  const onDemo = !!ontologyId && (ontologyId === w.demo?.id || ontologyId === w.demo?.slug);
+  const otherId = isDemo && !onDemo ? ontologyId : undefined;
+  const userId = session?.user?.id;
+  const current = useAsync(
+    async () => otherId ? api.ontology(otherId) : undefined,
+    [otherId, userId],
+    { keep: otherId ? `ontology|${otherId}` : undefined },
+  );
   useTick(30_000);
   const clock = useAction(async (days: number) => setSession(await api.advanceClock(days)));
   if (!isDemo || !session?.user) return null;
-  const roles = w.myRoles.length ? w.myRoles.map(roleLabel).join(', ') : 'participant';
+  // The walkthrough's roles apply to the demo; another ontology has its own membership.
+  const ontology = onDemo ? w.demo : current.data;
+  const currentRoles = ontology && (ontology.id === ontologyId || ontology.slug === ontologyId)
+    ? ontology.members?.find((m) => m.userId === userId)?.roles ?? [] : [];
+  const myRoles = ontologyId ? currentRoles : w.myRoles;
+  const roles = myRoles.length ? myRoles.map(roleLabel).join(', ') : 'participant';
   const offsetDays = Math.round((session.clockOffsetMs ?? 0) / 86400e3);
   return (
     <div className="border-b border-accent/20 bg-accent-soft text-sm">

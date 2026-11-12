@@ -3,6 +3,7 @@ import { test, expect, settle, signIn, signInAsPersona, uniq } from './fixtures'
 const SOURCE = 'http://www.w3.org/ns/auth/acl';
 const LICENCE = 'https://www.w3.org/copyright/software-license-2023/';
 const ACL = 'http://www.w3.org/ns/auth/acl#';
+const HEALTH_NOTE = "Concord's checks flag some wording inherited from the original; it is kept as published so the copy stays faithful.";
 
 test('a tester finds compact sample standards after the demo, reads attribution and browses ACL terms', async ({ page }) => {
   await signIn(page, { name: 'Sample reader', role: 'contributor' });
@@ -20,10 +21,15 @@ test('a tester finds compact sample standards after the demo, reads attribution 
   const notice = page.getByRole('region', { name: 'About this sample', exact: true });
   await expect(notice).toContainText('sample copy for trying Concord');
   await expect(notice).toContainText('W3C');
+  await expect(notice).toContainText(HEALTH_NOTE);
   await expect(notice.getByRole('link', { name: 'Web Access Control', exact: true })).toHaveAttribute('href', SOURCE);
   await expect(notice.getByRole('link', { name: 'W3C Software and Document License' })).toHaveAttribute('href', LICENCE);
-  await notice.getByRole('link', { name: 'What the conversion changed' }).click();
+  await notice.locator('summary', { hasText: 'What the conversion changed' }).click();
   await expect(notice.getByText(/Promoted RDFS classes and properties/)).toBeVisible();
+  const health = page.getByRole('button', { name: /^Health:/ });
+  await health.click();
+  await expect(page.getByRole('dialog', { name: /^Health:/ })).toContainText(HEALTH_NOTE);
+  await page.keyboard.press('Escape');
   const ontologyPath = new URL(page.url()).pathname;
   await page.goto(`${ontologyPath}/browse?term=${encodeURIComponent(ACL + 'Authorization')}`);
   await expect(page.getByRole('heading', { name: 'authorization', exact: true })).toBeVisible();
@@ -37,9 +43,10 @@ test('an anonymous visitor reads the released public sample with source, licence
   await expect(page.getByRole('heading', { name: 'Web Access Control', exact: true, level: 1 })).toBeVisible();
   const notice = page.getByRole('region', { name: 'About this sample', exact: true });
   await expect(notice).toContainText('sample copy for trying Concord');
+  await expect(notice).toContainText(HEALTH_NOTE);
   await expect(notice.getByRole('link', { name: 'Web Access Control', exact: true })).toHaveAttribute('href', SOURCE);
   await expect(notice.getByRole('link', { name: 'W3C Software and Document License' })).toHaveAttribute('href', LICENCE);
-  await notice.getByRole('link', { name: 'What the conversion changed' }).click();
+  await notice.locator('summary', { hasText: 'What the conversion changed' }).click();
   await expect(notice.getByText(/Promoted RDFS classes and properties/)).toBeVisible();
   await page.goto('/def/acl/1.0.0#Authorization');
   await expect(page.getByRole('heading', { name: /authorization$/, level: 3 })).toBeVisible();
@@ -51,13 +58,17 @@ test('a tester who stewards the demo can propose a sample edit but cannot change
   const acl = list.find((p) => p.slug === 'acl')!;
   await page.goto(`/o/${acl.id}/governance`);
   await settle(page);
+  const banner = page.getByText('Viewing as Sample proposer');
+  await expect(banner).toContainText('(participant)');
+  await expect(banner).not.toContainText('Owner');
   await expect(page.getByRole('button', { name: 'Edit policy', exact: true })).toHaveCount(0);
   await expect(page.getByText('You can read the policy; only the ontology’s owners can change it.')).toBeVisible();
   await page.goto(`/o/${acl.id}/browse?term=${encodeURIComponent(ACL + 'agent')}`);
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   const form = page.getByRole('form', { name: /^Edit / });
   const comment = `A proposed clarification ${uniq()}`;
-  await form.getByLabel('Comment', { exact: true }).fill(comment);
+  // Field wraps the textarea in its label: exact label text also includes its initial value.
+  await form.getByRole('textbox', { name: 'Comment', exact: true }).fill(comment);
   await expect(form).toContainText('proposed as a change request');
   await form.getByRole('button', { name: 'Save as draft', exact: true }).click();
   await expect(form).toHaveCount(0);
@@ -75,6 +86,7 @@ test('the sample owner can open its policy editor', async ({ page }) => {
   const list = await (await page.request.get('/api/ontologies')).json() as { id: string; slug: string }[];
   const acl = list.find((p) => p.slug === 'acl')!;
   await page.goto(`/o/${acl.id}/governance`);
+  await expect(page.getByText('Viewing as Priya Shah')).toContainText('(Owner, Steward, Editor, Voting member)');
   await page.getByRole('button', { name: 'Edit policy', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Save policy', exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: 'Cancel', exact: true }).first().click();

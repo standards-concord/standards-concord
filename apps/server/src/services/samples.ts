@@ -7,7 +7,7 @@ import { withLease } from '../lease.js';
 import { createProject } from './ontologies.js';
 import { bootstrapRelease, ensurePersonas } from './simulation.js';
 
-/** A separate lease also protects callers outside start-up (demo sign-in and reset). Existing slugs are never touched. */
+/** A separate lease also protects sign-in's cold-start fallback and reset. Existing slugs are never touched. */
 export async function seedSamples(): Promise<OntologyProject[]> {
   if (!config.demoMode) return [];
   const missing = async () => {

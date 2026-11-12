@@ -17,6 +17,8 @@ export interface SampleVocabulary extends SampleAttribution {
   description: string;
 }
 
+export const SAMPLE_HEALTH_NOTE = "Concord's checks flag some wording inherited from the original; it is kept as published so the copy stays faithful.";
+
 const w3c = { name: 'W3C Software and Document License', url: 'https://www.w3.org/copyright/software-license-2023/' };
 const cc0 = { name: 'CC0 1.0', url: 'https://creativecommons.org/publicdomain/zero/1.0/' };
 const common = 'Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings.';

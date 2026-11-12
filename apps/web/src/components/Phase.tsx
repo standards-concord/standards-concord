@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
 import type { ChangeRequestStatus, LifecycleStage, OntologySummary } from '@concord/shared';
+import { SAMPLE_HEALTH_NOTE } from '@concord/shared';
 import { Check, CircleAlert, CircleCheck, CircleDashed } from 'lucide-react';
 import { pct, plural } from '../lib/format';
 import { Popover } from './Disclosure';
@@ -260,6 +261,7 @@ export function HealthBubble({ o, detailsHref, align = 'right' }: { o: OntologyS
           ) : (
             <p className="text-muted">Validation runs when the ontology changes.</p>
           )}
+          {o.sample && <p className="mt-3 text-xs text-muted">{SAMPLE_HEALTH_NOTE}</p>}
           {incomplete.length > 0 && (
             <div className="mt-3 rounded-lg bg-warn-soft p-2.5 text-xs text-warn" role="note">
               <strong className="font-medium">Not every check could run.</strong> {incomplete.join('. ')}. A clean result here is not a full guarantee.
