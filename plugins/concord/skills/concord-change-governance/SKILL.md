@@ -7,7 +7,7 @@ description: Propose and follow ontology changes through Concord - report gaps, 
 
 Concord, from the Open Data Institute, hosts open data standards as strict OWL 2 ontologies and runs every change through the same pipeline: **propose → classify (patch / minor / major) → validate → review under the ontology's governance policy → merge into the working draft → release**. Nothing reaches an ontology without a change request. This skill covers how to take part in that pipeline, as an agent or for a person.
 
-Write terms with the ontology-term-drafting skill and check them with the ontology-checking skill; Concord runs the same checks when you propose.
+This skill builds on two general skills that work with any OWL ontology, with or without Concord: **ontology-term-drafting** (how to write terms) and **ontology-checking** (how to check them). This one adds what is specific to Concord: its tools, how it checks and classifies changes, and how its governance decides.
 
 ## Connecting
 
@@ -82,13 +82,31 @@ A fork is your own pre-release, so app work isn't blocked by review:
 6. `sync_fork` replays outstanding edits on the latest draft. If upstream changed a term the fork also changes, or the result would be inconsistent, nothing changes and the conflicts come back: `discard_fork_changes` for those terms, sync, then redo with `edit_fork` if still needed.
 7. When `check_forks` says switch, replace the import URLs it gives (`/def/<ontology>/<version>` or `/draft`; use the `.ttl` form if your code fetches without an Accept header), then `close_fork`. Closed forks keep resolving.
 
+## How Concord checks a change
+
+Every change request is validated automatically. The layers are the ones in the ontology-checking skill, with Concord's settings:
+
+- **The gate:** strict lint has no errors, sparq's OWL 2 DL reasoner (`checkOwlDl`, on the server and in the browser) finished and found the ontology consistent, and no class is unsatisfiable. With no verdict, validation fails closed. Every governance template requires validation, so a request that fails can't be approved.
+- **Lint codes** in the report are stable names such as `multiple-labels`, `label-collision`, `undeclared-term`, `definition-not-genus-differentia`, `deprecated-term-used`, `code-duplicate-notation` and `datatype-not-owl2`. Each maps to a check in the ontology-checking skill's lint layer.
+- **Datatypes outside the OWL 2 map** (such as `xsd:date`) are treated as `rdfs:Literal` for reasoning, and the report says so.
+- **Imports:** reasoning runs over the ontology with its import closure. An ontology can list committed federations, and a change that breaks one fails.
+- **SHACL is always derived from the OWL**, never authored separately, so to change what data is required, change the OWL. Fetch the shapes with `get_ontology` (format `shacl`, or `shaclc` for the readable form) or from `/def/<ontology>/<version>.shacl.ttl`.
+- **Competency questions** from use cases run as SPARQL tests with their example data.
+- **Classification** labels each change patch, minor or major with explicit rules, following the table in the ontology-term-drafting skill, section 8. Two rules that surprise people: an existing class gaining an existing class as superclass is major, and an existing property gaining a code list is major (minor if the property is new in the same change).
+
+## Checking data with Concord
+
+- **Connector:** `validate_data` with the data, its format, and `version` (`"draft"`, a release such as `1.2.0`, or the default latest release). It checks the derived shapes, terms the ontology doesn't define or has deprecated, and logical contradictions.
+- **HTTP:** `POST` the data to the ontology or version address: `curl -X POST https://standards-concord.vercel.app/def/<ontology>/<version> -H 'Content-Type: text/turtle' --data-binary @data.ttl`. JSON report by default (`conforms` is SHACL only, `valid` is SHACL plus no term errors); `Accept: text/turtle` returns a SHACL `sh:ValidationReport`. Turtle, JSON-LD, N-Triples, N-Quads, TriG and RDF/XML; up to 5 MB (JSON-LD 2 MB) or 25,000 triples, 30 requests a minute.
+- **Web app:** an ontology's *Validate data* page checks pasted or uploaded data in the browser as you type, and *Check data in a SPARQL endpoint* checks a bounded live sample (one fixed `CONSTRUCT` per class, at most 25,000 triples or 5 MB). The browser queries the endpoint directly, so it must allow CORS; no credentials are sent.
+
 ## After proposing: following a change request
 
 `get_change_request` returns `status`, `level`, `reasons`, `validationPassed`, `errors` and `next` (what the policy is waiting for), plus the link. Statuses:
 
 `draft` → `triage` (classifying and validating) → `review` → `voting` (if the policy calls a vote) → `approved` → `merged` (in the working draft) → `released`. Side exits: `needs-work` (validation failed or reviewers asked for changes), `rejected`, `withdrawn`.
 
-- **`needs-work` with errors**: fix the terms (ontology-checking skill) and re-propose: `edit_fork` then `propose_fork` updates the same request; otherwise follow the link and edit it, or open a corrected `propose_change`.
+- **`needs-work` with errors**: fix the terms (ontology-checking skill, and the lint codes above) and re-propose: `edit_fork` then `propose_fork` updates the same request; otherwise follow the link and edit it, or open a corrected `propose_change`.
 - **Level surprises you**: read the `reasons`. A major classification usually means an additive alternative exists (a new subclass or property instead of narrowing an existing one).
 - Don't open duplicates. Check the ontology's *Changes* tab for open requests on the same terms first.
 

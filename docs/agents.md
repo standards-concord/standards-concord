@@ -15,13 +15,13 @@ This repo is also a plugin marketplace for Claude Code (`/plugin marketplace add
 
 ## Ontology development skills
 
-The plugin also ships three [Agent Skills](https://agentskills.io) in [`plugins/concord/skills`](../plugins/concord/skills), so an agent that installs it knows how to work on ontologies the way Concord checks them:
+The plugin also ships three [Agent Skills](https://agentskills.io) in [`plugins/concord/skills`](../plugins/concord/skills). The first two are general ontology development skills that don't depend on Concord, so they can be shared with anyone who builds OWL ontologies; the third adds what is specific to Concord:
 
-- [`ontology-term-drafting`](../plugins/concord/skills/ontology-term-drafting/SKILL.md): writing and reviewing terms (reuse first, naming, labels, genus–differentia definitions, placement, alignment, code lists, changing released terms).
-- [`ontology-checking`](../plugins/concord/skills/ontology-checking/SKILL.md): the validation gate layer by layer (lint codes, OWL 2 DL reasoning with sparq, imports, FAIR, competency questions, derived SHACL, data validation, change impact).
-- [`concord-change-governance`](../plugins/concord/skills/concord-change-governance/SKILL.md): taking part through Concord (the MCP tools, `report_gap` vs `propose_change` vs forks, following a change request, governance templates, reviewing, releases).
+- [`ontology-term-drafting`](../plugins/concord/skills/ontology-term-drafting/SKILL.md) (general): writing and reviewing terms (reuse first, naming, labels, genus–differentia definitions, placement, alignment, code lists, patch/minor/major changes to published terms).
+- [`ontology-checking`](../plugins/concord/skills/ontology-checking/SKILL.md) (general): checking an ontology layer by layer (lint, OWL 2 DL reasoning with sparq or another reasoner, imports, FAIR, competency questions, SHACL, data validation, change impact).
+- [`concord-change-governance`](../plugins/concord/skills/concord-change-governance/SKILL.md) (Concord): the MCP tools, `report_gap` vs `propose_change` vs forks, how Concord checks and classifies a change, checking data, following a change request, governance templates, reviewing and releases.
 
-They are written from the rules in `packages/core` (lint, classifier, SHACL derivation), the modelling prompts in `apps/server/src/llm/prompts.ts`, the MCP tool descriptions and the governance templates. When one of those changes, update the matching skill. To use a skill without the plugin, upload its folder as a zip in Claude's settings (Capabilities → Skills).
+The rules come from `packages/core` (lint, classifier, SHACL derivation), the modelling prompts in `apps/server/src/llm/prompts.ts`, the MCP tool descriptions and the governance templates. When one of those changes, update the matching skill, and keep Concord specifics out of the two general ones. To use a skill without the plugin, upload its folder as a zip in Claude's settings (Capabilities → Skills).
 
 ## Development forks
 
