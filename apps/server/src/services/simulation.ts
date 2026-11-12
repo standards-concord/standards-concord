@@ -24,6 +24,7 @@ import { releasePageFiles } from '../public/routes.js';
 import { PERSONAS, type PersonaSpec } from './personas.js';
 import { describeOp } from './proposals.js';
 import { releaseGovernance, releaseTick, voteOnRelease } from './releases.js';
+import { projectVersionIRI } from './releaseIri.js';
 import { sourceLinesFor } from './meetings.js';
 import { generateRequirements, markPublished } from './requirements.js';
 import { addLink, createUseCase, getUseCase, proposeAnonymised, publishAnonymised } from './useCases.js';
@@ -292,7 +293,7 @@ async function seedConnectedApp(project: OntologyProject, owner: User, passesId:
 
 export async function bootstrapRelease(project: OntologyProject, steward: User, version: string, notes: string, beforeWrite?: (r: Release) => Promise<void>) {
   const working = await ontologyStore.working(project);
-  const stamped = stampRelease(working, { version, level: 'major', date: clock.iso().slice(0, 10), backwardCompatible: true });
+  const stamped = stampRelease(working, { version, versionIRI: projectVersionIRI(project, version), level: 'major', date: clock.iso().slice(0, 10), backwardCompatible: true });
   const files: Record<string, string> = {};
   for (const f of Object.keys(FORMAT_INFO) as OutputFormat[]) {
     if (f === 'turtle') continue;

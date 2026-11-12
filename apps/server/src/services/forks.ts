@@ -27,6 +27,7 @@ import { competencyTests, findProject, getProject, rolesFor, setRoles } from './
 import { ontologyStore } from './ontologyStore.js';
 import { describeOp, proposalToOps } from './proposals.js';
 import { getUser, logActivity, publicUser } from './users.js';
+import { projectVersionIRI } from './releaseIri.js';
 
 /**
  * Development forks.
@@ -196,7 +197,6 @@ export function forkUrls(p: Pick<OntologyProject, 'slug'>, f: Pick<OntologyFork,
 
 /** Public URL of a released version, or of the working draft (the public pages, public/routes.ts); fork documents sit under /def/<slug>/forks/. */
 export const versionUrl = (p: Pick<OntologyProject, 'slug'>, version: string | 'draft') => `${publicRoot(p)}/${version}`;
-const releaseVersionIRI = (p: OntologyProject, version: string) => `${p.ontologyIRI.replace(/[#/]$/, '')}/${version}`;
 
 export const forkVersion = (f: Pick<OntologyFork, 'baseVersion' | 'slug' | 'revision'>) => `${f.baseVersion}-fork.${f.slug}.${f.revision}`;
 
@@ -206,7 +206,7 @@ function stamp(graph: OntologyGraph, p: OntologyProject, f: OntologyFork): Ontol
   setMetadata(g, {
     versionIRI: forkUrls(p, f).iri,
     versionInfo: forkVersion(f),
-    ...(f.baseVersion !== '0.0.0' ? { priorVersion: releaseVersionIRI(p, f.baseVersion) } : {}),
+    ...(f.baseVersion !== '0.0.0' ? { priorVersion: projectVersionIRI(p, f.baseVersion) } : {}),
     modified: clock.iso().slice(0, 10),
   });
   return g;

@@ -41,6 +41,9 @@ test('an anonymous visitor reads the released public sample with source, licence
   // A real public release: a reader does not need a session.
   await page.goto('/def/acl/1.0.0');
   await expect(page.getByRole('heading', { name: 'Web Access Control', exact: true, level: 1 })).toBeVisible();
+  const thisVersion = page.locator('.row').filter({ has: page.locator('dt', { hasText: /^This version$/ }) }).locator('dd');
+  await expect(thisVersion).toContainText('/def/acl/1.0.0');
+  await expect(thisVersion).not.toContainText('w3.org');
   const notice = page.getByRole('region', { name: 'About this sample', exact: true });
   await expect(notice).toContainText('sample copy for trying Concord');
   await expect(notice).toContainText(HEALTH_NOTE);
