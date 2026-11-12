@@ -15,6 +15,8 @@ export const STEPS = [
 ] as const;
 export type StepId = (typeof STEPS)[number]['id'];
 
+export const showWalkthroughDock = (pathname: string) => !['/alpha', '/login', '/welcome'].some((p) => pathname.startsWith(p));
+
 interface State {
   step: number;
   open: boolean;

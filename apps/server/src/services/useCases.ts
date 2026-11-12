@@ -37,6 +37,7 @@ import { proposalToOps, toLocalName } from './proposals.js';
 import { solid, transcriptToTurtle } from './solid.js';
 import { syncUseCase } from './traceability.js';
 import { getUser, logActivity } from './users.js';
+import { interviewTitle } from './useCaseTitle.js';
 
 /* ------------------------------------------------------------------------ */
 /* Use cases                                                                 */
@@ -1067,7 +1068,7 @@ function heuristicTurn(project: OntologyProject, session: InterviewSession, u: U
   switch (lastTarget) {
     case 'goal':
       updates.goal = text;
-      updates.name = s.name ?? text.split(/[.!?]/)[0].slice(0, 80);
+      updates.name = interviewTitle(s.name, '', text);
       break;
     case 'actors':
       updates.actors = text;
@@ -1195,6 +1196,7 @@ export async function interviewTurn(session: InterviewSession, user: User, conte
   if (session.userId !== user.id) throw new HttpError(404, `interview ${session.id} not found`);
   const project = await getProject(session.ontologyId);
   const u = await getUseCase(session.useCaseId);
+  const previousTitle = u.sections.name;
   session.messages.push(msg('user', content));
   const graph = await ontologyStore.working(project);
   const { value: turn } = await llm.json<InterviewTurn>({
@@ -1212,9 +1214,15 @@ export async function interviewTurn(session: InterviewSession, user: User, conte
     fallback: () => heuristicTurn(project, session, u, content),
   });
   mergeTurn(u, turn);
+  if (session.messages.filter((m) => m.role === 'user').length === 1) u.sections.name = interviewTitle(u.sections.name, user.name, content);
   session.messages.push(msg('assistant', turn.reply, turn.targets as ChatMessage['targets']));
   // Only what the interview captured: a visibility or consent change made during the model call stands.
-  await saveFields(u, ['sections', 'competencyQuestions', 'terms']);
+  await transaction(async () => {
+    // A title edited while the interviewer was thinking belongs to that person.
+    const fresh = await getUseCase(u.id);
+    if (fresh.sections.name !== previousTitle) u.sections.name = fresh.sections.name;
+    await saveFields(u, ['sections', 'competencyQuestions', 'terms']);
+  });
   if (turn.done) await completeInterview(session, await getUseCase(u.id), user);
   await saveInterview(session);
   await persistTranscript(session, u);

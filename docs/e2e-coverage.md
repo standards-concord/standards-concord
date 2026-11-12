@@ -6,6 +6,24 @@ Status: ✅ covered by a test that drives the flow · 🟡 opened or shown, but 
 
 Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) cover server rules in more depth; this map is only about the browser suite.
 
+## Phase 0 regression coverage
+
+`phase-0.spec.ts` covers the following reviewed behaviours. Round 2 fixes the six failures from the initial browser review, with extra checks for banner word spacing and flat Browse summaries. Browser execution in the implementation sandbox is blocked by `listen EPERM` before the servers start; the updated specs still need a normal local or CI run.
+
+| Brief | Route or flow | Coverage |
+| --- | --- | --- |
+| 0.1 | Interview title from the first answer; Open use cases hide other authors' drafts and withdrawals; authors can find their own drafts; Changes excludes withdrawals | phase-0; title boundaries and preserved names in `apps/server/test/useCaseTitle.test.ts`; shell response parsing, both cleanup POSTs and retained smoke checks in `apps/server/test/smokeScript.test.ts` |
+| 0.1 | Governance member summary limited to eight names, role holders first; search above twelve members for managers and readers | phase-0; reader cannot edit roles |
+| 0.2 | Header excludes drafts; Overview shows the viewer's own draft as Your draft; Changes Open retains Draft labels | phase-0 |
+| 0.3 | Home and Overview future activity uses calendar dates and sorts newest first | phase-0; date behaviour in `format.test.ts`; seed history stays before the shared clock in `apps/server/test/demoSeed.test.ts` |
+| 0.4 | Compact minimised guide at 1280px and 390px, space below the footer, expanded guide and closing it | phase-0, alpha |
+| 0.5 | Active section and sub-tab fully revealed at 390px, edge fades, one-line persona banner with real word spacing and accessible roles, no horizontal page overflow | phase-0, alpha |
+| 0.6 | Withdrawal outcome and actor, Approval details still available; merged and rejected outcome assertions | phase-0, change-requests, governance-flow; vote tallies, veto roles, sign-offs and decision dates in `changeOutcome.test.ts` |
+| 0.7 | Secondary import button opens its dialog; signed-out access remains refused | phase-0, imports |
+| 0.8 | Browse summary counts, linked class labels above muted first-sentence definitions, at most twelve root classes then the remaining count, term selection and Show the diagram; flat ontologies with 10, 12, 13 and 75 roots | phase-0 |
+| 0.9 | Nonempty draft release prompt links to an enabled publication action for a steward; absent for an editor | phase-0 |
+| 0.10 | Health includes questions without executable tests and explains test eligibility in the disclosure | phase-0 |
+
 ## Pages (web app routes)
 
 | Route | What a person does there | Status | Specs |

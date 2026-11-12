@@ -1,11 +1,12 @@
 import type { ChangeLevel, Role } from '@concord/shared';
 import { ROLE_INFO } from '@concord/shared';
 
-export function relativeTime(iso: string | undefined, now: number = Date.now()): string {
+export function relativeTime(iso: string | undefined, now: number = Date.now(), dateIfFuture = false): string {
   if (!iso) return '';
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return '';
   const diff = t - now;
+  if (dateIfFuture && diff > 0) return new Date(t).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
   const abs = Math.abs(diff);
   const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
   const units: [Intl.RelativeTimeFormatUnit, number][] = [

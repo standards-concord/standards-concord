@@ -352,7 +352,7 @@ test('an objection from a veto role rejects a change outright', async ({ page })
   await actions.getByRole('textbox').fill('Out of scope for this standard.');
   await actions.getByRole('button', { name: 'Object' }).click();
   await expect(page.getByRole('button', { name: /^Status: Rejected/ })).toBeVisible();
-  await expect(page.getByText(/No actions — this request is rejected/)).toBeVisible();
+  await expect(page.getByTestId('decision-outcome')).toContainText(`Rejected by ${steward.name} (owner veto) on`);
 });
 
 test('the owner transfers ownership to another member', async ({ page }) => {

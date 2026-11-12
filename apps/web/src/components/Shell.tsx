@@ -4,7 +4,7 @@ import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Shie
 import { api, ApiError } from '../api';
 import { beginSignOut, finishSignOut, markSignOutPending, useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
-import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
+import { testerRoleFor, useWalkthrough, showWalkthroughDock } from '../lib/walkthrough';
 import { useAction, useTick } from '../lib/hooks';
 import { formatDate, roleLabel } from '../lib/format';
 import { Logo, OdiLogo } from './badges';
@@ -186,10 +186,11 @@ function DemoBanner() {
   return (
     <div className="border-b border-accent/20 bg-accent-soft text-sm">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-x-4 gap-y-1.5 px-4 py-1.5 sm:px-6">
-        <div className="min-w-0">
-          Viewing as <strong>{session.user.name}</strong> <span className="text-muted">({roles})</span> —{' '}
+        <div className="flex min-w-0 max-w-full items-baseline gap-1 whitespace-nowrap" data-testid="demo-persona">
+          <span className="min-w-0 truncate">Viewing as <strong>{session.user.name}</strong><span className="hidden text-muted sm:inline"> ({roles})</span></span><span className="sm:hidden"> · </span><span className="hidden sm:inline"> — </span>
           <button
-            className="font-medium text-accent hover:underline"
+            className="shrink-0 font-medium text-accent hover:underline"
+            aria-label={`switch role (${roles})`}
             onClick={() => {
               w.setStep(1);
               nav('/alpha');
@@ -228,8 +229,12 @@ function DemoBanner() {
 }
 
 export function Shell({ children }: { children: ReactNode }) {
+  const w = useWalkthrough();
+  const loc = useLocation();
+  const reserveGuideSpace = showWalkthroughDock(loc.pathname) && !w.open;
+  // The guide is 44px high, 16px from the bottom, with 8px clear above it.
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col" style={reserveGuideSpace ? { paddingBottom: 68 } : undefined}>
       {/* Skips the repeated header. It focuses <main> without touching the URL hash, which some pages use for their own sections. */}
       <a
         href="#main"

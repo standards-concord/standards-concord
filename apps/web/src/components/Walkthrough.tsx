@@ -6,7 +6,7 @@ import { api } from '../api';
 import { useAction, useAsync } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { useDemoOntology } from '../lib/ontologies';
-import { STEPS, TESTER_ROLES, tasksFor, testerRoleFor, useWalkthrough } from '../lib/walkthrough';
+import { STEPS, TESTER_ROLES, tasksFor, testerRoleFor, useWalkthrough, showWalkthroughDock } from '../lib/walkthrough';
 import { formatDate, roleLabel } from '../lib/format';
 import { ActivityList } from './ActivityFeed';
 import { Avatar, Badge, Button, ErrorCard, InlineError, Loading, cx, LinkButton } from './ui';
@@ -357,25 +357,18 @@ export function WalkthroughDock() {
   const w = useWalkthrough();
   const loc = useLocation();
   const nav = useNavigate();
-  const demo = useDemoOntology();
-  if (loc.pathname.startsWith('/alpha') || loc.pathname.startsWith('/login') || loc.pathname.startsWith('/welcome')) return null;
-  // On the explore step, the pill names the next suggested task and how many are done; otherwise the step.
-  const tasks = STEPS[w.step]?.id === 'tour' && demo ? tasksFor(w.myRoles, demo.id) : [];
-  const nextTask = tasks.find((t) => !w.done[t.id]);
-  const pillLabel = nextTask ? `Try next: ${nextTask.label}` : STEPS[w.step].title;
-  const pillProgress = tasks.length ? `${tasks.filter((t) => w.done[t.id]).length}/${tasks.length} tasks` : `Step ${w.step + 1}/${STEPS.length}`;
+  if (!showWalkthroughDock(loc.pathname)) return null;
   return (
     <>
       {!w.open && (
         <button
           onClick={() => w.setOpen(true)}
-          aria-label={`Walkthrough: ${pillLabel}. Open the guide`}
-          className="fixed right-4 bottom-4 z-40 inline-flex max-w-[calc(100vw-2rem)] items-center gap-2 rounded-pill border border-line-strong bg-surface px-4 py-2.5 text-sm font-medium shadow-lg hover:bg-surface-2"
+          aria-label={`Walkthrough, step ${w.step + 1} of ${STEPS.length}`}
+          className="fixed right-4 bottom-4 z-40 inline-flex size-11 items-center justify-center rounded-full border border-line-strong bg-surface text-sm font-medium shadow-lg hover:bg-surface-2 md:w-auto md:gap-2 md:rounded-pill md:px-4"
         >
-          <Compass className="size-4 shrink-0 text-accent" />
-          <span className="shrink-0">Walkthrough</span>
-          <span className="hidden min-w-0 truncate font-normal text-muted sm:inline">· {pillLabel}</span>
-          <Badge tone="accent">{pillProgress}</Badge>
+          <Compass className="size-4 shrink-0 text-accent" aria-hidden />
+          <span className="hidden md:inline">Step {w.step + 1} of {STEPS.length}</span>
+          <span aria-hidden className="absolute -top-1 -right-1 flex size-4 items-center justify-center rounded-full bg-accent text-[10px] text-accent-fg md:hidden">{w.step + 1}</span>
         </button>
       )}
       {w.open && (

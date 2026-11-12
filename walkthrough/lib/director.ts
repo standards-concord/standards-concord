@@ -169,9 +169,18 @@ export class Director {
     const l = await this.find(target, what);
     if (!l) return undefined;
     await l.scrollIntoViewIfNeeded().catch(() => {});
-    const box = await l.boundingBox();
+    let box = await l.boundingBox();
     if (!box) return undefined;
-    await this.moveTo(box.x + Math.min(box.width / 2, 60), box.y + box.height / 2);
+    let x = box.x + Math.min(box.width / 2, 60), y = box.y + box.height / 2;
+    // "In the viewport" can still mean hidden under the sticky header (or the walkthrough button), so centre it if something else is on top.
+    const covered = await l.evaluate((e, [px, py]) => { const top = document.elementFromPoint(px, py); return !top || !(e === top || e.contains(top) || top.contains(e)); }, [x, y] as const).catch(() => false);
+    if (covered) {
+      await l.evaluate((e) => e.scrollIntoView({ block: 'center', inline: 'nearest' })).catch(() => {});
+      box = await l.boundingBox();
+      if (!box) return undefined;
+      x = box.x + Math.min(box.width / 2, 60); y = box.y + box.height / 2;
+    }
+    await this.moveTo(x, y);
     return l;
   }
 

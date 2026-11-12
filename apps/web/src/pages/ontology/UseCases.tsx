@@ -184,7 +184,7 @@ export function UseCasesTab() {
 
 type Filter = 'open' | 'triage' | 'closed' | 'mine' | 'all';
 const FILTERS: Record<Filter, { label: string; test: (u: UseCase, me?: string) => boolean }> = {
-  open: { label: 'Open', test: (u) => USE_CASE_STATUS_INFO[u.status]?.open && u.status !== 'archived' },
+  open: { label: 'Open', test: (u, me) => !u.withdrawnAt && USE_CASE_STATUS_INFO[u.status]?.open && u.status !== 'archived' && (u.status !== 'draft' || u.authorId === me) },
   triage: { label: 'Needs triage', test: (u) => u.status === 'triage' },
   closed: { label: 'Closed', test: (u) => !USE_CASE_STATUS_INFO[u.status]?.open },
   mine: { label: 'Mine', test: (u, me) => !!me && u.authorId === me },

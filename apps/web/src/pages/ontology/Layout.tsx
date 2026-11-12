@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, Outlet, useLocation, useNavigate, useParams } from 'react-router';
 import type { OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
@@ -66,6 +66,35 @@ function rememberedPath(id: string, section: string): string | undefined {
   }
 }
 
+/** Keep the current page visible and hint at tabs beyond either edge, without moving the page vertically. */
+function ScrollNav({ label, activeKey, className, children }: { label: string; activeKey: string; className: string; children: ReactNode }) {
+  const ref = useRef<HTMLElement>(null);
+  const [edges, setEdges] = useState({ before: false, after: false });
+  useEffect(() => {
+    const el = ref.current!;
+    const active = el.querySelector<HTMLElement>('[aria-current="page"]');
+    const measure = () => setEdges({ before: el.scrollLeft > 1, after: el.scrollLeft + el.clientWidth < el.scrollWidth - 1 });
+    const reveal = () => {
+      active?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
+      measure();
+    };
+    reveal();
+    const observer = new ResizeObserver(reveal);
+    observer.observe(el);
+    if (active) observer.observe(active);
+    el.addEventListener('scroll', measure, { passive: true });
+    return () => { observer.disconnect(); el.removeEventListener('scroll', measure); };
+  }, [activeKey]);
+  return (
+    <div className="relative min-w-0">
+      {/* Keep tabs clear of the 16px fades, with room for fractional pixel rounding at the end. */}
+      <nav ref={ref} aria-label={label} className={cx(className, 'scroll-px-5 pr-5')} data-more-before={edges.before} data-more-after={edges.after}>{children}</nav>
+      {edges.before && <span aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-4" style={{ background: 'linear-gradient(to right, var(--surface), transparent)' }} />}
+      {edges.after && <span aria-hidden className="pointer-events-none absolute inset-y-0 right-0 w-4" style={{ background: 'linear-gradient(to left, var(--surface), transparent)' }} />}
+    </div>
+  );
+}
+
 function SectionNav({ id }: { id: string }) {
   const loc = useLocation();
   const nav = useNavigate();
@@ -86,7 +115,7 @@ function SectionNav({ id }: { id: string }) {
   }, [id, current, activeTab, loc.pathname, loc.search]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <>
-      <nav className="-mb-px mt-4 flex gap-1 overflow-x-auto" aria-label="Ontology sections">
+      <ScrollNav className="-mb-px mt-4 flex gap-1 overflow-x-auto" label="Ontology sections" activeKey={current.label}>
         {SECTIONS.map((s) => {
           const active = s === current;
           const target = () => {
@@ -105,16 +134,16 @@ function SectionNav({ id }: { id: string }) {
                 nav(target());
               }}
               aria-current={active ? 'page' : undefined}
-              className={cx('border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition-colors', active ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')}
+              className={cx('shrink-0 border-b-2 px-3 py-2.5 text-sm whitespace-nowrap transition-colors', active ? 'border-accent font-medium text-fg' : 'border-transparent text-muted hover:text-fg')}
             >
               {s.label}
             </Link>
           );
         })}
-      </nav>
+      </ScrollNav>
       {current.tabs.length > 1 && (
         <div className="border-t border-line">
-          <nav className="flex gap-1 overflow-x-auto py-2" aria-label={`${current.label} pages`}>
+          <ScrollNav className="flex gap-1 overflow-x-auto py-2" label={`${current.label} pages`} activeKey={`${activeTab}|${advanced}`}>
             {/* Advanced pages (Settings → Advanced features) only show when that is on, or while you're on one. */}
             {current.tabs.filter(([path]) => advanced || !ADVANCED_TABS.has(path) || path === activeTab).map(([path, label]) => {
               const active = path === activeTab;
@@ -123,13 +152,13 @@ function SectionNav({ id }: { id: string }) {
                   key={path}
                   to={href(path)}
                   aria-current={active ? 'page' : undefined}
-                  className={cx('rounded-pill px-3 py-1 text-sm whitespace-nowrap transition-colors', active ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')}
+                  className={cx('shrink-0 rounded-pill px-3 py-1 text-sm whitespace-nowrap transition-colors', active ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')}
                 >
                   {label}
                 </Link>
               );
             })}
-          </nav>
+          </ScrollNav>
         </div>
       )}
     </>

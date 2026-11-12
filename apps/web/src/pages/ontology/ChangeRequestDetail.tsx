@@ -22,6 +22,7 @@ import { Avatar, Badge, Button, Card, CardHeader, Dialog, ErrorCard, InlineError
 import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
 import { needsOdiApproval, odiApproved } from '../../lib/asks';
+import { changeOutcome } from '../../lib/changeOutcome';
 
 /**
  * A request drafted from use cases (which may be private) is published only
@@ -160,7 +161,7 @@ function ActionBar({ cr, onUpdate }: { cr: ChangeRequestDetail; onUpdate: (d: Ch
   // Reviews from an earlier round (before a resubmission or new edits) don't count, as on the server.
   const odiDone = odiNeeded && odiApproved(cr.reviews.filter((r) => !r.stale), ontology.members ?? [], '');
 
-  if (!open) return <p className="text-sm text-muted">No actions — this request is {cr.status}.</p>;
+  if (!open) return null;
 
   return (
     <div className="space-y-3">
@@ -663,7 +664,7 @@ export function ChangeRequestPage() {
           <Card>
             <CardHeader icon={Scale} title="Decision" subtitle={`${ontology.governance.name} · ${plural(cr.reviews.filter((r) => r.decision !== 'comment').length, 'review')}`} />
             <div className="space-y-4 p-5">
-              <GovernancePanel g={cr.governance} userById={userById} actions={<ActionBar cr={cr} onUpdate={state.setData} />} />
+              <GovernancePanel g={cr.governance} userById={userById} outcome={changeOutcome(cr, (uid) => userById(uid)?.name)} actions={<ActionBar cr={cr} onUpdate={state.setData} />} />
               <PolicyGlance policy={ontology.governance} ontologyId={id} />
             </div>
           </Card>
