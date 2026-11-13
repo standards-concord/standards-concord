@@ -1,4 +1,4 @@
-import { Component, lazy, Suspense, useEffect, type ReactNode } from 'react';
+import { Component, lazy, useEffect, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { SessionProvider, useSession } from './lib/session';
 import { OntologiesProvider } from './lib/ontologies';
@@ -6,41 +6,45 @@ import { WalkthroughProvider } from './lib/walkthrough';
 import { Page, Shell } from './components/Shell';
 import { Button, ErrorCard, Loading } from './components/ui';
 import { LoginPage } from './pages/Login';
-import { JoinPage } from './pages/Join';
 import { HubPage } from './pages/Hub';
-import { FederationPage, FederationsPage } from './pages/Federations';
-import { AlphaPage } from './pages/Alpha';
-import { FeedbackPage } from './pages/Feedback';
-import { WelcomePage } from './pages/Welcome';
-import { SettingsPage } from './pages/Settings';
-import { AppearancePage } from './pages/Appearance';
 import { NotFound } from './pages/NotFound';
-import { PrivacyPage } from './pages/Privacy';
-import { OntologyLayout } from './pages/ontology/Layout';
-import { OverviewTab } from './pages/ontology/Overview';
-import { BrowseTab } from './pages/ontology/Browse';
-import { SourceTab } from './pages/ontology/Source';
-import { QueryTab } from './pages/ontology/Query';
-import { ValidateTab } from './pages/ontology/Validate';
-import { UseCasesTab } from './pages/ontology/UseCases';
-import { UseCaseDetailPage } from './pages/ontology/UseCaseDetail';
-import { InterviewPage } from './pages/ontology/Interview';
-import { MeetingsTab } from './pages/ontology/Meetings';
-import { MeetingDetailPage } from './pages/ontology/MeetingDetail';
-import { ChangeRequestsTab } from './pages/ontology/ChangeRequests';
-import { ChangeRequestPage } from './pages/ontology/ChangeRequestDetail';
-import { ForksTab } from './pages/ontology/Forks';
-import { ForkPage } from './pages/ontology/ForkDetail';
-import { ReleasesTab } from './pages/ontology/Releases';
-import { ReleaseDetailPage } from './pages/ontology/ReleaseDetail';
-import { RequirementsDocPage } from './pages/ontology/RequirementsDoc';
-import { GovernanceTab } from './pages/ontology/Governance';
-import { AgentReportsTab, ConnectAgentTab } from './pages/ontology/Agents';
-import { ConnectPage } from './pages/Connect';
-import { OAuthAuthorizePage } from './pages/OAuthAuthorize';
-import { AppsTab } from './pages/ontology/Apps';
+import { RouteBoundary } from './components/RouteBoundary';
+import { pageChunk } from './lib/routeChunks';
 
-const AdminFeedbackPage = lazy(() => import('./pages/AdminFeedback').then((m) => ({ default: m.AdminFeedbackPage })));
+const JoinPage = lazy(pageChunk('join', () => import('./pages/Join').then((m) => ({ default: m.JoinPage }))));
+const FederationPage = lazy(pageChunk('federation-detail', () => import('./pages/Federations').then((m) => ({ default: m.FederationPage }))));
+const FederationsPage = lazy(pageChunk('federations', () => import('./pages/Federations').then((m) => ({ default: m.FederationsPage }))));
+const AlphaPage = lazy(pageChunk('alpha', () => import('./pages/Alpha').then((m) => ({ default: m.AlphaPage }))));
+const FeedbackPage = lazy(pageChunk('feedback', () => import('./pages/Feedback').then((m) => ({ default: m.FeedbackPage }))));
+const WelcomePage = lazy(pageChunk('welcome', () => import('./pages/Welcome').then((m) => ({ default: m.WelcomePage }))));
+const SettingsPage = lazy(pageChunk('settings', () => import('./pages/Settings').then((m) => ({ default: m.SettingsPage }))));
+const AppearancePage = lazy(pageChunk('appearance', () => import('./pages/Appearance').then((m) => ({ default: m.AppearancePage }))));
+const PrivacyPage = lazy(pageChunk('privacy', () => import('./pages/Privacy').then((m) => ({ default: m.PrivacyPage }))));
+const OntologyLayout = lazy(pageChunk('layout', () => import('./pages/ontology/Layout').then((m) => ({ default: m.OntologyLayout }))));
+const OverviewTab = lazy(pageChunk('overview', () => import('./pages/ontology/Overview').then((m) => ({ default: m.OverviewTab }))));
+const BrowseTab = lazy(pageChunk('browse', () => import('./pages/ontology/Browse').then((m) => ({ default: m.BrowseTab }))));
+const SourceTab = lazy(pageChunk('source', () => import('./pages/ontology/Source').then((m) => ({ default: m.SourceTab }))));
+const QueryTab = lazy(pageChunk('query', () => import('./pages/ontology/Query').then((m) => ({ default: m.QueryTab }))));
+const ValidateTab = lazy(pageChunk('validate', () => import('./pages/ontology/Validate').then((m) => ({ default: m.ValidateTab }))));
+const UseCasesTab = lazy(pageChunk('use-cases', () => import('./pages/ontology/UseCases').then((m) => ({ default: m.UseCasesTab }))));
+const UseCaseDetailPage = lazy(pageChunk('usecasedetail', () => import('./pages/ontology/UseCaseDetail').then((m) => ({ default: m.UseCaseDetailPage }))));
+const InterviewPage = lazy(pageChunk('interview', () => import('./pages/ontology/Interview').then((m) => ({ default: m.InterviewPage }))));
+const MeetingsTab = lazy(pageChunk('meetings', () => import('./pages/ontology/Meetings').then((m) => ({ default: m.MeetingsTab }))));
+const MeetingDetailPage = lazy(pageChunk('meetingdetail', () => import('./pages/ontology/MeetingDetail').then((m) => ({ default: m.MeetingDetailPage }))));
+const ChangeRequestsTab = lazy(pageChunk('changes', () => import('./pages/ontology/ChangeRequests').then((m) => ({ default: m.ChangeRequestsTab }))));
+const ChangeRequestPage = lazy(pageChunk('changerequestdetail', () => import('./pages/ontology/ChangeRequestDetail').then((m) => ({ default: m.ChangeRequestPage }))));
+const ForksTab = lazy(pageChunk('forks', () => import('./pages/ontology/Forks').then((m) => ({ default: m.ForksTab }))));
+const ForkPage = lazy(pageChunk('forkdetail', () => import('./pages/ontology/ForkDetail').then((m) => ({ default: m.ForkPage }))));
+const ReleasesTab = lazy(pageChunk('releases', () => import('./pages/ontology/Releases').then((m) => ({ default: m.ReleasesTab }))));
+const ReleaseDetailPage = lazy(pageChunk('releasedetail', () => import('./pages/ontology/ReleaseDetail').then((m) => ({ default: m.ReleaseDetailPage }))));
+const RequirementsDocPage = lazy(pageChunk('requirementsdoc', () => import('./pages/ontology/RequirementsDoc').then((m) => ({ default: m.RequirementsDocPage }))));
+const GovernanceTab = lazy(pageChunk('governance', () => import('./pages/ontology/Governance').then((m) => ({ default: m.GovernanceTab }))));
+const AgentReportsTab = lazy(pageChunk('agents', () => import('./pages/ontology/Agents').then((m) => ({ default: m.AgentReportsTab }))));
+const ConnectAgentTab = lazy(pageChunk('connect', () => import('./pages/ontology/ConnectAgent').then((m) => ({ default: m.ConnectAgentTab }))));
+const ConnectPage = lazy(pageChunk('account-connect', () => import('./pages/Connect').then((m) => ({ default: m.ConnectPage }))));
+const OAuthAuthorizePage = lazy(pageChunk('oauthauthorize', () => import('./pages/OAuthAuthorize').then((m) => ({ default: m.OAuthAuthorizePage }))));
+const AppsTab = lazy(pageChunk('apps', () => import('./pages/ontology/Apps').then((m) => ({ default: m.AppsTab }))));
+const AdminFeedbackPage = lazy(pageChunk('admin-feedback', () => import('./pages/AdminFeedback').then((m) => ({ default: m.AdminFeedbackPage }))));
 
 class ErrorBoundary extends Component<{ children: ReactNode; resetKey: string }, { error?: Error }> {
   state: { error?: Error } = {};
@@ -122,7 +126,7 @@ function Routed() {
   const loc = useLocation();
   return (
     <ErrorBoundary resetKey={loc.pathname}>
-      <Suspense fallback={<Loading />}>
+      <RouteBoundary>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/join/:secret" element={<JoinPage />} />
@@ -163,7 +167,7 @@ function Routed() {
           </Route>
           <Route path="*" element={<NotFound />} />
         </Routes>
-      </Suspense>
+      </RouteBoundary>
     </ErrorBoundary>
   );
 }

@@ -6,7 +6,8 @@ import { cardWords, isDatatype, qualifiedText, type OntologyModel, type Slot } f
 import { Badge } from '../ui';
 import { compactIri } from '../../lib/format';
 import { TriangleAlert } from 'lucide-react';
-import { ClassDiagram, DEFAULT_DIAGRAM_OPTIONS, neighbourhood } from './ClassDiagram';
+import { DEFAULT_DIAGRAM_OPTIONS, neighbourhood } from './diagramScope';
+import { ClassDiagram } from './LazyClassDiagram';
 
 type Go = (iri: string) => void;
 
