@@ -1,5 +1,6 @@
 import type { ChangeOp, ChangeRequest, OntologyView } from '@concord/shared';
 import type { Restriction, TermAnnotations } from '@concord/core/types';
+import { expandIRI } from '@concord/core/names';
 import { isValidLocalName } from '@concord/core/term-rules';
 import { allTerms } from './ontology';
 
@@ -15,14 +16,19 @@ export function draftedNameError(op: AddedOp, name: string, namespace: string, v
   if (allTerms(view).some((t) => t.iri === namespace + name) || ops.some((o, i) => i !== index && ((isAddedOp(o) && o.localName === name) || (o.op === 'renameTerm' && o.newLocalName === name)))) return 'This IRI is already used. Choose another local name.';
 }
 
-/** Rewrite references, never prose or annotation expectations (which record the starting values). */
-export function rewriteOpIris(op: ChangeOp, oldIri: string, newIri: string, prefixes: Record<string, string> = {}): ChangeOp {
-  const iri = (value: string): string => {
-    if (value === oldIri) return newIri;
-    const colon = value.indexOf(':');
-    if (colon >= 0 && prefixes[value.slice(0, colon)] + value.slice(colon + 1) === oldIri) return newIri;
-    return value;
-  };
+/** Whether a property's fact values are literal text: a datatype property in the ontology or drafted in these edits. */
+export function literalFacts(ops: ChangeOp[], namespace: string, view?: OntologyView): (property: string) => boolean {
+  const literal = new Set([...(view?.datatypeProperties ?? []).map((p) => p.iri), ...ops.flatMap((o) => o.op === 'addDatatypeProperty' ? [namespace + o.localName] : [])]);
+  return (property) => literal.has(property);
+}
+
+/**
+ * Rewrite references, never prose or annotation expectations (which record the starting values). References
+ * are compared as the engine reads them (a CURIE, a full IRI or one in angle brackets). `literal` says which
+ * properties hold literal fact values, which are data and never rewritten.
+ */
+export function rewriteOpIris(op: ChangeOp, oldIri: string, newIri: string, prefixes: Record<string, string> = {}, literal: (property: string) => boolean = () => false): ChangeOp {
+  const iri = (value: string): string => (expandIRI(value, prefixes) === oldIri ? newIri : value);
   const list = (values: string[] | undefined) => values?.map(iri);
   const record = (values: Record<string, string[]>) => Object.fromEntries(Object.entries(values).map(([key, values]) => [iri(key), values.map(iri)]));
   const annotations = <T extends TermAnnotations>(a: T): T => ({ ...a, ...(a.source && { source: list(a.source) }), ...(a.mappings && { mappings: record(a.mappings) }) });
@@ -38,7 +44,7 @@ export function rewriteOpIris(op: ChangeOp, oldIri: string, newIri: string, pref
     case 'addClass': return { ...annotations(op), ...(op.subClassOf && { subClassOf: list(op.subClassOf) }), ...(op.equivalentTo && { equivalentTo: list(op.equivalentTo) }), ...(op.disjointWith && { disjointWith: list(op.disjointWith) }), ...(op.restrictions && { restrictions: op.restrictions.map(restriction) }) };
     case 'addObjectProperty': return { ...annotations(op), ...(op.domain && { domain: list(op.domain) }), ...(op.range && { range: list(op.range) }), ...(op.subPropertyOf && { subPropertyOf: list(op.subPropertyOf) }), ...(op.inverseOf && { inverseOf: iri(op.inverseOf) }), ...(op.codeList && { codeList: iri(op.codeList) }) };
     case 'addDatatypeProperty': return { ...annotations(op), ...(op.domain && { domain: list(op.domain) }), ...(op.range && { range: list(op.range) }), ...(op.subPropertyOf && { subPropertyOf: list(op.subPropertyOf) }) };
-    case 'addIndividual': return { ...annotations(op), types: op.types.map(iri), ...(op.facts && { facts: record(op.facts) }) };
+    case 'addIndividual': return { ...annotations(op), types: op.types.map(iri), ...(op.facts && { facts: Object.fromEntries(Object.entries(op.facts).map(([property, values]) => [iri(property), literal(expandIRI(property, prefixes)) ? values : values.map(iri)])) }) };
     case 'addConceptScheme': return annotations(op);
     case 'addConcept': return { ...annotations(op), scheme: iri(op.scheme), ...(op.broader && { broader: iri(op.broader) }) };
     case 'updateAnnotations': return { ...op, iri: iri(op.iri), set: annotations(op.set) };
@@ -62,17 +68,21 @@ export function rewriteOpIris(op: ChangeOp, oldIri: string, newIri: string, pref
 }
 
 /** Rename the new term and every reference to it in one immutable edit list. */
-export function renameDraftedTerm(ops: ChangeOp[], index: number, name: string, namespace: string, prefixes: Record<string, string> = {}): ChangeOp[] {
+export function renameDraftedTerm(ops: ChangeOp[], index: number, name: string, namespace: string, prefixes: Record<string, string> = {}, view?: OntologyView): ChangeOp[] {
   const op = ops[index];
   if (!op || !isAddedOp(op)) return ops;
+  const literal = literalFacts(ops, namespace, view);
   return ops.map((other, i) => {
-    const rewritten = rewriteOpIris(other, namespace + op.localName, namespace + name, prefixes);
+    const rewritten = rewriteOpIris(other, namespace + op.localName, namespace + name, prefixes, literal);
     return i === index && isAddedOp(rewritten) ? { ...rewritten, localName: name } : rewritten;
   });
 }
 
-export function dependentEdits(ops: ChangeOp[], index: number, namespace: string, prefixes: Record<string, string> = {}): number[] {
+/** The other edits that refer to the term this edit adds, or to the new name this edit gives a term. */
+export function dependentEdits(ops: ChangeOp[], index: number, namespace: string, prefixes: Record<string, string> = {}, view?: OntologyView): number[] {
   const op = ops[index];
-  if (!op || !isAddedOp(op)) return [];
-  return ops.flatMap((other, i) => i !== index && JSON.stringify(other) !== JSON.stringify(rewriteOpIris(other, namespace + op.localName, namespace + '__removed__', prefixes)) ? [i] : []);
+  const provided = !op ? undefined : isAddedOp(op) ? namespace + op.localName : op.op === 'renameTerm' ? namespace + op.newLocalName : undefined;
+  if (!provided) return [];
+  const literal = literalFacts(ops, namespace, view);
+  return ops.flatMap((other, i) => i !== index && JSON.stringify(other) !== JSON.stringify(rewriteOpIris(other, provided, namespace + '__removed__', prefixes, literal)) ? [i] : []);
 }

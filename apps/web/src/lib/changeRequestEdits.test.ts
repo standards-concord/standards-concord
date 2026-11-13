@@ -67,6 +67,33 @@ describe('rewriting drafted term references', () => {
     expect(dependentEdits(ops, 0, ns, { ex: ns })).toEqual([1]);
     expect(ops[0]).toMatchObject({ localName: 'Before' });
   });
+  it('leaves the values of datatype-property facts alone, whether the property is drafted or already in the ontology', () => {
+    // Fact values under a datatype property are literal text. Renaming a drafted term used to rewrite a
+    // literal that happened to spell the old IRI.
+    const view = { classes: [], objectProperties: [], datatypeProperties: [{ iri: ns + 'seeAlsoText' }], annotationProperties: [], individuals: [], conceptSchemes: [], concepts: [] } as unknown as OntologyView;
+    const ops: ChangeOp[] = [
+      { op: 'addClass', localName: 'Before', label: 'before', definition: 'Before.' },
+      { op: 'addDatatypeProperty', localName: 'note', label: 'note', definition: 'A note.' },
+      { op: 'addIndividual', localName: 'thing', label: 'thing', definition: 'A thing.', types: [old], facts: { 'ex:note': [old], [ns + 'seeAlsoText']: [old], [ns + 'relatedTo']: [old] } },
+    ];
+    const result = renameDraftedTerm(ops, 0, 'After', ns, { ex: ns }, view);
+    expect(result[2]).toMatchObject({ types: [next], facts: { 'ex:note': [old], [ns + 'seeAlsoText']: [old], [ns + 'relatedTo']: [next] } });
+    // Renaming the drafted datatype property itself moves the key and still keeps the literal.
+    expect(renameDraftedTerm(ops, 1, 'remark', ns, { ex: ns }, view)[2]).toMatchObject({ facts: { [ns + 'remark']: [old] } });
+  });
+  it('rewrites and finds references written as <IRI> or with surrounding spaces', () => {
+    // The engine accepts both spellings; a child left pointing at the old name failed validation after a rename.
+    const ops: ChangeOp[] = [cases[0], { op: 'addClass', localName: 'Child', label: 'child', definition: 'Child.', subClassOf: [`<${old}>`] }, { op: 'setSuperClasses', iri: 'ex:Other', superClasses: [' ex:Before '] }];
+    const result = renameDraftedTerm(ops, 0, 'After', ns, { ex: ns });
+    expect(result[1]).toMatchObject({ subClassOf: [next] });
+    expect(result[2]).toMatchObject({ superClasses: [next] });
+    expect(dependentEdits(ops, 0, ns, { ex: ns })).toEqual([1, 2]);
+  });
+  it('counts edits to a renamed term as depending on the rename', () => {
+    // Removing a rename used to give no warning, and the edits to the new name then failed: that term no longer exists.
+    const ops: ChangeOp[] = [{ op: 'renameTerm', iri: old, newLocalName: 'After' }, { op: 'updateAnnotations', iri: 'ex:After', set: { definition: 'Clearer.' } }, { op: 'updateAnnotations', iri: old, set: { definition: 'Unrelated to the new name.' } }];
+    expect(dependentEdits(ops, 0, ns, { ex: ns })).toEqual([1]);
+  });
   it('preserves missing optional fields, null code-list links and unrelated IRIs', () => {
     for (const op of [{ op: 'addClass', localName: 'Other', label: 'other', definition: 'Other.' }, { op: 'setCodeList', property: 'elsewhere', scheme: null }, { op: 'moveConcept', iri: 'elsewhere', broader: null, expect: { broader: null } }] satisfies ChangeOp[])
       expect(rewriteOpIris(op, old, next)).toEqual(op);

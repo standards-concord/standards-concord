@@ -65,7 +65,7 @@ function OpForm({ cr, index, namespace, view, independent, label, pending, error
   else if (op.op === 'updateConcept') edited = { ...op, set: { ...op.set, ...annotations, ...('notation' in op.set && notation !== (op.set.notation ?? '') && { notation: notation.trim() }) } };
   else if (deprecation) edited = { ...op, reason: reason.trim() };
   let ops = cr.ops.map((o, i) => i === index ? edited : o);
-  if (addition && name.trim() !== op.localName) ops = renameDraftedTerm(ops, index, name.trim(), namespace, view.prefixes);
+  if (addition && name.trim() !== op.localName) ops = renameDraftedTerm(ops, index, name.trim(), namespace, view.prefixes, view);
   const canSave = !nameError && !labelEmpty && !needsDefinition && (!deprecation || !!reason.trim()) && JSON.stringify(ops) !== JSON.stringify(cr.ops);
 
   return <form className="space-y-4" onSubmit={(e) => { e.preventDefault(); if (!pending && canSave) onSave({ ops }); }}>
@@ -101,7 +101,7 @@ export function ChangeRequestEditDialog({ edit, namespace, view, label, userId, 
   if (edit.kind === 'title') return <Dialog open onClose={onCancel} title="Edit title and reason"><TitleForm {...props} /></Dialog>;
   const d = describeOp(cr.ops[edit.index], label);
   if (edit.kind === 'remove') {
-    const dependencies = dependentEdits(cr.ops, edit.index, namespace, view?.prefixes);
+    const dependencies = dependentEdits(cr.ops, edit.index, namespace, view?.prefixes, view);
     return <Dialog open onClose={onCancel} title="Remove this edit">
       <div className="space-y-4">
         <p className="break-words text-sm">Remove “{d.verb}{d.title ? `: ${d.title}` : ''}”?</p>
