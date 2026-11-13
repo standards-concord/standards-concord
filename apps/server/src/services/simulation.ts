@@ -91,7 +91,7 @@ export async function seedDemo(): Promise<OntologyProject | undefined> {
 }
 
 /** Where a demo seed writes rows that belong to its ontology (named by parent, or by an `ontologyId` field). */
-const SEEDED: Collection[] = ['memberships', 'useCases', 'interviews', 'meetings', 'changeRequests', 'reviews', 'votes', 'releases', 'requirementsDocs', 'activity', 'apps', 'appChecks', 'appFollowUps', 'forks', 'agentReports', 'federations', 'federationReleases'];
+const SEEDED: Collection[] = ['memberships', 'invites', 'useCases', 'interviews', 'meetings', 'changeRequests', 'reviews', 'votes', 'releases', 'requirementsDocs', 'activity', 'apps', 'appChecks', 'appFollowUps', 'forks', 'agentReports', 'federations', 'federationReleases'];
 
 /** Collections whose rows are kept under a seeded row's id (not the ontology's), by the parent's collection. */
 const CHILDREN: Partial<Record<Collection, Collection[]>> = { changeRequests: ['reviews', 'votes', 'appChecks'], releases: ['votes'], federations: ['federationReleases'] };
@@ -114,7 +114,13 @@ async function clearUnfinishedSeed(partial: OntologyProject) {
     const parents: string[] = [];
     for (const c of SEEDED) {
       const owned = new Set([...(await list<{ id: string }>(c, partial.id)).map((d) => d.id), ...(await list<{ id: string; ontologyId?: string }>(c)).filter((d) => d.ontologyId === partial.id).map((d) => d.id)]);
-      for (const id of owned) await remove(c, id);
+      for (const id of owned) {
+        if (c === 'invites') {
+          const invite = await get<{ hash: string }>('invites', id);
+          if (invite) await remove('kv', `invite:${invite.hash}`);
+        }
+        await remove(c, id);
+      }
       if (c in CHILDREN) parents.push(...owned);
     }
     // Rows kept under a change request, release or federation rather than the ontology (reviews, votes, app

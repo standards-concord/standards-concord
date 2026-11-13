@@ -6,6 +6,7 @@ import { WalkthroughProvider } from './lib/walkthrough';
 import { Page, Shell } from './components/Shell';
 import { Button, ErrorCard, Loading } from './components/ui';
 import { LoginPage } from './pages/Login';
+import { JoinPage } from './pages/Join';
 import { HubPage } from './pages/Hub';
 import { FederationPage, FederationsPage } from './pages/Federations';
 import { AlphaPage } from './pages/Alpha';
@@ -122,6 +123,7 @@ function Routed() {
       <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/join/:secret" element={<JoinPage />} />
           <Route path="/welcome" element={<WelcomePage />} />
           <Route path="/alpha" element={<AlphaPage />} />
           <Route path="/feedback" element={<FeedbackPage />} />

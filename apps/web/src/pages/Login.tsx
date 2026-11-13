@@ -4,6 +4,7 @@ import { Compass, KeyRound } from 'lucide-react';
 import { api } from '../api';
 import { useSession } from '../lib/session';
 import { useAction, useAsync } from '../lib/hooks';
+import { returnPath } from '../lib/returnPath';
 import { GitHubIcon, GoogleIcon } from '../components/badges';
 import { SolidSignIn } from '../components/SolidSignIn';
 import { AnchorButton, Button, Card, ErrorCard, InlineError, Loading } from '../components/ui';
@@ -14,7 +15,7 @@ export function LoginPage() {
   const nav = useNavigate();
   const after = useRef<string>(undefined);
   const standards = useAsync(() => api.ontologies(), []);
-  const next = params.get('next') || '/';
+  const next = returnPath(params.get('next'));
   const solidError = params.get('solidError') ?? undefined;
   const demo = useAction(async () => {
     const s = await api.demoLogin({});

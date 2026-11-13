@@ -254,7 +254,7 @@ export async function accountForIdentity(identity: FederatedIdentity, demoTester
   if (demoTester) await mergeTesterRecords(demoTester, user);
   return user;
 }
-const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') && !r.startsWith('/\\') ? r : '/');
+const safeReturn = (r: unknown) => (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//') && !/[\\\u0000-\u0020\u007f]/.test(r) ? r : '/');
 
 /** Back to the login page with a message, rather than a bare error page. */
 const loginError = (res: Response, returnTo: string, message: string) =>

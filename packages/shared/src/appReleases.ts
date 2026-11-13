@@ -53,6 +53,16 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.52.0',
+    date: '2026-11-13',
+    title: 'Invite people to a working group',
+    changes: [{
+      id: 'invite-people', type: 'feat', title: 'Invite people to a working group',
+      detail: 'Create a private invitation link with chosen roles, an expiry and a use limit. People sign in to join your group; revoke a link whenever you need to.',
+      roles: ['steward'], to: '{o}/governance#roles',
+    }],
+  },
+  {
     version: '0.51.0',
     date: '2026-11-13',
     title: 'A public list of standards',

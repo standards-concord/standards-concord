@@ -52,6 +52,9 @@ import type {
   Release,
   ReleaseDetail,
   Role,
+  Invite,
+  InviteInput,
+  InviteLookup,
   SessionInfo,
   TermEditInput,
   TermView,
@@ -299,6 +302,11 @@ export const api = {
   // Members & governance
   setMemberRoles: (id: string, userId: string, roles: Role[]) => put<Membership>(`/api/ontologies/${e(id)}/members/${e(userId)}`, { roles }),
   removeMember: (id: string, userId: string) => del<unknown>(`/api/ontologies/${e(id)}/members/${e(userId)}`),
+  invites: (id: string) => get<Invite[]>(`/api/ontologies/${e(id)}/invites`),
+  createInvite: (id: string, input: InviteInput) => post<{ invite: Invite; link: string }>(`/api/ontologies/${e(id)}/invites`, { ...input }),
+  revokeInvite: (id: string, inviteId: string) => del<void>(`/api/ontologies/${e(id)}/invites/${e(inviteId)}`),
+  invite: (secret: string) => get<InviteLookup>(`/api/invites/${e(secret)}`),
+  acceptInvite: (secret: string) => post<{ ontologyId: string }>(`/api/invites/${e(secret)}/accept`),
   governanceTemplates: () => get<GovernancePolicy[]>('/api/governance/templates'),
   setGovernance: (id: string, policy: GovernancePolicy) => put<OntologySummary>(`/api/ontologies/${e(id)}/governance`, { policy }),
   transferOwnership: (id: string, toUserId: string) =>
