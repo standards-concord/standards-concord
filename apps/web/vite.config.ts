@@ -4,6 +4,7 @@ import path from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import { APP_VERSION } from '../../packages/shared/src/appReleases.js';
 
 const target = process.env.CONCORD_API ?? 'http://localhost:8787';
 
@@ -47,7 +48,10 @@ function serviceWorker(): Plugin {
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), serviceWorker()],
-  define: { 'import.meta.env.VITE_APP_COMMIT': JSON.stringify(commit) },
+  define: {
+    'import.meta.env.VITE_APP_COMMIT': JSON.stringify(commit),
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(APP_VERSION),
+  },
   // sparq loads its WebAssembly from a URL relative to its own module. Vite's dev
   // prebundler moves the module into node_modules/.vite/deps, where that URL
   // falls through to index.html ("expected magic word 00 61 73 6d"). Serving
@@ -72,5 +76,20 @@ export default defineConfig({
       '^/def(?:/|$|\\?|\\.(?:jsonld|ttl)(?:$|\\?))': { target, changeOrigin: false },
     },
   },
-  build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },
+  build: {
+    outDir: 'dist', sourcemap: true, manifest: true, chunkSizeWarningLimit: 500,
+    rollupOptions: {
+      output: {
+        // Automatic splitting emitted 26 sub-kilobyte icon chunks. Consolidate the shared UI runtime.
+        manualChunks(id) {
+          if (/\/(lucide-react|react|react-dom|scheduler)\//.test(id)) return 'ui-runtime';
+        },
+        chunkFileNames(chunk) {
+          if (chunk.name === 'highlight') return 'assets/codemirror-[hash].js';
+          if (chunk.name === 'index' && chunk.moduleIds.some((id) => id.includes('/@sparq-org/sparq/'))) return 'assets/sparql-[hash].js';
+          return 'assets/[name]-[hash].js';
+        },
+      },
+    },
+  },
 });

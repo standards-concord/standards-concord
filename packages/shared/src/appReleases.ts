@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.52.3',
+    version: '0.52.4',
     date: '2026-11-13',
     title: 'Up-to-date descriptions of the demo’s people',
     changes: [{
@@ -63,6 +63,19 @@ export const APP_RELEASES: AppRelease[] = [
       detail: 'The simulated working group’s profiles and the demo standard’s description now follow the latest wording, also on servers that were set up before it changed.',
       roles: [],
       to: '/welcome',
+    }],
+  },
+  {
+    version: '0.52.3',
+    date: '2026-11-13',
+    title: 'Pages load faster',
+    changes: [{
+      id: 'faster-first-load',
+      type: 'perf',
+      title: 'Pages load faster',
+      detail: 'Pages download when you open them, so signing in and opening the hub need less JavaScript. The page you are on stays in view while the next one downloads, and pages kept on this device still open offline.',
+      roles: [],
+      to: '/',
     }],
   },
   {

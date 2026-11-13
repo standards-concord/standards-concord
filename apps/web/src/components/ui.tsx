@@ -1,10 +1,12 @@
-import { useEffect, useId, useRef, useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
+import { lazy, Suspense, useEffect, useId, useRef, useState, type AnchorHTMLAttributes, type ButtonHTMLAttributes, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref, type SelectHTMLAttributes, type TextareaHTMLAttributes } from 'react';
 import { Link, type LinkProps } from 'react-router';
 import { CircleAlert, Check, Copy, LoaderCircle, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { errorMessage, ApiError } from '../api';
 import { initials, listRoles, type RingRole } from '../lib/format';
-import { HighlightedSpans } from './code/HighlightedSpans';
+import { pageChunk } from '../lib/routeChunks';
 import type { CodeLanguage } from './code/languages';
+
+const HighlightedSpans = lazy(pageChunk('highlight', () => import('./code/HighlightedSpans').then((m) => ({ default: m.HighlightedSpans }))));
 
 export function cx(...xs: (string | false | null | undefined)[]) {
   return xs.filter(Boolean).join(' ');
@@ -116,7 +118,7 @@ export function Spinner({ className }: { className?: string }) {
 
 export function Loading({ label = 'Loading…', className }: { label?: string; className?: string }) {
   return (
-    <div role="status" aria-busy="true" className={cx('flex items-center justify-center gap-2 py-12 text-sm text-muted', className)}>
+    <div role="status" aria-live="polite" aria-busy="true" className={cx('flex items-center justify-center gap-2 py-12 text-sm text-muted', className)}>
       <Spinner /> {label}
     </div>
   );
@@ -392,7 +394,7 @@ export function CodeBlock({
         tabIndex={0}
       >
         <code>
-          <HighlightedSpans code={code} language={language} />
+          {language ? <Suspense fallback={code}><HighlightedSpans code={code} language={language} /></Suspense> : code}
         </code>
       </pre>
     </div>
