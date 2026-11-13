@@ -34,7 +34,7 @@ async function login(name: string, role = 'contributor'): Promise<{ agent: Agent
 let n = 0;
 async function newOntology(owner: Agent) {
   n++;
-  const res = await owner.post('/api/ontologies').send({ title: `Concurrency ${n} ${Date.now()}`, prefix: `cc${n}`, governanceTemplate: 'steward-led' });
+  const res = await owner.post('/api/ontologies').send({ title: `Concurrency ${n} ${Date.now()}`, prefix: `cc${n}`, description: 'For requests made at once.', governanceTemplate: 'steward-led' });
   expect(res.status).toBe(201);
   return res.body.id as string;
 }

@@ -270,7 +270,8 @@ export async function summary(p: OntologyProject, { withHealth = true, withGraph
       }),
       // Only the use cases this viewer can see, so the count doesn't reveal private ones.
       useCases: visibleUseCases.length,
-      activeUseCases: visibleUseCases.filter((u) => !u.withdrawnAt && u.status !== 'archived').length,
+      // An interview makes its draft before anything is said: only use cases that say something count.
+      activeUseCases: visibleUseCases.filter((u) => !u.withdrawnAt && u.status !== 'archived' && u.completeness > 0).length,
       openChangeRequests: crs.filter((c) => !['merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
       releases: (await list<Release>('releases', p.id)).filter((r) => r.status === 'published').length,
       members: (await members(p.id)).length,

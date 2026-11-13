@@ -9,7 +9,7 @@ import { test, expect, demoOntology, expectNoCrash, signIn, uniq } from './fixtu
 const VOL = 'https://w3id.org/odi/volunteering';
 
 async function newOntology(page: import('@playwright/test').Page, title: string) {
-  const res = await page.request.post('/api/ontologies', { data: { title, prefix: `im${uniq()}` } });
+  const res = await page.request.post('/api/ontologies', { data: { title, prefix: `im${uniq()}`, description: 'A standard for the imports tests.' } });
   expect(res.status()).toBe(201);
   return (await res.json()) as { id: string; namespace: string; title: string };
 }

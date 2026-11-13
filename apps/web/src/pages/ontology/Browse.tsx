@@ -658,7 +658,8 @@ export function BrowseTab() {
   if (view.error && !view.data) return <ErrorCard error={view.error} onRetry={view.reload} />;
   if (!view.data || !model) return <Loading label="Loading ontology…" />;
   const v = view.data;
-  const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length && !v.conceptSchemes?.length;
+  // Nothing in any list on the left: individuals count as terms too.
+  const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length && !v.individuals.length && !v.conceptSchemes?.length;
   const codeCounts = new Map((v.conceptSchemes ?? []).map((s) => [s.iri, (v.concepts ?? []).filter((c) => c.inScheme.includes(s.iri)).length]));
   // In the canvas views the navigation folds away so the drawing gets the room.
   const showNav = navOpen ?? !canvas;

@@ -70,3 +70,15 @@ it('a new ontology defers its two address checks and a released ontology keeps i
   const publicSummary = await request(app).get(`/api/ontologies/${o.id}`);
   expect(publicSummary.body.stats).not.toHaveProperty('activeUseCases');
 });
+
+it('refuses to create an ontology without a description', async () => {
+  // The description goes into the ontology file's header, and a header without one fails every later
+  // change's checks. The dialog asked for it but the API accepted a blank one.
+  const owner = request.agent(app);
+  await owner.post('/api/auth/demo').send({ name: `Blank ${Math.random()}`, role: 'steward' });
+  for (const description of [undefined, '', '   ']) {
+    const refused = await owner.post('/api/ontologies').send({ title: `Blank ${Math.random()}`, prefix: 'bl', description });
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toBe('description is required');
+  }
+});

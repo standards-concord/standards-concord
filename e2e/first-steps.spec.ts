@@ -40,6 +40,24 @@ for (const width of [1400, 390]) {
   });
 }
 
+test('Browse keeps its search and list when the only terms are individuals', async ({ page }) => {
+  // The empty state looked only at classes, properties and code lists, so an ontology holding just named
+  // individuals said "No terms yet" and hid the search beside a list of them. Such a file arrives by import or
+  // API, so the view is answered here with one individual added.
+  const o = await fresh(page);
+  await page.route(new RegExp(`/api/ontologies/${o.id}/view\\b`), async (route) => {
+    const res = await route.fetch();
+    const view = await res.json();
+    view.individuals = [{ iri: `${o.namespace}Monday`, kind: 'individual', label: 'Monday', types: ['http://www.w3.org/2002/07/owl#Thing'], facts: {} }];
+    await route.fulfill({ response: res, json: view });
+  });
+  await page.goto(`/o/${o.id}/browse`);
+  await settle(page);
+  await expect(page.getByRole('textbox', { name: 'Search terms', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'No terms yet', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Pick a term', exact: true })).toBeVisible();
+});
+
 const steps = (page: Page) => page.getByRole('region', { name: 'First steps', exact: true });
 
 test('a new steward has four steps to do, useful links and neutral address checks', async ({ page }) => {
@@ -77,6 +95,15 @@ test('steps tick themselves as a use case, a change request and another member a
   await steps(page).getByRole('link', { name: 'Describe a use case', exact: true }).click();
   await page.getByRole('button', { name: 'Describe a use case', exact: true }).first().click();
   await expect(page).toHaveURL(/\/interview\/int_/);
+  // Opening the interview makes an empty draft. Leaving without saying anything used to tick the step.
+  await page.getByRole('link', { name: 'Overview', exact: true }).click();
+  await expect(steps(page).getByRole('listitem').nth(0).getByText('To do', { exact: true })).toHaveCount(1);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/interview\/int_/);
+  const answer = page.getByRole('textbox', { name: /Type your answer/ });
+  await answer.fill('Coordinators want to fill weekly shifts at food banks with regular volunteers.');
+  await answer.press('Enter');
+  await expect(page.getByRole('region', { name: 'Use case progress' })).not.toContainText('0 of 21 sections filled', { timeout: 20_000 });
   await page.getByRole('link', { name: 'Overview', exact: true }).click();
   await expect(steps(page).getByRole('listitem').nth(0).getByText('Done', { exact: true })).toHaveCount(1);
   await steps(page).getByRole('link', { name: 'Propose a change', exact: true }).click();
@@ -117,7 +144,7 @@ test('hiding steps is remembered for this account and ontology and can be undone
   await page.getByRole('button', { name: 'Show first steps', exact: true }).click();
   await expect(steps(page)).toBeVisible();
   await page.getByRole('button', { name: 'Hide these steps' }).click();
-  const second = await page.request.post('/api/ontologies', { data: { title: `Other steps ${uniq()}`, prefix: 'os' } });
+  const second = await page.request.post('/api/ontologies', { data: { title: `Other steps ${uniq()}`, prefix: 'os', description: 'Another standard.' } });
   expect(second.ok()).toBeTruthy();
   const other = await second.json();
   await page.goto(`/o/${other.id}`);

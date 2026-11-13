@@ -158,7 +158,7 @@ test('a governance policy saved on B is visible on A’s already-used ontology w
   await signIn(page, { name: `Policy owner ${uniq()}`, role: 'steward' });
   const suffix = uniq();
   const created = await page.request.post('/api/ontologies', {
-    data: { title: `Cross-instance policy ${suffix}`, prefix: `cs${suffix}`, governanceTemplate: 'steward-led' },
+    data: { title: `Cross-instance policy ${suffix}`, prefix: `cs${suffix}`, description: 'A policy read from two servers.', governanceTemplate: 'steward-led' },
   });
   expect(created.ok(), await created.text()).toBeTruthy();
   const ontology = await created.json() as OntologySummary;

@@ -267,8 +267,9 @@ export function apiRouter(): Router {
   r.post('/ontologies', async (req, res) => {
     const user = requireUser(req);
     const b = req.body ?? {};
+    // The description is written into the ontology's header, and a header without one fails every change's checks.
     const p = await createProject(
-      { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator === true },
+      { title: str(b.title, 'title', 200), description: str(b.description, 'description'), prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator === true },
       user,
     );
     // Without its health: validating a new ontology (the OWL reasoner's first run) can take a while, and nothing
