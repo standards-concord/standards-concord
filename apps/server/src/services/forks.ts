@@ -570,7 +570,7 @@ function validationBrief(v: ValidationReport) {
 
 /** Strict OWL: a fork may never serve an inconsistent ontology or an unsatisfiable class. */
 async function requireConsistent(p: OntologyProject, graph: OntologyGraph, what: string) {
-  const report = await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI), imports: await hostedImportClosure(graph) });
+  const report = await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI, p.id), imports: await hostedImportClosure(graph) });
   const brief = validationBrief(report);
   if (!report.reasoner.available) {
     // No OWL verdict. The reasoner worker then reports the structural checks' verdict (which miss whole classes of

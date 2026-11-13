@@ -280,6 +280,8 @@ export function Shell({ children }: { children: ReactNode }) {
         <Link to="/privacy" className="underline-offset-2 hover:text-fg hover:underline">
           Privacy policy
         </Link>
+        {' · '}
+        <a href="/def" className="underline-offset-2 hover:text-fg hover:underline">Public list of standards</a>
       </footer>
       <WalkthroughDock />
     </div>

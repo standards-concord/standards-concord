@@ -43,6 +43,21 @@ afterEach(() => {
 });
 
 describe('kept answers', () => {
+  it('forgets a changed ontology’s aliases and offline copies without forgetting other ontologies', async () => {
+    const k = await load();
+    const aliases = ['ontology|ont_1', 'ontology|old-slug'];
+    for (const alias of [...aliases, 'ontology|ont_2']) k.finishLoad(k.startLoad(k.keptKey(alias)), { value: { title: 'Before' } });
+    const older = k.startLoad(k.keptKey(aliases[1]));
+    for (const alias of aliases) {
+      k.forgetKept(alias);
+      expect(k.keptValue(k.keptKey(alias))).toBeUndefined();
+      expect(saved.has(k.keptKey(alias)!)).toBe(false);
+    }
+    k.finishLoad(older, { value: { title: 'Stale' } });
+    expect(k.keptValue(k.keptKey(aliases[1]))).toBeUndefined();
+    expect(k.keptValue(k.keptKey('ontology|ont_2'))).toEqual({ value: { title: 'Before' } });
+  });
+
   it('keeps the newest answer per account, and drops everything when the account changes', async () => {
     const k = await load();
     const key = k.keptKey('releases|vol');

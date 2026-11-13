@@ -272,9 +272,11 @@ export const api = {
   // Ontologies
   ontologies: () => get<OntologySummary[]>('/api/ontologies'),
   createOntology: (body: NewOntologyInput) => post<OntologySummary>('/api/ontologies', body),
+  updateOntology: (id: string, body: { title?: string; description?: string; domain?: string }) => patch<OntologySummary>(`/api/ontologies/${e(id)}`, body),
   ontology: (id: string) => get<OntologyDetail>(`/api/ontologies/${e(id)}`),
   queryChat: (id: string, body: QueryChatRequest) => post<QueryChatResponse>(`/api/ontologies/${e(id)}/query-chat`, body as unknown as Json),
   view: (id: string, ref = 'working') => get<OntologyView>(`/api/ontologies/${e(id)}/view${qs({ ref })}`),
+  examples: (id: string, version: string) => get<{ available: boolean }>(`/api/ontologies/${e(id)}/examples/${e(version)}`),
   term: (id: string, iri: string) => get<TermDetail>(`/api/ontologies/${e(id)}/terms/${e(iri)}`),
   search: (id: string, q: string) => get<TermView[]>(`/api/ontologies/${e(id)}/search${qs({ q })}`),
   sourceUrl: (id: string, format: OutputFormat, ref = 'working', download = false) =>
@@ -363,7 +365,7 @@ export const api = {
   approvePublication: (id: string, fingerprint: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/approve-publication`, { fingerprint }),
   publicHolds: (id: string) => get<PublicHoldReview[]>(`/api/ontologies/${e(id)}/public-holds`),
   approvePublicHold: (id: string, version: string, fingerprint: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-holds/${e(version)}/approve`, { fingerprint }),
-  updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
+  updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[]; basis?: string }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),
   /** `round` is the review round of the version on screen; the server refuses a decision on one that has since changed. */

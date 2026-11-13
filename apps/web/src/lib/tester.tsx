@@ -165,6 +165,9 @@ export function useTester() {
 }
 
 /** Resolve a change's "where to try it" against the demo ontology. */
+/** Pages the server renders (the public catalogue and standards' public pages): the app's router has no route for them. */
+export const serverRendered = (href: string) => /^\/def(?:[/?#.]|$)/.test(href);
+
 export function changeLink(to: string | undefined, demoId?: string): string | undefined {
   if (!to) return undefined;
   if (!to.includes('{o}')) return to;

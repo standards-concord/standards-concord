@@ -22,8 +22,8 @@ const item = (page: Page, name: string) => tree(page).getByRole('treeitem', { na
 const term = (page: Page) => new URL(page.url()).searchParams.get('term');
 
 async function axe(page: Page, include: string) {
-  const r = await new AxeBuilder({ page }).include(include).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
-  const serious = r.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical');
+  const r = await new AxeBuilder({ page }).include(include).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).options({ rules: { 'target-size': { enabled: true }, 'scrollable-region-focusable': { enabled: true } } }).analyze();
+  const serious = r.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical' || ['target-size', 'scrollable-region-focusable'].includes(v.id));
   expect(serious.map((v) => `${v.id}: ${v.help}\n${v.nodes.slice(0, 5).map((n) => `  ${n.html.slice(0, 160)}\n    ${n.failureSummary?.split('\n').slice(1).join(' ')}`).join('\n')}`)).toEqual([]);
 }
 
@@ -161,6 +161,12 @@ test.describe('class tree and class pages', () => {
     await page.goto(`${base}?term=${encodeURIComponent(`${VOL}Session`)}`);
     await settle(page);
     await expect(page.getByRole('table', { name: 'Properties of session' })).toBeVisible();
+    // The tree toolbar's 22 px hit areas used to be too small.
+    for (const name of ['Expand all classes', 'Collapse all classes']) {
+      const box = await page.getByRole('button', { name }).boundingBox();
+      expect(box!.width).toBeGreaterThanOrEqual(24);
+      expect(box!.height).toBeGreaterThanOrEqual(24);
+    }
     await axe(page, 'main');
   });
 });
@@ -1201,4 +1207,31 @@ test.describe('on a phone', () => {
       });
     }
   });
+});
+
+// Read-only CodeMirror scrollers used to lack an explicit keyboard focus target.
+test('Source is named, reachable by Tab and scrolls with arrow keys', async ({ page }) => {
+  await page.goto(base.replace('/browse', '/source'));
+  const source = page.getByTestId('source-code');
+  await expect(source).toBeVisible();
+  await expect(source).toHaveAttribute('tabindex', '0');
+  await expect(source).toHaveAccessibleName('Turtle source');
+  await page.getByRole('link', { name: 'Download', exact: true }).focus();
+  // Copy is before the source view in the tab order.
+  for (let n = 0; n < 4 && !await source.evaluate((el) => el === document.activeElement); n++) await page.keyboard.press('Tab');
+  await expect(source).toBeFocused();
+  await expect(source.locator('xpath=../..')).toHaveCSS('outline-width', '2px');
+  const scroller = source.locator('..');
+  const before = await scroller.evaluate((el) => el.scrollTop);
+  for (let n = 0; n < 60; n++) await page.keyboard.press('ArrowDown');
+  await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(before);
+  await axe(page, 'main');
+});
+
+test('Validate read-only code views remain keyboard focusable', async ({ page }) => {
+  await page.goto(base.replace('/browse', '/validate'));
+  await expect(page.getByTestId('validation-report')).toBeVisible();
+  await page.getByRole('button', { name: /Validate from your own code/ }).click();
+  await expect(page.getByLabel('Validate a file (JSON report)', { exact: true })).toHaveAttribute('tabindex', '0');
+  await axe(page, 'main');
 });

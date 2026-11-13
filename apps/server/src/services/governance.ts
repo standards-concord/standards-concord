@@ -315,7 +315,9 @@ export function evaluate(input: EvalInput): GovernanceEvaluation {
   if (terminal.includes(input.status)) {
     next =
       input.status === 'draft'
-        ? 'The author needs to submit this for review.'
+        ? input.kind === 'release'
+          ? 'Publish it when it includes everything this version should.'
+          : 'The author needs to submit this for review.'
         : input.status === 'merged'
           ? 'Waiting to be included in the next release.'
           : 'No further action.';

@@ -4,12 +4,12 @@ import type { ChangeRequest, ChangeRequestDetail, TermEditField, TermEditInput, 
 import { TERM_EDIT_FIELDS } from '@concord/shared';
 import type { TermView } from '@concord/core/types';
 import { api, ApiError } from '../api';
-import { ChangedMark, ListEditor, DefinitionMeaning, useEditRefresh } from './TermEditShared';
+import { AnnotationFields, annotationValuesFrom, cleanAnnotationField, DefinitionMeaning, useEditRefresh, type AnnotationValues } from './TermEditShared';
 import { useAction, useAsync } from '../lib/hooks';
 import { CR_STATUS_LABEL, LevelBadge } from './badges';
 import { ruleSummary } from './PolicyRules';
 import { useOntology } from '../pages/ontology/Layout';
-import { Button, Field, InlineError, Input, Textarea } from './ui';
+import { Button, Field, InlineError, Textarea } from './ui';
 
 /**
  * Inline editor for a term's annotations (label, definition, comment, alternative
@@ -22,9 +22,7 @@ import { Button, Field, InlineError, Input, Textarea } from './ui';
  * person explicitly loads the latest values after a conflict.
  */
 
-type TextField = 'label' | 'definition' | 'comment' | 'editorialNote';
-type ListField = 'altLabels' | 'examples';
-type Values = Record<TextField, string> & Record<ListField, string[]>;
+type Values = AnnotationValues;
 type Intent = NonNullable<TermEditInput['definitionIntent']>;
 
 export const OPEN_STATUSES = ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'];
@@ -37,21 +35,12 @@ const FIELD_LABEL: Record<TermEditField, string> = {
   editorialNote: 'Editorial note',
 };
 
-const isList = (f: TermEditField): f is ListField => f === 'altLabels' || f === 'examples';
-
 function valuesFrom(t: TermView): Values {
-  return {
-    label: t.label ?? '',
-    definition: t.definition ?? '',
-    comment: t.comment ?? '',
-    altLabels: [...(t.altLabels ?? [])],
-    examples: [...(t.examples ?? [])],
-    editorialNote: t.editorialNote ?? '',
-  };
+  return annotationValuesFrom(t);
 }
 
 /** What gets sent: trimmed text, and lists without blanks or duplicates (entries keep their own line breaks). */
-const clean = (f: TermEditField, v: Values) => (isList(f) ? [...new Set(v[f].map((x) => x.trim()).filter(Boolean))] : v[f].trim());
+const clean = cleanAnnotationField;
 
 /** Same comparison as the server: lists are sets, since RDF gives them no order. */
 function same(f: TermEditField, a: Values, b: Values) {
@@ -122,24 +111,6 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
   };
   const show = (v: string | string[]) => (Array.isArray(v) ? (v.length ? v.join('; ') : '(none)') : v || '(empty)');
 
-  const text = (f: TextField, rows: number, hint?: string) => (
-    <Field
-      label={
-        <>
-          {FIELD_LABEL[f]}
-          <ChangedMark on={changed.includes(f)} />
-        </>
-      }
-      hint={hint}
-    >
-      {rows === 1 ? (
-        <Input value={form[f]} onChange={(e) => setForm({ ...form, [f]: e.target.value })} aria-invalid={f === 'label' && labelEmpty} />
-      ) : (
-        <Textarea rows={rows} value={form[f]} onChange={(e) => setForm({ ...form, [f]: e.target.value })} />
-      )}
-    </Field>
-  );
-
   return (
     <form
       ref={formRef}
@@ -203,16 +174,7 @@ export function TermEditForm({ term, termLabel, onCancel, onProposed }: { term: 
         </div>
       )}
 
-      {text('label', 1)}
-      {labelEmpty && <p className="-mt-2 text-xs text-danger">A term needs a label.</p>}
-      {text('definition', 3, 'Strict OWL practice: genus and differentia, e.g. “A person who …”.')}
-      {rewordsDefinition && <DefinitionMeaning name={intentName} intent={intent} onChange={setIntent} noun="term" />}
-      {text('comment', 2)}
-      <div className="grid gap-4 sm:grid-cols-2">
-        <ListEditor field="altLabels" noun="alternative label" items={form.altLabels} changed={changed.includes('altLabels')} onChange={(v) => setForm({ ...form, altLabels: v })} />
-        <ListEditor field="examples" noun="example" multiline items={form.examples} changed={changed.includes('examples')} onChange={(v) => setForm({ ...form, examples: v })} />
-      </div>
-      {text('editorialNote', 2)}
+      <AnnotationFields values={form} onChange={setForm} changed={changed} labelEmpty={labelEmpty} afterDefinition={rewordsDefinition && <DefinitionMeaning name={intentName} intent={intent} onChange={setIntent} noun="term" />} />
 
       <Field label="Why this change? (optional)" hint="Shown to reviewers with the change request.">
         <Textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} />

@@ -164,16 +164,16 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
           {shown ? <ChevronDown className="size-3.5" aria-hidden /> : <ChevronRight className="size-3.5" aria-hidden />} Classes ({model.classes.size})
         </button>
         <div className={cx('flex', !shown && 'hidden')}>
-          <button type="button" className="rounded p-1 text-muted hover:bg-surface-2 hover:text-fg" onClick={expandAll} aria-label="Expand all classes" title="Expand all">
+          <button type="button" className="flex min-h-6 min-w-6 items-center justify-center rounded p-1 text-muted hover:bg-surface-2 hover:text-fg" onClick={expandAll} aria-label="Expand all classes" title="Expand all">
             <ChevronsUpDown className="size-3.5" />
           </button>
-          <button type="button" className="rounded p-1 text-muted hover:bg-surface-2 hover:text-fg" onClick={() => setOpen(new Set())} aria-label="Collapse all classes" title="Collapse all">
+          <button type="button" className="flex min-h-6 min-w-6 items-center justify-center rounded p-1 text-muted hover:bg-surface-2 hover:text-fg" onClick={() => setOpen(new Set())} aria-label="Collapse all classes" title="Collapse all">
             <ChevronsDownUp className="size-3.5" />
           </button>
         </div>
       </div>
       <div hidden={!shown}>
-        {!rows.length && <p className="px-2 py-3 text-sm text-muted">No classes match.</p>}
+        {!rows.length && <p className="px-2 py-3 text-sm text-muted">{model.classes.size || f ? 'No classes match.' : 'No classes yet.'}</p>}
         <ul role="tree" aria-labelledby="class-tree-label" className="text-sm">
           {rows.map((r, i) => {
             const c = model.classes.get(r.iri)!;

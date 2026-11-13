@@ -332,6 +332,8 @@ export interface OntologySummary extends OntologyProject {
     properties?: number;
     individuals?: number;
     useCases?: number;
+    /** Visible use cases excluding withdrawn and archived ones. */
+    activeUseCases?: number;
     openChangeRequests?: number;
     releases: number;
     members?: number;
@@ -1776,6 +1778,7 @@ export interface SessionInfo {
  *  GET  /api/ontologies/:id/terms/:iri(encoded)    -> TermView & { usedBy: {iri:string; label?:string; via:string}[] }
  *  GET  /api/ontologies/:id/search?q=              -> TermView[]
  *  GET  /api/ontologies/:id/source?format=turtle|...&ref=working|<version>  -> text (Content-Type by format); ?download=1 sets attachment
+ *  GET  /api/ontologies/:id/examples/:version     -> {available:boolean} (signed in; release version or draft; false while held)
  *  GET  /api/ontologies/:id/validation?ref=working -> ValidationReport
  *  POST /api/ontologies/:id/sparql {query}         -> {head:{vars:string[]}, rows: Record<string,string>[]}
  *

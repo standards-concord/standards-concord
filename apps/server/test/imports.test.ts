@@ -22,7 +22,7 @@ async function owner(name: string) {
 }
 let n = 0;
 async function newOntology(agent: ReturnType<typeof request.agent>) {
-  const created = await agent.post('/api/ontologies').send({ title: `Importer ${++n} ${Date.now()}`, prefix: `imp${n}` });
+  const created = await agent.post('/api/ontologies').send({ title: `Importer ${++n} ${Date.now()}`, prefix: `imp${n}`, description: 'Imports another ontology.' });
   expect(created.status).toBe(201);
   return created.body as { id: string; slug: string; namespace: string };
 }

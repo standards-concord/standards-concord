@@ -190,8 +190,9 @@ export async function competencyTests(ontologyId: string, opts: { published?: bo
     .map(({ q, source }) => ({ id: q.id, question: q.question, sparql: q.sparql!, exampleData: q.exampleData, exampleAnswer: q.exampleAnswer, source }));
 }
 
-export async function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string; source?: string }[]) {
-  const fair = await fairContext(graph.ontologyIRI);
+export async function validateGraph(key: string, graph: Graph, cqs: { question: string; sparql: string; exampleData?: string; source?: string }[], ontologyId: string) {
+  const fair = await fairContext(graph.ontologyIRI, ontologyId);
+  key += fair.unreleased ? ':unreleased' : ':published';
   const r = fair.resolution;
   key += r ? `:${+r.rdf}${+r.html}` : '';
   // Checked with what it imports: a new release or draft of an imported ontology gives a new key.
@@ -214,7 +215,7 @@ export async function workingValidation(p: OntologyProject): Promise<ValidationR
   const cqs = await competencyTests(p.id);
   // Keyed by the questions' content, so a change in which questions run (or what they say) never reuses an old report.
   const digest = createHash('sha256').update(JSON.stringify(cqs)).digest('hex').slice(0, 16);
-  return { ...(await validateGraph(`${p.slug}@${revision}:${digest}`, graph, cqs)), revision };
+  return { ...(await validateGraph(`${p.slug}@${revision}:${digest}`, graph, cqs, p.id)), revision };
 }
 
 /**
@@ -253,6 +254,13 @@ export async function summary(p: OntologyProject, { withHealth = true, withGraph
       console.warn(`[validate] ${p.slug}: ${(err as Error).message}`);
     }
   }
+  // The same visibility rule as canSee in services/useCases.ts, checked once per membership.
+  const group = await isGroupMember(p.id, viewer);
+  const visibleUseCases = (await list<UseCase>('useCases', p.id)).filter((u) => {
+    if (viewer && u.authorId === viewer.id) return true;
+    if (u.withdrawnAt || u.visibility === 'private') return false;
+    return (u.visibility === 'public' && u.status !== 'archived' && u.status !== 'draft') || group;
+  });
   return {
     ...p,
     stats: {
@@ -262,15 +270,9 @@ export async function summary(p: OntologyProject, { withHealth = true, withGraph
         individuals: view.individuals.length,
       }),
       // Only the use cases this viewer can see, so the count doesn't reveal private ones.
-      useCases: await (async () => {
-        // The same rule as canSee in services/useCases.ts, with the membership check made once.
-        const group = await isGroupMember(p.id, viewer);
-        return (await list<UseCase>('useCases', p.id)).filter((u) => {
-          if (viewer && u.authorId === viewer.id) return true;
-          if (u.withdrawnAt || u.visibility === 'private') return false;
-          return (u.visibility === 'public' && u.status !== 'archived' && u.status !== 'draft') || group;
-        }).length;
-      })(),
+      useCases: visibleUseCases.length,
+      // An interview makes its draft before anything is said: only use cases that say something count.
+      activeUseCases: visibleUseCases.filter((u) => !u.withdrawnAt && u.status !== 'archived' && u.completeness > 0).length,
       openChangeRequests: crs.filter((c) => !['draft', 'merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
       releases: (await list<Release>('releases', p.id)).filter((r) => r.status === 'published').length,
       members: (await members(p.id)).length,

@@ -662,7 +662,8 @@ export function BrowseTab() {
   const uses = (iri: string) => properties.filter((p) => p.domain.includes(iri) || p.range.includes(iri)).length;
   const roots = v.classes.filter((c) => [...c.superClasses, ...(c.superClassConjuncts ?? []).flatMap((x) => x.classes)].every((iri) => iri === OWL_THING))
     .sort((a, b) => uses(b.iri) - uses(a.iri) || label(a.iri).localeCompare(label(b.iri)));
-  const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length && !v.conceptSchemes?.length && !session?.user;
+  // Nothing in any list on the left: individuals count as terms too.
+  const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length && !v.individuals.length && !v.conceptSchemes?.length;
   const codeCounts = new Map((v.conceptSchemes ?? []).map((s) => [s.iri, (v.concepts ?? []).filter((c) => c.inScheme.includes(s.iri)).length]));
   // In the canvas views the navigation folds away so the drawing gets the room.
   const showNav = navOpen ?? !canvas;
@@ -720,7 +721,7 @@ export function BrowseTab() {
               {showNav ? 'Hide terms' : 'Terms'}
             </Button>
           )}
-          <div className="relative w-full">
+          {!empty && <div className="relative w-full">
             <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted" />
             <Input
               value={q}
@@ -737,7 +738,7 @@ export function BrowseTab() {
                 <X className="size-4" />
               </button>
             )}
-          </div>
+          </div>}
         </div>
         <div className="inline-flex rounded-lg border border-line-strong p-0.5" role="radiogroup" aria-label="View" aria-describedby="view-task">
           {MODES.map((m) => (
@@ -758,11 +759,7 @@ export function BrowseTab() {
         {MODES.find((m) => m.key === mode)!.task}
       </p>
 
-      {empty ? (
-        <EmptyState icon={ListTree} title="This ontology has no terms yet">
-          Describe a use case or upload a meeting, then synthesise a change request — approved changes appear here.
-        </EmptyState>
-      ) : !canvas ? (
+      {!canvas ? (
         <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
           <div id="browse-nav">{nav}</div>
           <div className="min-w-0 space-y-4">
@@ -786,6 +783,10 @@ export function BrowseTab() {
                 {roots.length > 12 && <p className="mt-3 text-muted">and {roots.length - 12} more in the list</p>}
                 <Button className="mt-5" onClick={() => setMode('diagram')}>Show the diagram</Button>
               </section>
+            ) : empty ? (
+              <EmptyState icon={ListTree} title="No terms yet">
+                {session?.user ? <>Terms arrive through change requests. <Link className="text-accent underline" to={`/o/${id}/use-cases`}>Describe a use case</Link> and draft changes from it, <Link className="text-accent underline" to={`/o/${id}/changes?new=1`}>propose a change in plain language</Link>, or <Link className="text-accent underline" to={`/o/${id}/browse?view=diagram`}>draw classes on the Diagram</Link>.</> : 'Terms arrive through change requests.'}
+              </EmptyState>
             ) : (
               <EmptyState icon={ListTree} title="Pick a term">
                 Choose a class, property or code list on the left to see its definition, properties and where it’s used. Use the Diagram to see what data each class has and how the classes connect.

@@ -53,8 +53,8 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.48.2',
-    date: '2026-11-12',
+    version: '0.51.1',
+    date: '2026-11-13',
     title: 'Tidier demo, clearer outcomes and a compact walkthrough button',
     changes: [
       {
@@ -111,6 +111,134 @@ export const APP_RELEASES: AppRelease[] = [
         id: 'health-question-total', type: 'fix', title: 'Health distinguishes questions from tests',
         detail: 'Overview counts the questions you can see and says how many have been tested, including when none have executable tests yet.',
         roles: ['steward', 'contributor', 'member', 'odi', 'agent'], to: '{o}#health',
+      },
+    ],
+  },
+  {
+    version: '0.51.0',
+    date: '2026-11-13',
+    title: 'A public list of standards',
+    changes: [
+      {
+        id: 'public-catalogue',
+        type: 'feat',
+        title: 'A public list of standards',
+        detail: 'Discover standards before signing in, with public pages, release details and machine-readable catalogues.',
+        roles: ['member'],
+        to: '/def',
+      },
+    ],
+  },
+  {
+    version: '0.50.0',
+    date: '2026-11-13',
+    title: 'Edit a change request by hand',
+    changes: [{
+      id: 'edit-change-request-by-hand', type: 'feat', title: 'Edit a change request by hand',
+      detail: 'Correct a request’s title and reason, reword or rename drafted terms, and remove individual edits before or during review. Renaming keeps references together, and saving new edits asks reviewers to look again.',
+      roles: ['steward', 'contributor', 'member'], to: '{o}/changes',
+    }],
+  },
+  {
+    version: '0.49.0',
+    date: '2026-11-13',
+    title: 'First steps for a new standard, and editing its details',
+    changes: [
+      {
+        id: 'new-standard-first-steps', type: 'feat', title: 'First steps for a new standard',
+        detail: 'Follow four steps from a use case to a first release. Address checks wait until a version is published.',
+        roles: ['steward'], to: '/',
+      },
+      {
+        id: 'edit-standard-details', type: 'feat', title: 'Edit a standard’s details',
+        detail: 'Owners and stewards can update the title, description and subject area used in Concord’s listing.',
+        roles: ['steward'], to: '{o}',
+      },
+      {
+        id: 'empty-browse-diagram', type: 'fix', title: 'A useful start in Browse and Diagram',
+        detail: 'Empty views explain how to add the first terms. An empty Diagram stays at 100% zoom without an SVG error.',
+        roles: [], to: '{o}/browse',
+      },
+      {
+        id: 'new-standard-needs-description', type: 'fix', title: 'A new standard asks for its description',
+        detail: 'Without a description in the ontology file, every change failed its checks. The New ontology dialog now requires one.',
+        roles: ['steward'], to: '/',
+      },
+      {
+        id: 'policy-edit-kept-on-refresh', type: 'fix', title: 'Policy edits survive a background refresh',
+        detail: 'An edit made just after opening Governance could be dropped when the page refreshed, leaving Save policy disabled.',
+        roles: ['steward'], to: '{o}/governance',
+      },
+    ],
+  },
+  {
+    version: '0.48.2',
+    date: '2026-11-13',
+    title: "Public pages list only the standard's own terms, and smaller fixes",
+    changes: [
+      {
+        id: 'public-own-terms',
+        type: 'fix',
+        title: "Public pages list only the standard's own terms",
+        detail: 'Outside declarations are folded by vocabulary. Term search, counts and structured data list only terms the standard defines.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '/def/volunteering',
+      },
+      {
+        id: 'draft-release-next-step',
+        type: 'fix',
+        title: 'Draft releases explain when to publish',
+        detail: 'The next step for a draft release is to publish when the version is ready.',
+        roles: ['steward', 'odi'],
+        to: '{o}/releases',
+      },
+      {
+        id: 'held-version-example-availability',
+        type: 'fix',
+        title: 'Validate data opens cleanly for versions being reviewed',
+        detail: 'Example data is offered only when its public file is available, including the approval and consent checks.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '{o}/validate',
+      },
+      {
+        id: 'changes-draft-wording',
+        type: 'fix',
+        title: 'The empty Changes list names Draft changes',
+        detail: 'The hint uses the name of the action on Use cases.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '{o}/changes',
+      },
+      {
+        id: 'browse-and-code-keyboard-access',
+        type: 'fix',
+        title: 'Larger class tree controls and keyboard access to code views',
+        detail: 'Expand and collapse controls have larger hit areas. Read-only code views have named keyboard focus and support scrolling with the arrow keys.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '{o}/source',
+      },
+      {
+        id: 'interview-storage-link',
+        type: 'fix',
+        title: 'The interview privacy note links the storage name',
+        detail: "The note links to your Solid pod or Concord's private storage without printing the long address.",
+        roles: ['steward', 'contributor', 'member', 'odi'],
+        to: '{o}/use-cases',
+      },
+      {
+        id: 'required-dialog-field-hints',
+        type: 'fix',
+        title: 'Creation dialogs explain what is required',
+        detail: 'New ontology and New change request mark required fields and explain what is missing before their buttons can be used.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '/',
+      },
+      {
+        id: 'prefix-in-ontology-details',
+        type: 'fix',
+        title: 'The prefix appears with its namespace in Ontology details',
+        detail: 'Hub cards focus on the title. Open Ontology details to read the prefix and namespace together.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '/',
       },
     ],
   },

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { GovernanceTemplateId } from '@concord/shared';
 import { BookOpen, Compass, Network, Plus } from 'lucide-react';
@@ -11,7 +11,8 @@ import { plural, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { HealthChip } from '../components/Phase';
 import { ActivityFeed } from '../components/ActivityFeed';
-import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, PageHeader, Select, Textarea, LinkButton } from '../components/ui';
+import { OntologyDetailsFields } from '../components/OntologyDetails';
+import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, PageHeader, Select, LinkButton } from '../components/ui';
 
 function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const nav = useNavigate();
@@ -34,6 +35,10 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
     // In the background: the list counts every ontology, and the new one's first validation can be slow.
     void ontologies.reload();
   });
+  const hintId = useId();
+  // A description is needed from the start: without one in the ontology file, every change fails its checks.
+  const needed = [!form.title.trim() && 'a title', !form.prefix.trim() && 'a prefix', !form.description.trim() && 'a description'].filter((x): x is string => !!x);
+  const missing = needed.length ? `Add ${needed.length > 1 ? `${needed.slice(0, -1).join(', ')} and ${needed[needed.length - 1]}` : needed[0]} to continue.` : undefined;
   const chosen = templates.data?.find((t) => t.templateId === form.governanceTemplate);
   const autoPrefix = (title: string) =>
     title
@@ -50,32 +55,20 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
       title="New ontology"
       footer={
         <>
+          {missing && <p id={hintId} className="w-full text-sm text-muted">{missing}</p>}
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" loading={create.pending} disabled={!form.title.trim() || !form.prefix.trim()} onClick={() => void create.run()}>
+          <Button variant="primary" loading={create.pending} disabled={!!missing} aria-describedby={missing ? hintId : undefined} onClick={() => void create.run()}>
             Create ontology
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        <Field label="Title">
-          <Input
-            value={form.title}
-            onChange={(e) => setForm((f) => ({ ...f, title: e.target.value, prefix: f.prefix && f.prefix !== autoPrefix(f.title) ? f.prefix : autoPrefix(e.target.value) }))}
-            placeholder="e.g. Volunteering Data Standard"
-          />
-        </Field>
-        <Field label="Prefix" hint="Short namespace prefix used in CURIEs, e.g. vol:Shift">
-          <Input value={form.prefix} onChange={set('prefix')} placeholder="vol" pattern="[a-z][a-z0-9-]*" />
-        </Field>
-        <Field label="Description">
-          <Textarea value={form.description} onChange={set('description')} placeholder="What is this ontology for, and who will use it?" />
-        </Field>
-        <Field label="Domain" hint="Helps the AI interviewer ask relevant questions.">
-          <Input value={form.domain} onChange={set('domain')} placeholder="e.g. charity volunteering, energy networks" />
-        </Field>
+        <OntologyDetailsFields creating value={form} onChange={(field, value) => setForm((f) => ({ ...f, [field]: value, ...(field === 'title' && { prefix: f.prefix && f.prefix !== autoPrefix(f.title) ? f.prefix : autoPrefix(value) }) }))} afterTitle={<Field label={<>Prefix <span className="text-muted">(required)</span></>} hint="Short namespace prefix used in CURIEs, e.g. vol:Shift">
+          <Input required aria-required="true" value={form.prefix} onChange={set('prefix')} placeholder="vol" pattern="[a-z][a-z0-9-]*" />
+        </Field>} />
         <Field label="Governance policy" hint="You can change this later from the Governance tab.">
           <Select value={form.governanceTemplate} onChange={set('governanceTemplate')} disabled={!templates.data}>
             <option value="">Default</option>
@@ -139,6 +132,9 @@ export function HubPage() {
           </>
         }
       />
+      <p className="mb-6 text-sm text-muted">
+        <a href="/def" className="hover:text-fg hover:underline">Public list of standards</a>
+      </p>
       {isDemo && (
         <Card className="mb-6 flex flex-wrap items-center justify-between gap-3 border-accent/30 bg-accent-soft/60 px-5 py-4">
           <div className="text-sm">
@@ -179,7 +175,6 @@ export function HubPage() {
                         <Badge tone="outline">{titleCase(o.stage)}</Badge>
                       </div>
                     </div>
-                    <p className="mt-0.5 font-mono text-xs text-subtle">{o.prefix}:</p>
                     <p className="mt-2 line-clamp-3 flex-1 text-sm text-muted">{o.description || 'No description yet.'}</p>
                     <p className="mt-4 border-t border-line pt-3 text-sm text-muted">
                       {/* Counts are withheld while the working draft is reviewed before publishing: show a dash, never "undefined". */}
