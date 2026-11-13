@@ -78,6 +78,7 @@ export function OverviewTab() {
   return (
     <div className="grid gap-x-12 gap-y-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="min-w-0 space-y-10">
+        {typeof loc.state?.notice === 'string' && <p role="status" className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm">{loc.state.notice}</p>}
         {firstSteps && !hiddenSteps && (
           <section aria-labelledby="first-steps-title">
             <div className="flex flex-wrap items-baseline justify-between gap-2">

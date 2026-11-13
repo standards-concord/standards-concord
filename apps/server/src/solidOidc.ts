@@ -315,7 +315,6 @@ interface Pending {
   verifier: string;
   state: string;
   nonce: string;
-  returnTo: string;
   at: number;
 }
 /**
@@ -333,7 +332,7 @@ interface StoredPending extends Pending {
 const sweep = async () => void (await removeWhereAtMost('kv', 'solidLoginExpires', Date.now()));
 
 /** Start signing in: returns the login's id (for a cookie) and where to send the browser. */
-export async function startLogin(as: oauth.AuthorizationServer, returnTo: string): Promise<{ loginId: string; url: string }> {
+export async function startLogin(as: oauth.AuthorizationServer): Promise<{ loginId: string; url: string }> {
   await sweep();
   // At most MAX_PENDING sign-ins started in any ten minutes, across every server.
   if (!(await reserveCounters([{ id: `solid-logins:${Math.floor(Date.now() / PENDING_TTL)}`, max: MAX_PENDING }], 'solid-logins')))
@@ -357,7 +356,7 @@ export async function startLogin(as: oauth.AuthorizationServer, returnTo: string
     url.searchParams.set(k, v);
   const loginId = oauth.generateRandomState();
   const at = Date.now();
-  await insertOnce<StoredPending>('kv', { id: pendingId(loginId), as, client, verifier, state, nonce, returnTo, at, solidLoginExpires: at + PENDING_TTL });
+  await insertOnce<StoredPending>('kv', { id: pendingId(loginId), as, client, verifier, state, nonce, at, solidLoginExpires: at + PENDING_TTL });
   return { loginId, url: url.href };
 }
 
@@ -403,7 +402,6 @@ export interface FinishedLogin {
   webId: string;
   issuer: string;
   name: string;
-  returnTo: string;
   login: SolidLogin;
   /** The person's own pod, from their profile (see podOf), if it names one Concord can use. */
   storage?: string;
@@ -518,7 +516,6 @@ export async function finishLogin(loginId: string | undefined, callbackUrl: stri
     webId,
     issuer: claims.iss,
     name: profile.name ?? nameFromWebId(webId),
-    returnTo: p.returnTo,
     storage: podOf(profile) ?? (await storageAbove(webId)),
     login: { webId, as, client, keys, accessToken: tokens.access_token, refreshToken: tokens.refresh_token, expiresAt: Date.now() + (tokens.expires_in ?? 300) * 1000 },
   };

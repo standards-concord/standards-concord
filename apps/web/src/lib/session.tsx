@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { SessionInfo } from '@concord/shared';
-import { api, ApiError } from '../api';
+import { api, ApiError, whileSigningOut } from '../api';
 import { clearDiagramProposalStorage } from './diagramProposalStorage';
 
 interface SessionCtx {
@@ -99,14 +99,19 @@ async function finishPendingSignOut() {
   } catch {
     return;
   }
-  for (const [key, session] of pending) {
-    if (session) await api.logout(session);
-    try {
-      localStorage.removeItem(key);
-    } catch {
-      /* storage unavailable */
+  if (!pending.length) return;
+  const done = (async () => {
+    for (const [key, session] of pending) {
+      if (session) await api.logout(session);
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        /* storage unavailable */
+      }
     }
-  }
+  })();
+  whileSigningOut(done);
+  await done;
 }
 
 /** The saved session, its clock moved on by the time since it was saved; undefined if there is none. */
@@ -159,47 +164,68 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<unknown>();
   const fetchedAt = useRef(Date.now());
+  // Sign-ins and sign-outs made in this tab. Showing what the server answered is not one of them:
+  // counting it would make an older answer throw away the answer to a newer question.
+  const sessionChanges = useRef(0);
+  // Questions to the server are numbered as they are asked; `answered` is the newest one answered.
+  const asked = useRef(0);
+  const answered = useRef(0);
 
-  const setSession = useCallback((s: SessionInfo) => {
+  const show = useCallback((s: SessionInfo) => {
     setActiveAccount(s.user?.id ?? 'guest');
     saveOfflineSession(s);
     fetchedAt.current = Date.now();
     setSessionState(s);
     setError(undefined);
   }, []);
+  const setSession = useCallback(
+    (s: SessionInfo) => {
+      ++sessionChanges.current;
+      show(s);
+    },
+    [show],
+  );
 
   /**
-   * The session from the server, or undefined if a sign-out happened while asking:
-   * a signed-in answer sent before the sign-out must not sign this tab back in.
+   * The session from the server, or undefined if it is out of date: the session changed here while
+   * asking (an old answer must neither restore a signed-out account nor undo a new sign-in), or a
+   * question asked later was answered first. `current()` says whether it is still the newest answer.
    */
   const fetchSession = useCallback(async () => {
     const before = signOuts();
+    const version = sessionChanges.current;
+    const question = ++asked.current;
     // A sign-out made with no connection goes first, so its session never signs this tab back in.
     await finishPendingSignOut();
     const s = await api.session();
-    return s.user && signOuts() !== before ? undefined : s;
+    if (sessionChanges.current !== version || answered.current > question || (s.user && signOuts() !== before)) return undefined;
+    answered.current = question;
+    return { session: s, current: () => sessionChanges.current === version && answered.current === question };
   }, []);
 
-  // Each refresh is numbered: one that a newer refresh, a sign-out or another account overtook while
+  // Each refresh is numbered: one that a newer refresh, a sign-out or a sign-in overtook while
   // it waited for the device's copy to be read back is dropped instead of applied.
   const refreshes = useRef(0);
   const refresh = useCallback(async () => {
     const n = ++refreshes.current;
     const before = signOuts();
-    const stillWanted = (account: string) => n === refreshes.current && signOuts() === before && activeAccount === account;
+    const version = sessionChanges.current;
+    const stillWanted = (account: string) => n === refreshes.current && sessionChanges.current === version && signOuts() === before && activeAccount === account;
     setLoading(true);
     try {
-      const s = await fetchSession();
-      if (!s) return undefined;
+      const answer = await fetchSession();
+      if (!answer) return undefined;
+      const s = answer.session;
       // Pages show what this device saved for the account at once, so it is read back first.
       const account = s.user?.id ?? 'guest';
-      if (n !== refreshes.current || signOuts() !== before) return undefined;
+      if (n !== refreshes.current || sessionChanges.current !== version || signOuts() !== before) return undefined;
       setActiveAccount(account);
       await accountSettled();
-      if (!stillWanted(account)) return undefined;
-      setSession(s);
+      if (!stillWanted(account) || !answer.current()) return undefined;
+      show(s);
       return s;
     } catch (e) {
+      if (n !== refreshes.current || sessionChanges.current !== version || signOuts() !== before) return undefined;
       // No connection: carry on as the last person signed in here, with what the device saved for them.
       // Nothing is sent as them until the server is back, and it still decides what they may do.
       const saved = e instanceof ApiError && e.offline ? offlineSession() : undefined;
@@ -218,7 +244,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     } finally {
       if (n === refreshes.current) setLoading(false);
     }
-  }, [setSession, fetchSession]);
+  }, [show, fetchSession]);
 
   // Signing out (here, or in another tab) closes the account on screen at once, even when the server
   // can't be reached to confirm it: pages showing its data unmount and sign-in is shown.
@@ -250,20 +276,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (current) setSession({ ...current, user: undefined });
       setActiveAccount(undefined);
       void fetchSession()
-        .then((s) => s && setSession(s))
+        .then((answer) => answer && show(answer.session))
         .catch(() => {});
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
-  }, [setSession, fetchSession]);
+  }, [setSession, show, fetchSession]);
 
   useEffect(() => {
     const check = () => {
       if (document.visibilityState !== 'visible') return;
       void fetchSession()
-        .then((s) => {
-          // Another account, or the same one signed in again (a new session, so a new handle for a later sign-out).
-          if (s && (s.user?.id !== sessionRef.current?.user?.id || s.sessionId !== sessionRef.current?.sessionId)) setSession(s);
+        .then((answer) => {
+          const s = answer?.session;
+          const shown = sessionRef.current;
+          // The first answer of all (this check overtook the opening one, which is now out of date), another
+          // account, or the same one signed in again (a new session, so a new handle for a later sign-out).
+          if (s && (!shown || s.user?.id !== shown.user?.id || s.sessionId !== shown.sessionId)) show(s);
         })
         .catch(() => {});
     };
@@ -275,7 +304,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('online', check);
       document.removeEventListener('visibilitychange', check);
     };
-  }, [setSession, fetchSession]);
+  }, [show, fetchSession]);
 
   const now = useCallback(() => {
     if (!session) return Date.now();

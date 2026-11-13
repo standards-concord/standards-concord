@@ -1,3 +1,4 @@
+import type { Page } from '@playwright/test';
 import { test, expect, demoOntology, settle, signIn, signInAsPersona, uniq } from './fixtures';
 
 /**
@@ -5,6 +6,39 @@ import { test, expect, demoOntology, settle, signIn, signInAsPersona, uniq } fro
  * controls. (Looks are in looks.spec.ts, agents in agents.spec.ts and oauth.spec.ts, and who
  * may read feedback in security.spec.ts.)
  */
+
+/** Record ordering only, without keeping cookies or request bodies. */
+function authTraffic(page: Page) {
+  const traffic: string[] = [];
+  const paths: Record<string, string> = {
+    '/api/auth/logout': 'logout',
+    '/api/auth/demo': 'demo',
+    '/api/session': 'session',
+  };
+  const label = (url: string) => paths[new URL(url).pathname];
+  page.on('request', (request) => {
+    const name = label(request.url());
+    if (name) traffic.push(`request ${name}`);
+  });
+  page.on('response', (response) => {
+    const name = label(response.url());
+    if (name) traffic.push(`response ${name}`);
+  });
+  return traffic;
+}
+
+async function expectSignedIn(page: Page, previousName: string) {
+  await expect(page).toHaveURL(/\/alpha$/);
+  await settle(page);
+  await expect(page.getByRole('button', { name: 'Try the demo' })).toHaveCount(0);
+  const session = (await (await page.request.get('/api/session')).json()) as { user?: { name: string } };
+  expect(session.user && session.user.name !== previousName).toBe(true);
+  await expect(page.getByRole('button', { name: new RegExp(session.user!.name) })).toBeVisible();
+  await page.reload();
+  await expect(page).toHaveURL(/\/alpha$/);
+  await expect(page.getByRole('button', { name: new RegExp(session.user!.name) })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Try the demo' })).toHaveCount(0);
+}
 
 test.describe('account and hub', () => {
   test('signing in from a deep link returns to that page', async ({ page }) => {
@@ -114,6 +148,141 @@ test.describe('account and hub', () => {
     await expect(page).toHaveURL(new RegExp(`/login\\?next=${encodeURIComponent(target)}$`));
     await expect(page.getByRole('button', { name: 'Try the demo' })).toBeVisible();
     expect((await page.request.get('/api/agent-tokens')).status()).toBe(401);
+  });
+
+  // Used to go wrong: the page being left also redirected to sign-in, naming itself as the place to come back
+  // to, so the next person to sign in on this browser was sent to the page the last one had open.
+  test('signing out opens plain sign-in, with no return to the page that was open', async ({ page }) => {
+    const name = `Leaver ${uniq()}`;
+    await signIn(page, { name, role: 'contributor' });
+    await page.goto('/settings');
+    await settle(page);
+    await page.getByRole('button', { name: new RegExp(name) }).click();
+    await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
+    await expect(page.getByRole('button', { name: 'Try the demo' })).toBeVisible();
+    await settle(page);
+    await expect(page).toHaveURL(/\/login$/);
+  });
+
+  // Used to go wrong: sign-in is shown while the server is still ending the old session. Signing in again in
+  // that time worked for a moment, then the sign-out's late answer took the new session's cookie away and
+  // closed the account on screen, so you were back at sign-in without having signed out.
+  test('signing in again while a sign-out is still being confirmed keeps you signed in', async ({ page }) => {
+    const name = `Quick return ${uniq()}`;
+    await signIn(page, { name, role: 'contributor' });
+    await page.goto('/settings');
+    await settle(page);
+    const traffic = authTraffic(page);
+    let answer!: () => void;
+    const answered = new Promise<void>((r) => (answer = r));
+    await page.route('**/api/auth/logout', async (route) => {
+      await answered;
+      await route.continue();
+    });
+    await page.getByRole('button', { name: new RegExp(name) }).click();
+    await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
+    const again = page.getByRole('button', { name: 'Try the demo' });
+    await again.click();
+    // The new sign-in waits its turn: nothing is sent as the next person until the old session has ended.
+    await expect(again).toBeDisabled();
+    // A disabled button alone also passed without the barrier, whenever demo login happened to answer last.
+    await page.waitForTimeout(250);
+    expect(traffic).toContain('request logout');
+    expect(traffic).not.toContain('request demo');
+    answer();
+    await expect.poll(() => traffic.includes('request demo')).toBe(true);
+    expect(traffic.indexOf('response logout')).toBeGreaterThanOrEqual(0);
+    expect(traffic.indexOf('request demo')).toBeGreaterThan(traffic.indexOf('response logout'));
+    await expectSignedIn(page, name);
+  });
+
+  // Used to go wrong: a stalled session refresh blocked login after logout had succeeded; once allowed
+  // through, its old signed-out answer could also replace the new account on screen.
+  test('a slow session check after signing out neither blocks nor undoes the next sign-in', async ({ page }) => {
+    const name = `Slow check ${uniq()}`;
+    await signIn(page, { name, role: 'contributor' });
+    await page.goto('/settings');
+    await settle(page);
+    const traffic = authTraffic(page);
+    let logoutStarted = false;
+    await page.route('**/api/auth/logout', async (route) => {
+      logoutStarted = true;
+      await route.continue();
+    });
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    let ready!: () => void;
+    const held = new Promise<void>((resolve) => (ready = resolve));
+    let holding = false;
+    await page.route('**/api/session', async (route) => {
+      if (!logoutStarted || holding) return route.continue();
+      holding = true;
+      // Fetch now, while signed out, rather than letting a later fetch see the next login's cookie.
+      const response = await route.fetch();
+      expect((await response.json()).user).toBeUndefined();
+      ready();
+      await answered;
+      await route.fulfill({ response });
+    });
+    await page.getByRole('button', { name: new RegExp(name) }).click();
+    await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
+    await held;
+    const signedIn = page.waitForResponse('**/api/auth/demo');
+    await page.getByRole('button', { name: 'Try the demo' }).click();
+    const response = await signedIn;
+    expect(response.ok()).toBe(true);
+    const next = (await response.json()).user.name as string;
+    await expect(page).toHaveURL(/\/alpha$/);
+    await expect(page.getByRole('button', { name: new RegExp(next) })).toBeVisible();
+    expect(traffic.indexOf('response logout')).toBeGreaterThanOrEqual(0);
+    expect(traffic.indexOf('request demo')).toBeGreaterThan(traffic.indexOf('response logout'));
+    expect(traffic).not.toContain('response session');
+    const checked = page.waitForResponse('**/api/session');
+    answer();
+    await checked;
+    await expectSignedIn(page, name);
+  });
+
+  // Used to go wrong: replaying an offline sign-out bypassed the wait, so its late response could
+  // clear the cookie belonging to a demo login made while the replay was still on its way.
+  test('signing in while an offline sign-out is being finished waits for it', async ({ page, consoleGuard }) => {
+    consoleGuard.allow(/Failed to load resource|ERR_INTERNET_DISCONNECTED/);
+    const name = `Offline return ${uniq()}`;
+    await signIn(page, { name, role: 'contributor' });
+    await page.goto('/settings');
+    await settle(page);
+    await page.route('**/api/**', (route) => route.abort('internetdisconnected'));
+    await page.getByRole('button', { name: new RegExp(name) }).click();
+    await page.getByRole('navigation', { name: 'Account' }).getByRole('button', { name: 'Sign out' }).click();
+    await expect(page).toHaveURL(/\/login$/);
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).some((key) => key.startsWith('concord.signOutPending.')))).toBe(true);
+    await settle(page);
+    await page.unroute('**/api/**');
+    const traffic = authTraffic(page);
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    let ready!: () => void;
+    const held = new Promise<void>((resolve) => (ready = resolve));
+    await page.route('**/api/auth/logout', async (route) => {
+      // The reconnect replay identifies the session it meant, rather than ending an arbitrary session.
+      expect(typeof route.request().postDataJSON().session).toBe('string');
+      ready();
+      await answered;
+      await route.continue();
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await held;
+    const again = page.getByRole('button', { name: 'Try the demo' });
+    await again.click();
+    await expect(again).toBeDisabled();
+    await page.waitForTimeout(250);
+    expect(traffic).toContain('request logout');
+    expect(traffic).not.toContain('request demo');
+    answer();
+    await expect.poll(() => traffic.includes('request demo')).toBe(true);
+    expect(traffic.indexOf('response logout')).toBeGreaterThanOrEqual(0);
+    expect(traffic.indexOf('request demo')).toBeGreaterThan(traffic.indexOf('response logout'));
+    await expectSignedIn(page, name);
   });
 
   test('the hub lists ontologies and its activity feed links to what happened', async ({ page, request }) => {
