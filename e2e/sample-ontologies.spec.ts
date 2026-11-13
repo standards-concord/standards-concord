@@ -128,7 +128,7 @@ test('sample notices link to their shapes in the Solid Shapes Catalogue, and the
   await samples.getByRole('link', { name: 'vCard', exact: true }).click();
   const notice = page.getByRole('region', { name: 'About this sample', exact: true });
   await expect(notice.getByRole('link', { name: 'Solid Shapes Catalogue', exact: true })).toHaveAttribute('href', 'https://github.com/solid/shapes');
-  await expect(notice.getByRole('link', { name: 'address_book.ttl', exact: true })).toHaveAttribute('href', 'https://github.com/solid/shapes/blob/main/shapes/address_book.ttl');
+  await expect(notice.getByRole('link', { name: 'address_book.ttl', exact: true })).toHaveAttribute('href', 'https://github.com/solid/shapes/blob/ccbccdb208091e0e822aaa4b14250315cd6f014d/shapes/address_book.ttl');
   // Web Access Control has no shapes in the catalogue, so its notice has no shapes line.
   await page.goto('/');
   await samples.getByRole('button', { name: 'Sample standards', exact: true }).click();
@@ -140,5 +140,5 @@ test('sample notices link to their shapes in the Solid Shapes Catalogue, and the
   await expect(page.getByRole('heading', { name: 'Schedule', exact: true, level: 1 })).toBeVisible();
   const publicNotice = page.getByRole('region', { name: 'About this sample', exact: true });
   await expect(publicNotice).toContainText('SolidOS scheduler pane');
-  await expect(publicNotice.getByRole('link', { name: 'event.ttl', exact: true })).toHaveAttribute('href', 'https://github.com/solid/shapes/blob/main/shapes/event.ttl');
+  await expect(publicNotice.getByRole('link', { name: 'event.ttl', exact: true })).toHaveAttribute('href', 'https://github.com/solid/shapes/blob/ccbccdb208091e0e822aaa4b14250315cd6f014d/shapes/event.ttl');
 });

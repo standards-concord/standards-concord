@@ -18,6 +18,7 @@ import { publishFederationRelease } from '../src/services/federationReleases.js'
 import { getUser } from '../src/services/users.js';
 import { defaultStartupTasks } from '../src/startup.js';
 import { pageInput, releasePageFiles } from '../src/public/routes.js';
+import { renderOntologyPage } from '../src/public/render.js';
 
 const samples = async () => (await list<OntologyProject>('ontologies')).filter((p) => p.sample);
 beforeAll(async () => { await openDb(); });
@@ -185,6 +186,19 @@ describe('sample seeding through the selected ontology store', () => {
     expect(all.every((p) => !oldIds.includes(p.id))).toBe(true);
     expect((await list<OntologyProject>('ontologies')).find((p) => p.demo)?.slug).toBe('volunteering');
     expect(await seedSamples()).toEqual([]);
+  });
+
+  it('shows the current Solid Shapes Catalogue list for a sample seeded before that list changed', async () => {
+    // Review r4: shapes were read from the attribution stored at seed time, and seeding never revisits a sample,
+    // so a sample seeded before its list grew kept the old list (or none) until a demo reset.
+    const meeting = (await samples()).find((p) => p.slug === 'meeting')!;
+    const { shapes: _shapes, ...storedBefore } = meeting.sample!;
+    await put('ontologies', { ...meeting, sample: storedBefore });
+    const stored = (await list<OntologyProject>('ontologies')).find((p) => p.id === meeting.id)!;
+    expect(stored.sample).not.toHaveProperty('shapes');
+    const html = renderOntologyPage(await pageInput(stored, 'draft', 'https://concord.example'));
+    expect(html).toContain('href="https://github.com/solid/shapes/blob/ccbccdb208091e0e822aaa4b14250315cd6f014d/shapes/chat.ttl">chat.ttl</a>');
+    await put('ontologies', meeting);
   });
 
   it('keeps ontology-based version IRIs for the non-sample demo, at bootstrap and normal publication', async () => {

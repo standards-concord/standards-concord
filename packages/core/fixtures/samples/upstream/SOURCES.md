@@ -20,4 +20,8 @@ SolidOS reads and writes all of these through the [`solid-namespace`](https://ww
 prefixes (`solid`, `acl`, `ldp`, `space`, `meeting`, `ui`, `wf`, `vcard`, `foaf`, `sched`). By use in solid-ui, solid-panes,
 issue-pane and meeting-pane source (November 2026), the most used are `ui`, `wf`, `foaf`, `vcard` and `meeting`.
 
+The shapes links in each sample's notice come from the [Solid Shapes Catalogue](https://github.com/solid/shapes) at commit
+`ccbccdb208091e0e822aaa4b14250315cd6f014d` (retrieved 2026-11-13): every `shapes/*.ttl` file there that uses the sample's
+namespace. The shapes are linked only, not copied.
+
 Redistributed W3C conversions use the [2015 licence](https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document), with the [full notice](../../../../../docs/licences/W3C-20150513.md), preserved provenance and change notices described in [sample-vocabularies.md](../../../../../docs/sample-vocabularies.md). FOAF credits Dan Brickley and Libby Miller; its modified copy retains [CC BY 1.0](../../../../../docs/licences/CC-BY-1.0.md).

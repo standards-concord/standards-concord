@@ -65,12 +65,41 @@ describe('sample creation races on the selected ontology store', () => {
       await realInit(...args);
       throw new Error('draft head insert failed');
     });
+    const forget = vi.spyOn(ontologyStore, 'forget');
     try {
       await expect(createProject(input, owner)).rejects.toThrow('draft head insert failed');
+      // The failed creation's own history is discarded straight away, not left for a later creator to clear.
+      expect(forget.mock.calls.filter(([p]) => p.slug === input.slug)).toHaveLength(2); // before init, then the clean-up
+      await expect(ontologyStore.head({ id: init.mock.calls[0][0].id, slug: input.slug } as OntologyProject)).rejects.toThrow();
       const retry = await createProject(input, owner);
       expect(await ontologyStore.log(retry)).toHaveLength(1);
       expect((await ontologyStore.working(retry)).metadata().title).toBe(input.title);
-    } finally { init.mockRestore(); }
+    } finally { init.mockRestore(); forget.mockRestore(); }
+  });
+
+  it('reports the creation failure itself when its clean-up also fails', async () => {
+    // Review r4: a clean-up error in the outer handler replaced the cause, so callers saw the wrong failure.
+    const owner = (await simulation.ensurePersonas()).get('priya')!;
+    const input = { title: 'Clean-up fails', slug: 'cleanup-fails', prefix: 'cf', description: '' };
+    const realInit = ontologyStore.init.bind(ontologyStore);
+    const init = vi.spyOn(ontologyStore, 'init').mockImplementationOnce(async (...args: Parameters<typeof ontologyStore.init>) => {
+      await realInit(...args);
+      throw new Error('draft head insert failed');
+    });
+    const realForget = ontologyStore.forget.bind(ontologyStore);
+    let calls = 0;
+    const forget = vi.spyOn(ontologyStore, 'forget').mockImplementation(async (p) => {
+      if (p.slug === input.slug && ++calls > 1) throw new Error('store claim lost');
+      return realForget(p);
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(createProject(input, owner)).rejects.toThrow('draft head insert failed');
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('store claim lost'));
+    } finally { init.mockRestore(); forget.mockRestore(); warn.mockRestore(); }
+    // The leftover is cleared by the next creation under this slug.
+    const retry = await createProject(input, owner);
+    expect(await ontologyStore.log(retry)).toHaveLength(1);
   });
 
   it('never inherits an orphaned history left under a free slug', async () => {
@@ -78,7 +107,12 @@ describe('sample creation races on the selected ontology store', () => {
     const owner = (await simulation.ensurePersonas()).get('priya')!;
     const orphan = { id: 'ont_orphan', slug: 'orphaned-slug' } as OntologyProject;
     await ontologyStore.init(orphan, '@prefix owl: <http://www.w3.org/2002/07/owl#> .\n<https://example.org/orphan> a owl:Ontology .\n', '# Orphan\n');
+    // A fork branch too: on the database store a new init replaces the head and history, but not other refs.
+    const head = await ontologyStore.head(orphan);
+    await ontologyStore.commitFork(orphan, 'left-behind', await ontologyStore.working(orphan), 'Fork it', { name: 'Dev' }, { parent: head, create: true }, async () => undefined);
+    expect(await ontologyStore.hasForkBranch(orphan, 'left-behind')).toBe(true);
     const created = await createProject({ title: 'Fresh start', slug: 'orphaned-slug', prefix: 'fresh', description: '' }, owner);
+    expect(await ontologyStore.hasForkBranch(created, 'left-behind')).toBe(false);
     expect(await ontologyStore.log(created)).toHaveLength(1);
     expect((await ontologyStore.working(created)).metadata().title).toBe('Fresh start');
   });

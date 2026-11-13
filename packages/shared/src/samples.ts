@@ -23,10 +23,16 @@ export interface SampleVocabulary extends SampleAttribution {
 
 /** The Solid Shapes Catalogue, which describes the SolidOS data model as SHACL shapes. */
 export const SOLID_SHAPES_CATALOGUE = 'https://github.com/solid/shapes';
+/** The catalogue commit the shapes lists were derived from (every shapes/*.ttl file that uses the sample's namespace); links are pinned to it. */
+export const SOLID_SHAPES_COMMIT = 'ccbccdb208091e0e822aaa4b14250315cd6f014d';
 
-/** Links to a sample's shapes in the Solid Shapes Catalogue. */
-export const sampleShapes = (sample: Pick<SampleAttribution, 'shapes'>) =>
-  (sample.shapes ?? []).map((file) => ({ file, url: `${SOLID_SHAPES_CATALOGUE}/blob/main/shapes/${file}` }));
+/**
+ * Links to a sample's shapes in the Solid Shapes Catalogue. Looked up from the registry by the sample's source rather than
+ * read from the attribution stored with the project, so samples seeded before a list changed show the current list.
+ */
+export const sampleShapes = (sample: Pick<SampleAttribution, 'source'>) =>
+  (SAMPLE_VOCABULARIES.find((s) => s.source === sample.source)?.shapes ?? [])
+    .map((file) => ({ file, url: `${SOLID_SHAPES_CATALOGUE}/blob/${SOLID_SHAPES_COMMIT}/shapes/${file}` }));
 
 export const SAMPLE_HEALTH_NOTE = "Concord's checks flag some wording inherited from the original; it is kept as published so the copy stays faithful.";
 
@@ -42,7 +48,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Settings and links that help Solid apps find profiles, preferences and storage.',
     usedBy: 'SolidOS account settings, profile discovery and type indexes', publisher: 'Solid Project',
     source: 'http://www.w3.org/ns/solid/terms', sourceTitle: 'Solid Terms', licence: cc0,
-    shapes: ['agent.ttl'],
+    shapes: ['agent.ttl', 'chat.ttl'],
     upstreamCopy: 'solid-terms.ttl', changes: `${common} Resolved rdf:Property declarations from their ranges and usage. Named anonymous provenance records with stable URNs.`,
   },
   {
@@ -77,6 +83,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     usedBy: 'SolidOS meeting pane', publisher: 'W3C',
     source: 'http://www.w3.org/ns/pim/meeting', sourceTitle: 'Meeting Ontology', licence: w3c,
     copyrightNotice: w3cNotice('Meeting Ontology', 'http://www.w3.org/ns/pim/meeting', '2016'),
+    shapes: ['chat.ttl'],
     upstreamCopy: 'meeting.ttl', changes: `${common} Retained meeting:label and also supplied an rdfs:label for Meeting.`,
   },
   {
@@ -84,6 +91,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Fields, forms and display hints used to build interfaces for linked data.',
     usedBy: 'SolidOS form rendering and form editor in solid-ui', publisher: 'W3C / Tim Berners-Lee',
     source: 'http://www.w3.org/ns/ui', sourceTitle: 'User Interface Ontology', licence: cc0,
+    shapes: ['chat.ttl'],
     upstreamCopy: 'ui.ttl', changes: `${common} Kept form descriptions as annotations where they mix schema and data. Omitted embedded form collections that OWL cannot parse as axioms (the complete forms remain in the upstream copy). Replaced the named CSS colour facet restriction with a string datatype.`,
   },
   {
@@ -92,7 +100,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     usedBy: 'SolidOS issue pane and meeting action items', publisher: 'W3C / Tim Berners-Lee; upstream copy maintained by SolidOS',
     source: 'http://www.w3.org/2005/01/wf/flow', sourceTitle: 'Issue Tracking Ontology', licence: w3c,
     copyrightNotice: w3cNotice('Issue Tracking Ontology', 'http://www.w3.org/2005/01/wf/flow'),
-    shapes: ['issue_tracker.ttl'],
+    shapes: ['chat.ttl', 'issue_tracker.ttl'],
     upstreamCopy: 'wf.ttl', changes: `${common} Expanded legacy N3 bare names in the original namespace. Removed label-only anonymous inverse properties, which do not identify an OWL inverse.`,
   },
   {
@@ -111,7 +119,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     source: 'http://xmlns.com/foaf/0.1/', sourceTitle: 'FOAF Vocabulary Specification',
     licence: { name: 'CC BY 1.0', url: 'https://creativecommons.org/licenses/by/1.0/', noticePath: '/licences/CC-BY-1.0', copyPath: '/docs/licences/CC-BY-1.0.md' },
     authors: ['Dan Brickley', 'Libby Miller'],
-    shapes: ['agent.ttl'],
+    shapes: ['agent.ttl', 'chat.ttl'],
     upstreamCopy: 'foaf.nq', changes: `${common} Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible equivalence edges; kept object-property inverses and compatible property hierarchies.`,
   },
   {

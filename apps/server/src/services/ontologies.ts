@@ -162,9 +162,14 @@ export async function createProject(
       const failed = initialized;
       // Also covers COMMIT failing after the callback succeeded. Recheck under the writer lock:
       // an ambiguous commit or another creator may already have reserved this slug.
-      await transaction(async () => {
-        if (!(await list<OntologyProject>('ontologies')).some((p) => p.slug === failed.slug)) await ontologyStore.forget(failed);
-      });
+      try {
+        await transaction(async () => {
+          if (!(await list<OntologyProject>('ontologies')).some((p) => p.slug === failed.slug)) await ontologyStore.forget(failed);
+        });
+      } catch (cleanup) {
+        // Report the creation's own failure, not the clean-up's; the next creation under this slug forgets the leftover first.
+        console.warn(`[ontologies] could not discard the failed creation of ${failed.slug}: ${(cleanup as Error).message}`);
+      }
     }
     throw err;
   }
