@@ -132,6 +132,9 @@ export function HubPage() {
           </>
         }
       />
+      <p className="mb-6 text-sm text-muted">
+        <a href="/def" className="hover:text-fg hover:underline">Public list of standards</a>
+      </p>
       {isDemo && (
         <Card className="mb-6 flex flex-wrap items-center justify-between gap-3 border-accent/30 bg-accent-soft/60 px-5 py-4">
           <div className="text-sm">

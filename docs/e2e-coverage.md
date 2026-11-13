@@ -65,6 +65,8 @@ Unit and API tests (`pnpm test`, in `apps/server/test` and `apps/web/src/lib`) c
 | Route | Status | Specs |
 | --- | --- | --- |
 | Public ontology page at the ontology IRI (`/def/...`), version IRIs, term fragments, use cases tab, downloads, content negotiation, no-JS, phone; reference groups, search, counts and JSON-LD include only own terms, outside declarations fold by vocabulary with external links | ✅ | public-page, live, validate (POST validation at the IRI, SHACL profile) |
+| `/def`, `/def/` public catalogue: visitors and members discover published standards and new drafts, follow public pages and return, read without JavaScript; accessible at 390 px; hub and footer links; JSON-LD, Turtle and held-version privacy | ✅ | public-catalogue; server: public-catalogue, vercelOutput, publicRouting |
+| `/login` standards list: up to five public standard links, catalogue link, quiet loading and catalogue link on error | ✅ | public-catalogue |
 | Governed code lists: contributor proposals via `/api/ontologies/:id/code-list-edits`; public `/def/:slug/draft` code list hierarchy and code anchors | ✅ | code-lists; API/service rules in `api.test.ts`, `codeListEdits.test.ts`, `codeListGovernance.test.ts`; public rendering in `public.test.ts` |
 | `GET /api/ontologies/:id/examples/:version`: authenticated availability uses public release/draft and consent rules; held versions return false, unknown versions 404, signed out 401 | ✅ | privacy-review, worked-examples; API: worked-examples.test.ts |
 | Public Examples tab (`/def/:slug`, `/def/:slug/:version`, `/def/:slug/draft`): signed-out readers see questions, actual SELECT and ASK answers, use case anchors, folded queries and data, copy and downloads; works without JavaScript | ✅ | worked-examples |

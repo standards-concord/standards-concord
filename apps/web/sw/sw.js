@@ -7,7 +7,7 @@
 const VERSION = self.__CONCORD_VERSION__;
 const FILES = self.__CONCORD_FILES__;
 const CACHE = `concord-app-${VERSION}`;
-const SERVER = /^\/(api|auth|mcp|people|def|healthz|\.well-known|authorize|token|register|revoke)(\/|$)/;
+const SERVER = /^\/(api|auth|mcp|people|def|healthz|\.well-known|authorize|token|register|revoke)(\/|$)|^\/def\.(jsonld|ttl)$/;
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

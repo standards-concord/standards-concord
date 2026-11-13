@@ -53,6 +53,21 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.51.0',
+    date: '2026-11-13',
+    title: 'A public list of standards',
+    changes: [
+      {
+        id: 'public-catalogue',
+        type: 'feat',
+        title: 'A public list of standards',
+        detail: 'Discover standards before signing in, with public pages, release details and machine-readable catalogues.',
+        roles: ['member'],
+        to: '/def',
+      },
+    ],
+  },
+  {
     version: '0.50.0',
     date: '2026-11-13',
     title: 'Edit a change request by hand',
