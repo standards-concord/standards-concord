@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { DATATYPE_NAMES, datatypeName } from './format';
+import { DATATYPE_NAMES, datatypeName, relativeTime } from './format';
 import { makeLabeler } from './ontology';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
+
+// Future activity used to promise "next week" instead of showing when it was recorded.
+it('can show future activity as a calendar date while deadlines retain relative times', () => {
+  const now = Date.parse('2026-11-11T12:00:00Z');
+  expect(relativeTime('2026-11-14T12:00:00Z', now, true)).toBe('14 Nov');
+  expect(relativeTime('2026-11-10T12:00:00Z', now, true)).toBe('yesterday');
+  expect(relativeTime('2026-11-14T12:00:00Z', now)).toBe('in 3 days');
+});
 
 describe('datatypeName', () => {
   it('gives well-known XSD types plain names, without the xsd: prefix', () => {

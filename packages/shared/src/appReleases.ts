@@ -53,6 +53,68 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.52.2',
+    date: '2026-11-13',
+    title: 'Tidier demo, clearer outcomes and a compact walkthrough button',
+    changes: [
+      {
+        id: 'tidier-demo-lists', type: 'fix', title: 'Less clutter in the demo',
+        detail: 'Deployment checks withdraw their sample work. Open use cases hide other people’s drafts, and the first interview answer gives an untitled use case a short title.',
+        roles: ['contributor', 'steward', 'agent'], to: '{o}/use-cases',
+      },
+      {
+        id: 'searchable-member-list', type: 'fix', title: 'Find a member in a large working group',
+        detail: 'Governance summarises up to eight members, with role holders and recently active people first. Larger groups have a member search.',
+        roles: ['steward', 'member', 'odi'], to: '{o}/governance#roles',
+      },
+      {
+        id: 'consistent-open-change-count', type: 'fix', title: 'Open change counts agree',
+        detail: 'The header counts submitted changes. Overview shows those changes and your own drafts, marked Your draft; the Changes list still includes all drafts.',
+        roles: ['steward', 'contributor', 'member'], to: '{o}',
+      },
+      {
+        id: 'activity-future-calendar-date', type: 'fix', title: 'Clear dates on future activity',
+        detail: 'Activity recorded after your governance clock shows a calendar date and stays in date order.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'], to: '/',
+      },
+      {
+        id: 'compact-walkthrough-control', type: 'fix', title: 'A compact walkthrough button',
+        detail: 'The corner guide shows just its step, becoming a small compass button on phones. Space below the footer keeps it clear of page content.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'], to: '{o}',
+      },
+      {
+        id: 'phone-ontology-navigation', type: 'fix', title: 'Clearer navigation on phones',
+        detail: 'Active section tabs stay in view and faded edges show when more tabs are available. The persona banner keeps the role list in its accessible name on small screens.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'], to: '{o}/governance',
+      },
+      {
+        id: 'closed-change-outcomes', type: 'fix', title: 'Closed changes explain the decision',
+        detail: 'Decision cards name the outcome, date and available vote tally, veto, sign-offs or withdrawal actor. Approval details remain one click away.',
+        roles: ['steward', 'contributor', 'member', 'odi'], to: '{o}/changes?status=all',
+      },
+      {
+        id: 'import-secondary-control', type: 'fix', title: 'Import an ontology looks like a button',
+        detail: 'The Overview import control uses the same secondary button style as other actions.',
+        roles: ['steward', 'contributor', 'agent'], to: '{o}',
+      },
+      {
+        id: 'browse-starting-summary', type: 'fix', title: 'Browse starts with a useful summary',
+        detail: 'Browse opens with class and property counts and up to twelve linked top-level classes, each with its definition below. Larger lists show how many remain, and the diagram is one click away.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'], to: '{o}/browse',
+      },
+      {
+        id: 'waiting-release-prompt', type: 'fix', title: 'Draft releases appear in your waiting work',
+        detail: 'Stewards and owners see nonempty draft releases in the Overview’s waiting list, with a link to review and publish them.',
+        roles: ['steward'], to: '{o}',
+      },
+      {
+        id: 'health-question-total', type: 'fix', title: 'Health distinguishes questions from tests',
+        detail: 'Overview counts the questions you can see and says how many have been tested, including when none have executable tests yet.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'], to: '{o}#health',
+      },
+    ],
+  },
+  {
     version: '0.52.1',
     date: '2026-11-13',
     title: 'Signing in straight after signing out',

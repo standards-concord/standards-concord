@@ -30,6 +30,7 @@ export function GovernancePanel({
   actions,
   detailsOpen,
   subject = 'change',
+  outcome,
 }: {
   g: GovernanceEvaluation;
   userById?: (id: string) => User | undefined;
@@ -38,6 +39,8 @@ export function GovernancePanel({
   /** Show the approval detail straight away, e.g. when the panel itself is already behind a disclosure. */
   detailsOpen?: boolean;
   subject?: 'change' | 'release';
+  /** A terminal decision replaces the next step, with approval details still available below. */
+  outcome?: string;
 }) {
   const { now } = useSession();
   useTick(30_000);
@@ -105,16 +108,16 @@ export function GovernancePanel({
   // What happens next, and what is missing, come first; the arithmetic is one click away.
   return (
     <div className="space-y-4 text-sm">
-      <p className="flex items-start gap-2 rounded-lg bg-accent-soft p-3 text-sm">
+      {outcome ? <p className="rounded-lg bg-accent-soft p-3 text-sm" data-testid="decision-outcome">{outcome}</p> : <p className="flex items-start gap-2 rounded-lg bg-accent-soft p-3 text-sm">
         <ArrowRight className="mt-0.5 size-4 shrink-0 text-accent" />
         <span>
           <strong className="font-medium">Next: </strong>
           {humaniseDates(g.next)}
         </span>
-      </p>
+      </p>}
 
       {/* Vetoes */}
-      {g.vetoedBy.length > 0 && (
+      {!outcome && g.vetoedBy.length > 0 && (
         <div className="flex items-start gap-2 rounded-lg bg-danger-soft p-3 text-danger">
           <ShieldAlert className="mt-0.5 size-4 shrink-0" />
           <div>
@@ -124,13 +127,13 @@ export function GovernancePanel({
         </div>
       )}
 
-      {!g.validationOk && (
+      {!outcome && !g.validationOk && (
         <div className="flex items-center gap-2">
           {g.validationOk ? <CircleCheck className="size-4 text-ok" /> : <CircleX className="size-4 text-danger" />}
           <span>{g.validationOk ? 'Validation passes' : 'Validation must pass before approval'}</span>
         </div>
       )}
-      {g.unmet.length > 0 && (
+      {!outcome && g.unmet.length > 0 && (
         <div>
           <div className="mb-1 text-sm font-semibold">Still needed</div>
           <ul className="space-y-1">
@@ -146,7 +149,7 @@ export function GovernancePanel({
 
       {v?.open && voteBox}
 
-      {actions && (
+      {!outcome && actions && (
         <div className="border-t border-line pt-4" role="group" aria-label="Your actions">
           <div className="mb-2 text-sm font-semibold">Your actions</div>
           {actions}

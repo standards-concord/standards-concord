@@ -15,6 +15,7 @@ import { Button, Card, CardHeader, CopyButton, ErrorCard, InlineError, Loading }
 import { UseCaseRefLink } from '../../components/UseCaseSharing';
 import { useOntology } from './Layout';
 import { ReleaseStatus } from './Releases';
+import { canPublishRelease } from '../../lib/governanceRules';
 
 export function ReleaseDetailPage() {
   const { releaseId = '' } = useParams();
@@ -34,7 +35,7 @@ export function ReleaseDetailPage() {
   const canVote = canCastVote(myRoles, voterRoles);
   const myVote = r.votes.find((v) => v.userId === session?.user?.id);
   const vote = (c: VoteChoice) => act.run(() => api.voteRelease(r.id, c));
-  const canPublish = hasRole('steward', 'owner');
+  const canPublish = canPublishRelease(myRoles, session?.user?.isPlatformAdmin);
   const canWrite = hasRole('editor', 'steward', 'owner');
 
   return (

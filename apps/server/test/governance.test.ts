@@ -1,6 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import type { Review, Vote } from '@concord/shared';
+import type { Membership, Review, Vote } from '@concord/shared';
 import { GOVERNANCE_TEMPLATES, evaluate, reviewsInRound, votesOnEdits } from '../src/services/governance.js';
+
+it('reports the same independent sign-offs it counts, excluding writers and superseded reviews', () => {
+  // The outcome text used to include author and co-author approvals that governance did not count.
+  const policy = structuredClone(GOVERNANCE_TEMPLATES['steward-led']);
+  policy.changes.minor.approverRoles = []; // The evaluator's default approver roles still apply.
+  const reviews = ['author', 'co-author', 'approver', 'superseded'].map((userId, i) => ({
+    id: `approval-${i}`, changeRequestId: 'cr', userId, decision: 'approve', roles: ['editor'], at: '2026-03-02T00:00:00Z', seq: i + 1,
+  })) as Review[];
+  // Sequence wins even when the simulated clock moved back after the approval.
+  reviews.push({ ...reviews[3], id: 'replacement', decision: 'request-changes', at: '2026-03-01T00:00:00Z', seq: 5 });
+  const result = evaluate({
+    policy, kind: 'change', level: 'minor', status: 'merged', statusSince: '2026-03-03T00:00:00Z',
+    reviewStartedAt: '2026-03-01T00:00:00Z', authorId: 'author', coAuthorIds: ['co-author'], reviews, votes: [],
+    members: reviews.slice(0, 4).map((r) => ({ userId: r.userId, roles: r.roles })) as Membership[],
+    validationOk: true, now: new Date('2026-03-03T00:00:00Z'),
+  });
+  expect(result.approvals).toBe(1);
+  expect(result.approvedBy).toEqual(['approver']);
+});
 
 /**
  * Which reviews count in a change request's current round. Regression: resubmitting used to leave

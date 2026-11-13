@@ -1149,8 +1149,14 @@ async function mergeNow(cr: ChangeRequest, actor: User | undefined): Promise<Cha
         lost = still;
         throw new HttpError(409, 'The approval no longer holds');
       }
-      if (await approvalLost(latest, (await governanceFor(latest)).outcome))
+      const governance = await governanceFor(latest);
+      if (await approvalLost(latest, governance.outcome))
         throw new HttpError(409, 'This request changed while it was being merged (it was edited, reviewed or withdrawn), so it was not merged.');
+      // Capture sign-offs before moving the draft invalidates autopilot's revision or membership changes.
+      latest.approvedAs = {
+        ...(latest.approvedAs ?? { level: latest.classification?.level ?? 'minor', confirmation: needsConfirmation(latest) }),
+        approvers: await Promise.all(governance.approvedBy.map(async (userId) => ({ userId, name: (await getUser(userId))?.name }))),
+      };
       latest.kgcl = p.kgcl;
       latest.privacyFindings = undefined;
       latest.mergedCommit = commit;

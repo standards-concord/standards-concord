@@ -23,7 +23,7 @@ export function ImportsSection({ ontologyId, ontologyIRI, report, canPropose }: 
           Builds on
         </h2>
         {canPropose && (
-          <Button variant="ghost" size="sm" onClick={() => setOpen(true)}>
+          <Button variant="secondary" size="sm" onClick={() => setOpen(true)}>
             Import an ontology
           </Button>
         )}

@@ -10,6 +10,7 @@ import { useOntologies } from '../../lib/ontologies';
 import { forgetKept } from '../../lib/kept';
 import { formatDate, plural, relativeTime, ringRoles } from '../../lib/format';
 import { useSession } from '../../lib/session';
+import { canPublishRelease } from '../../lib/governanceRules';
 import { ActivityFeed } from '../../components/ActivityFeed';
 import { LevelBadge, RoleChips, RoleRingLegend, StatusPill } from '../../components/badges';
 import { Disclosure } from '../../components/Disclosure';
@@ -23,7 +24,7 @@ import { useOntology } from './Layout';
 const proseLink = 'text-accent underline decoration-1 underline-offset-[0.18em] hover:decoration-2';
 
 /** Change requests still moving through the process, in the order people need to act on them. */
-const IN_PROGRESS: ChangeRequestStatus[] = ['voting', 'review', 'triage', 'needs-work', 'approved'];
+const IN_PROGRESS: ChangeRequestStatus[] = ['voting', 'review', 'triage', 'needs-work', 'approved', 'draft'];
 
 /**
  * The ontology's front page. It reads top to bottom like a short report: what this is, what is
@@ -39,6 +40,8 @@ export function OverviewTab() {
   const firstSteps = !!me && myRoles.some((role) => ['owner', 'steward', 'editor'].includes(role)) && o.stats.releases === 0;
   const validation = useAsync(() => api.validation(id, 'working'), [id], { keep: `validation|${id}|working` });
   const changes = useAsync(() => api.changeRequests(id), [id], { keep: `changeRequests|${id}|` });
+  const releases = useAsync(() => api.releases(id), [id], { keep: `releases|${id}` });
+  const useCases = useAsync(() => api.useCases(id), [id], { keep: `useCases|${id}` });
   const loc = useLocation();
   const wantsHealth = loc.hash === '#health';
   const healthRef = useRef<HTMLElement>(null);
@@ -63,7 +66,7 @@ export function OverviewTab() {
   const members = o.members ?? [];
   const shownMembers = members.slice(0, 14);
   const inProgress = (changes.data ?? [])
-    .filter((cr) => IN_PROGRESS.includes(cr.status))
+    .filter((cr) => IN_PROGRESS.includes(cr.status) && (cr.status !== 'draft' || cr.authorId === me))
     .sort((a, b) => IN_PROGRESS.indexOf(a.status) - IN_PROGRESS.indexOf(b.status) || b.updatedAt.localeCompare(a.updatedAt));
   const asks = inProgress.flatMap((cr) => {
     const verb = askOf(cr, o.governance, {
@@ -74,6 +77,11 @@ export function OverviewTab() {
     });
     return verb ? [{ cr, verb }] : [];
   });
+  const waitingReleases = canPublishRelease(myRoles, session?.user?.isPlatformAdmin)
+    ? (releases.data ?? []).filter((r) => r.status === 'draft' && r.changeRequestIds.length > 0)
+    : [];
+  const waiting = asks.length + waitingReleases.length;
+  const questionCount = useCases.data?.filter((u) => !u.withdrawnAt && u.status !== 'archived').reduce((n, u) => n + u.competencyQuestions.length, 0);
 
   return (
     <div className="grid gap-x-12 gap-y-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
@@ -161,16 +169,23 @@ export function OverviewTab() {
           </Disclosure>
         </section>
 
-        {asks.length > 0 && (
+        {waiting > 0 && (
           <section className="overview-asks bg-accent p-6 text-accent-fg" aria-labelledby="asks-title" data-testid="overview-asks">
             <h2 id="asks-title" className="text-xl font-bold">
-              {asks.length === 1 ? 'One change is waiting for you' : `${asks.length} changes are waiting for you`}
+              {waitingReleases.length ? (waiting === 1 ? 'One item is waiting for you' : `${waiting} items are waiting for you`) : asks.length === 1 ? 'One change is waiting for you' : `${asks.length} changes are waiting for you`}
             </h2>
             <ul className="mt-3 space-y-1.5">
               {asks.slice(0, 5).map(({ cr, verb }) => (
                 <li key={cr.id}>
                   <Link to={`/o/${id}/changes/${cr.id}`} className="underline decoration-1 underline-offset-[0.2em] hover:decoration-2">
                     {verb} #{cr.number}: {cr.title}
+                  </Link>
+                </li>
+              ))}
+              {waitingReleases.map((r) => (
+                <li key={r.id}>
+                  <Link to={`/o/${id}/releases/${r.id}`} className="underline decoration-1 underline-offset-[0.2em] hover:decoration-2">
+                    Review draft release v{r.version} ({plural(r.changeRequestIds.length, 'change')})
                   </Link>
                 </li>
               ))}
@@ -210,7 +225,7 @@ export function OverviewTab() {
             </p>
           ) : (
             <div className="mt-3 overflow-x-auto">
-              <table className="w-full text-left text-sm" data-testid="changes-in-progress">
+              <table className="w-full text-left text-sm" data-testid="changes-in-progress" aria-label="Changes in progress">
                 <thead className="border-b border-fg text-xs text-muted">
                   <tr>
                     <th scope="col" className="py-2 pr-3 font-semibold">
@@ -236,7 +251,7 @@ export function OverviewTab() {
                         </Link>
                       </td>
                       <td className="py-2.5 pr-3 whitespace-nowrap">
-                        <StatusPill status={cr.status} />
+                        {cr.status === 'draft' ? <span className="text-muted">Your draft</span> : <StatusPill status={cr.status} />}
                       </td>
                       <td className="hidden py-2.5 pr-3 sm:table-cell">
                         <LevelBadge level={cr.classification?.level} />
@@ -274,6 +289,7 @@ export function OverviewTab() {
                 headingLevel={3}
                 openLintKey={healthKey}
                 showQueries={hasRole('editor', 'steward', 'owner')}
+                questionCount={questionCount}
                 lintNote={
                   <>
                     Quality checks run again on every{' '}

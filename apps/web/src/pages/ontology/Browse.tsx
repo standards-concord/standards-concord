@@ -8,8 +8,8 @@ import { api, type TermDetail } from '../../api';
 import { useAsync } from '../../lib/hooks';
 import { KIND_LABEL, allTerms, restrictionText, type Labeler } from '../../lib/ontology';
 import { searchTerms, termDetail } from '@concord/core/terms';
-import { compactIri, datatypeName } from '../../lib/format';
-import { buildModel, type OntologyModel } from '../../lib/ontologyModel';
+import { compactIri, datatypeName, plural } from '../../lib/format';
+import { buildModel, OWL_THING, type OntologyModel } from '../../lib/ontologyModel';
 import { ClassTree } from '../../components/ontology-viz/ClassTree';
 import { ClassDiagram, DEFAULT_DIAGRAM_OPTIONS, neighbourhood, type DiagramOptions } from '../../components/ontology-viz/ClassDiagram';
 import { HierarchyPath, IncomingList, Neighbourhood, PropertyTable, SubclassList } from '../../components/ontology-viz/ClassPanels';
@@ -658,6 +658,10 @@ export function BrowseTab() {
   if (view.error && !view.data) return <ErrorCard error={view.error} onRetry={view.reload} />;
   if (!view.data || !model) return <Loading label="Loading ontology…" />;
   const v = view.data;
+  const properties = [...v.objectProperties, ...v.datatypeProperties];
+  const uses = (iri: string) => properties.filter((p) => p.domain.includes(iri) || p.range.includes(iri)).length;
+  const roots = v.classes.filter((c) => [...c.superClasses, ...(c.superClassConjuncts ?? []).flatMap((x) => x.classes)].every((iri) => iri === OWL_THING))
+    .sort((a, b) => uses(b.iri) - uses(a.iri) || label(a.iri).localeCompare(label(b.iri)));
   // Nothing in any list on the left: individuals count as terms too.
   const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length && !v.individuals.length && !v.conceptSchemes?.length;
   const codeCounts = new Map((v.conceptSchemes ?? []).map((s) => [s.iri, (v.concepts ?? []).filter((c) => c.inScheme.includes(s.iri)).length]));
@@ -761,6 +765,24 @@ export function BrowseTab() {
           <div className="min-w-0 space-y-4">
             {newCodeList ? <NewCodeListPanel key={id} onCancel={clear} /> : selected ? (
               <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood />
+            ) : v.classes.length ? (
+              <section aria-label="Ontology summary" className="p-5 text-sm">
+                <p>{plural(v.classes.length, 'class', 'classes')} and {plural(properties.length, 'property', 'properties')}.</p>
+                <dl className="mt-4 space-y-3">
+                  {roots.slice(0, 12).map((c) => {
+                    const target = new URLSearchParams(params);
+                    target.set('term', c.iri);
+                    return (
+                      <div key={c.iri}>
+                        <dt><Link to={`?${target}`} className="font-medium text-accent underline underline-offset-2">{label(c.iri)}</Link></dt>
+                        {c.definition && <dd className="mt-1 text-muted">{c.definition.match(/^.*?[.!?](?:\s|$)/)?.[0].trim() ?? c.definition}</dd>}
+                      </div>
+                    );
+                  })}
+                </dl>
+                {roots.length > 12 && <p className="mt-3 text-muted">and {roots.length - 12} more in the list</p>}
+                <Button className="mt-5" onClick={() => setMode('diagram')}>Show the diagram</Button>
+              </section>
             ) : empty ? (
               <EmptyState icon={ListTree} title="No terms yet">
                 {session?.user ? <>Terms arrive through change requests. <Link className="text-accent underline" to={`/o/${id}/use-cases`}>Describe a use case</Link> and draft changes from it, <Link className="text-accent underline" to={`/o/${id}/changes?new=1`}>propose a change in plain language</Link>, or <Link className="text-accent underline" to={`/o/${id}/browse?view=diagram`}>draw classes on the Diagram</Link>.</> : 'Terms arrive through change requests.'}

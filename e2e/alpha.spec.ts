@@ -142,10 +142,10 @@ test('the floating walkthrough panel follows a tester around the app', async ({ 
   await page.keyboard.press('Escape');
   await panel.getByRole('button', { name: 'Close walkthrough' }).click();
   await expect(panel).toHaveCount(0);
-  // Closed, the guide still names the next task and how far through the tester is.
-  const pill = page.getByRole('button', { name: /^Walkthrough: Try next: .+\. Open the guide$/ });
+  // Closed, the guide keeps only the step so it leaves room for the page.
+  const pill = page.getByRole('button', { name: 'Walkthrough, step 3 of 5', exact: true });
   await expect(pill).toBeVisible();
-  await expect(pill).toContainText(/\d+\/\d+ tasks/);
+  await expect(pill).toContainText('Step 3 of 5');
   await page.getByRole('button', { name: /Walkthrough/ }).click();
   await expect(panel).toBeVisible();
   await panel.getByRole('button', { name: 'Full view' }).click();

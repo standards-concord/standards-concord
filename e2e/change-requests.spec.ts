@@ -85,7 +85,7 @@ test.describe('change requests', () => {
     expect(r.ok(), await r.text()).toBeTruthy();
     await page.reload();
     await expect(status(page)).toContainText('Merged');
-    await expect(page.getByText(/No actions — this request is merged/)).toBeVisible();
+    await expect(page.getByTestId('decision-outcome')).toContainText('Merged on');
     // Merged, the Diff tab shows its own merge commit: the same lines, however the draft has moved on since.
     await page.getByRole('tab', { name: /^Diff/ }).click();
     await expect(diff.locator('[data-diff="add"]').filter({ hasText: `vol:${name}` }).first()).toBeVisible();
@@ -192,7 +192,7 @@ test.describe('change requests', () => {
     page.once('dialog', (d) => void d.accept());
     await actions(page).getByRole('button', { name: 'Withdraw' }).click();
     await expect(status(page)).toContainText('Withdrawn');
-    await expect(page.getByText(/No actions — this request is withdrawn/)).toBeVisible();
+    await expect(page.getByTestId('decision-outcome')).toContainText('Withdrawn by');
   });
 
   test('a contributor can comment and object, but not merge, withdraw others’ requests or submit them', async ({ page, request }) => {

@@ -166,7 +166,7 @@ function qs(params: Record<string, string | number | undefined | null>) {
 
 /* ---------------------------------------------------------------- types */
 
-export type MemberWithUser = Membership & { user: User };
+export type MemberWithUser = Membership & { user: User; lastActiveAt?: string };
 export type OntologyDetail = OntologySummary & { members: MemberWithUser[] };
 export type UsedBy = { iri: string; label?: string; via: string };
 export type TermDetail = TermView & { usedBy: UsedBy[] };
