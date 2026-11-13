@@ -176,8 +176,24 @@ describe('invitation API', () => {
     }
   });
 
-  it.each(['used up', 'expired', 'revoked'] as const)('%s invitations allow only side-effect-free retries when every role is held', async (state) => {
-    // An unchanged membership must succeed without recording a use, activity or autopilot work.
+  it('an acceptance retry finishes reconciliation after membership committed', async () => {
+    // Previously a retry that found the roles already held skipped autopilot, so a first attempt that
+    // failed after saving the membership left the new member's autopilot never brought up to date.
+    const created = await invite({ roles: ['reviewer'], maxUses: 1 });
+    const recipient = await person();
+    const reconcile = vi.spyOn(appChecks, 'reconcile').mockRejectedValueOnce(new Error('store unavailable'));
+    try {
+      expect((await accept(created.secret, recipient)).status).toBe(500);
+      expect(await rolesFor(ontology.id, recipient.id)).toEqual(['reviewer']);
+      expect(await accept(created.secret, recipient)).toMatchObject({ status: 200, body: { ontologyId: ontology.id } });
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(reconcile).toHaveBeenLastCalledWith(ontology.id, [recipient.id]);
+      expect(await get<InviteDoc>('invites', created.invite.id)).toMatchObject({ uses: 1 });
+    } finally { reconcile.mockRestore(); }
+  });
+
+  it.each(['used up', 'expired', 'revoked'] as const)('%s invitations allow only retries that store nothing when every role is held', async (state) => {
+    // An unchanged membership must succeed without recording a use or activity; autopilot is only brought up to date.
     const created = await invite({ roles: ['reviewer', 'member'], maxUses: state === 'used up' ? 1 : 5, expiresInDays: 1 });
     const recipient = await person();
     expect((await accept(created.secret, recipient)).status).toBe(200);
@@ -188,7 +204,7 @@ describe('invitation API', () => {
     try {
       expect(await accept(created.secret, recipient)).toMatchObject({ status: 200, body: { ontologyId: ontology.id } });
       expect(await (await rawStore()).rows()).toEqual(before);
-      expect(reconcile).not.toHaveBeenCalled();
+      expect(reconcile).toHaveBeenCalledWith(ontology.id, [recipient.id]);
     } finally { reconcile.mockRestore(); }
   });
 

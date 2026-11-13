@@ -87,14 +87,14 @@ export async function lookupInvite(secret: string) {
 export const inactiveMessage = (state: InviteState) => `This invitation link has ${state === 'used up' ? 'been used up' : state === 'revoked' ? 'been revoked' : 'expired'}.`;
 
 export async function acceptInvite(secret: string, actor: User) {
-  const { changed, ...result } = await transaction(async () => {
+  const result = await transaction(async () => {
     const doc = await findInvite(secret);
     const existing = await rolesFor(doc.ontologyId, actor.id);
     if (actor.simulated || existing.includes('agent'))
       throw new HttpError(403, 'Sign in with your own account to accept this invitation. Simulated members and agents cannot join.');
     const state = stateOf(doc);
     // An inactive link can only acknowledge roles already held; it must never restore removed privileges.
-    if (doc.roles.every((role) => existing.includes(role))) return { ontologyId: doc.ontologyId, changed: false };
+    if (doc.roles.every((role) => existing.includes(role))) return { ontologyId: doc.ontologyId };
     if (state !== 'active') throw new HttpError(410, inactiveMessage(state));
     const alreadyUsed = doc.usedBy.some((use) => use.userId === actor.id);
     await setRoles(doc.ontologyId, actor.id, [...existing, ...doc.roles]);
@@ -105,9 +105,10 @@ export async function acceptInvite(secret: string, actor: User) {
       await logActivity({ ontologyId: doc.ontologyId, actorId: actor.id, type: 'member.joined',
         message: `joined as ${doc.roles.join(', ')}, invited by ${await creatorName(doc)}`, link: `/o/${doc.ontologyId}/governance#roles` });
     }
-    return { ontologyId: doc.ontologyId, changed: true };
+    return { ontologyId: doc.ontologyId };
   });
-  // Reconciliation may run checks and take their locks, so it follows the membership transaction.
-  if (changed) await reconcileAutopilot(result.ontologyId, [actor.id]);
+  // Reconciliation may run checks and take their locks, so it follows the membership transaction. A retry
+  // that finds the roles already held runs it again: the first attempt may have failed after saving them.
+  await reconcileAutopilot(result.ontologyId, [actor.id]);
   return result;
 }
