@@ -22,12 +22,14 @@ const personaUser = async (key: string) => (await list<User>('users')).find((u) 
 
 // The demo ontology is shared with later test files: put its description back even when a test fails.
 const restore: OntologyProject[] = [];
+const cleanup: (() => Promise<void>)[] = [];
 beforeAll(async () => {
   await openDb();
   await seedDemo();
 });
 afterEach(async () => {
   for (const d of restore.splice(0)) await put('ontologies', { ...d, description: DEMO_DESCRIPTION });
+  for (const undo of cleanup.splice(0)) await undo();
 });
 
 describe('bringing the demo’s wording up to date', () => {
@@ -58,13 +60,13 @@ describe('bringing the demo’s wording up to date', () => {
     const lookalike = await createUser({ name: spec.name, organisation: 'Their own organisation', provider: 'demo', subject: `lookalike-${Date.now()}` });
     // Not simulated, though it carries a persona's sign-in: it must not be taken for the persona.
     await put('users', { ...lookalike, providers: [{ provider: 'demo', subject: `persona:${spec.key}` }] });
+    cleanup.push(async () => void (await put('users', lookalike)));
     const visitor = await createUser({ name: `Simulated visitor ${Date.now()}`, organisation: 'Somewhere', provider: 'demo', subject: `visitor-${Date.now()}` });
     await put('users', { ...visitor, simulated: true });
     await refreshPersonaProfiles();
     expect(await get<User>('users', lookalike.id)).toMatchObject({ organisation: 'Their own organisation' });
     expect((await get<User>('users', lookalike.id))?.persona).toBeUndefined();
     expect(await get<User>('users', visitor.id)).toMatchObject({ organisation: 'Somewhere' });
-    await put('users', { ...lookalike, providers: lookalike.providers });
   });
 
   it('replaces a retired seed description of the demo ontology, and only that', async () => {
