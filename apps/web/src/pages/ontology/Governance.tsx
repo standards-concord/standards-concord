@@ -428,8 +428,11 @@ export function GovernanceTab() {
   const [policy, setPolicy] = useState<GovernancePolicy>(ontology.governance);
   const [editing, setEditing] = useState(false);
   const [saved, setSaved] = useState(false);
-  useEffect(() => setPolicy(ontology.governance), [ontology.governance]);
-  const dirty = useMemo(() => JSON.stringify(policy) !== JSON.stringify(ontology.governance), [policy, ontology.governance]);
+  // The page refreshes the ontology in the background (it opens from the copy this device kept). Only a
+  // policy that really changed resets the form: an identical refreshed copy used to wipe unsaved edits.
+  const savedPolicy = useMemo(() => JSON.stringify(ontology.governance), [ontology.governance]);
+  useEffect(() => setPolicy(JSON.parse(savedPolicy) as GovernancePolicy), [savedPolicy]);
+  const dirty = useMemo(() => JSON.stringify(policy) !== savedPolicy, [policy, savedPolicy]);
   // Only owners can save a policy (the server checks the same), so only they get the edit controls.
   const canEdit = hasRole('owner');
   const save = useAction(async () => {

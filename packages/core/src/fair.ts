@@ -59,12 +59,12 @@ export function fairCheck(graph: OntologyGraph, ctx: FairContext = {}): FairRepo
   add('A1.1-open-protocol', 'A', 'Ontology IRI uses an open protocol (HTTP or HTTPS)', http,
     http ? `${iri} can be dereferenced over HTTP(S)` : iri ? `${iri} is not an HTTP(S) IRI, so it cannot be looked up on the web` : 'no ontology IRI',
     'FOOPS! HTTP1; FAIR A1.1');
-  const res = http ? ctx.resolution : undefined;
+  const res = http && !ctx.unreleased ? ctx.resolution : undefined;
   add('A1-rdf', 'A', 'Ontology IRI returns RDF (content negotiation)', res?.rdf,
-    !http ? 'needs an HTTP(S) ontology IRI' : !res ? 'not checked: the IRI was not looked up' : res.rdf ? 'returns an RDF serialisation when asked for one' : `does not return RDF${res.detail ? ` (${res.detail})` : ''}; point the IRI's redirect at a published release`,
+    ctx.unreleased ? 'Checked once the first version is published.' : !http ? 'needs an HTTP(S) ontology IRI' : !res ? 'not checked: the IRI was not looked up' : res.rdf ? 'returns an RDF serialisation when asked for one' : `does not return RDF${res.detail ? ` (${res.detail})` : ''}; point the IRI's redirect at a published release`,
     'FOOPS! CN1, RDF1; FAIR A1');
   add('A1-html', 'A', 'Ontology IRI returns human-readable documentation', res?.html,
-    !http ? 'needs an HTTP(S) ontology IRI' : !res ? 'not checked: the IRI was not looked up' : res.html ? 'returns HTML when asked by a browser' : 'does not return HTML documentation to browsers',
+    ctx.unreleased ? 'Checked once the first version is published.' : !http ? 'needs an HTTP(S) ontology IRI' : !res ? 'not checked: the IRI was not looked up' : res.html ? 'returns HTML when asked by a browser' : 'does not return HTML documentation to browsers',
     'FOOPS! CN1 (HTML); FAIR A1');
 
   const metaPreds = iri ? [...new Set(s.getQuads(null, null, null, null).filter((q) => q.subject.value === iri).map((q) => q.predicate.value))].filter((p) => p !== NS.rdf + 'type') : [];

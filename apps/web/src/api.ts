@@ -272,6 +272,7 @@ export const api = {
   // Ontologies
   ontologies: () => get<OntologySummary[]>('/api/ontologies'),
   createOntology: (body: NewOntologyInput) => post<OntologySummary>('/api/ontologies', body),
+  updateOntology: (id: string, body: { title?: string; description?: string; domain?: string }) => patch<OntologySummary>(`/api/ontologies/${e(id)}`, body),
   ontology: (id: string) => get<OntologyDetail>(`/api/ontologies/${e(id)}`),
   queryChat: (id: string, body: QueryChatRequest) => post<QueryChatResponse>(`/api/ontologies/${e(id)}/query-chat`, body as unknown as Json),
   view: (id: string, ref = 'working') => get<OntologyView>(`/api/ontologies/${e(id)}/view${qs({ ref })}`),

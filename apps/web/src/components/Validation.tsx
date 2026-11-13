@@ -445,6 +445,7 @@ export function ValidationDetails({
   const infos = advanced ? report.lint.length - errors - warnings : 0;
   const lintSummary = [errors && plural(errors, 'error'), warnings && plural(warnings, 'warning'), infos && plural(infos, 'suggestion')].filter(Boolean).join(', ') || 'none';
   const fairPassed = report.fair.checks.filter((c) => c.passed).length;
+  const fairTotal = report.fair.checks.filter((c) => c.status !== 'not-checked').length;
   const cqOk = report.competencyQuestions.filter((q) => q.satisfied).length;
   return (
     <div className="space-y-5">
@@ -455,7 +456,7 @@ export function ValidationDetails({
           <LintIssues report={report} label={label} />
           {lintNote && <p className="mt-3 text-xs text-muted">{lintNote}</p>}
         </Disclosure>
-        <Disclosure className="px-4 py-3" heading={headingLevel} title="FAIR checks" summary={`${fairPassed} of ${report.fair.checks.length} pass`} defaultOpen={fairPassed < report.fair.checks.length} failures={report.fair.checks.filter((c) => !c.passed).map((c) => c.id)} keepMounted>
+        <Disclosure className="px-4 py-3" heading={headingLevel} title="FAIR checks" summary={`${fairPassed} of ${fairTotal} pass`} defaultOpen={fairPassed < fairTotal} failures={report.fair.checks.filter((c) => c.status !== 'not-checked' && !c.passed).map((c) => c.id)} keepMounted>
           <FairChecks report={report} />
         </Disclosure>
         {report.imports && (

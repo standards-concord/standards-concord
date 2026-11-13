@@ -53,6 +53,38 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.49.0',
+    date: '2026-11-13',
+    title: 'First steps for a new standard, and editing its details',
+    changes: [
+      {
+        id: 'new-standard-first-steps', type: 'feat', title: 'First steps for a new standard',
+        detail: 'Follow four steps from a use case to a first release. Address checks wait until a version is published.',
+        roles: ['steward'], to: '/',
+      },
+      {
+        id: 'edit-standard-details', type: 'feat', title: 'Edit a standard’s details',
+        detail: 'Owners and stewards can update the title, description and subject area used in Concord’s listing.',
+        roles: ['steward'], to: '{o}',
+      },
+      {
+        id: 'empty-browse-diagram', type: 'fix', title: 'A useful start in Browse and Diagram',
+        detail: 'Empty views explain how to add the first terms. An empty Diagram stays at 100% zoom without an SVG error.',
+        roles: [], to: '{o}/browse',
+      },
+      {
+        id: 'new-standard-needs-description', type: 'fix', title: 'A new standard asks for its description',
+        detail: 'Without a description in the ontology file, every change failed its checks. The New ontology dialog now requires one.',
+        roles: ['steward'], to: '/',
+      },
+      {
+        id: 'policy-edit-kept-on-refresh', type: 'fix', title: 'Policy edits survive a background refresh',
+        detail: 'An edit made just after opening Governance could be dropped when the page refreshed, leaving Save policy disabled.',
+        roles: ['steward'], to: '{o}/governance',
+      },
+    ],
+  },
+  {
     version: '0.48.2',
     date: '2026-11-13',
     title: "Public pages list only the standard's own terms, and smaller fixes",

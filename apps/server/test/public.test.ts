@@ -289,7 +289,7 @@ describe('ontologies without a release', () => {
   it('serves the draft at the ontology IRI path and redirects slash-namespace term IRIs to anchors', async () => {
     const agent = request.agent(app);
     await agent.post('/api/auth/demo').send({ name: 'Creator', role: 'owner' });
-    const created = await agent.post('/api/ontologies').send({ title: 'Bike parking', prefix: 'bp', namespace: 'https://w3id.org/odi/bike-parking/' });
+    const created = await agent.post('/api/ontologies').send({ title: 'Bike parking', prefix: 'bp', description: 'Where bikes can be parked.', namespace: 'https://w3id.org/odi/bike-parking/' });
     expect(created.status).toBe(201);
     const slug = created.body.slug as string;
     const page = await request(app).get(`/def/${slug}`);
@@ -305,7 +305,7 @@ describe('ontologies without a release', () => {
     // validation (the reasoner's first run) before answering, though nothing waits on that.
     const agent = request.agent(app);
     await agent.post('/api/auth/demo').send({ name: 'Quick creator', role: 'owner' });
-    const created = await agent.post('/api/ontologies').send({ title: 'Quick vocab', prefix: 'qv' });
+    const created = await agent.post('/api/ontologies').send({ title: 'Quick vocab', prefix: 'qv', description: 'A quick vocabulary.' });
     expect(created.status).toBe(201);
     expect(created.body.health).toBeUndefined();
     expect(created.body.stats.classes).toBeGreaterThanOrEqual(0);

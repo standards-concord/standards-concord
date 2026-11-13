@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { Link, Outlet, useLocation, useNavigate, useParams } from 'react-router';
-import type { OntologyView, Role, User } from '@concord/shared';
+import type { OntologySummary, OntologyView, Role, User } from '@concord/shared';
 import { api, type OntologyDetail } from '../../api';
 import { useAsync, type AsyncState } from '../../lib/hooks';
 import { prefetchKept } from '../../lib/kept';
@@ -16,6 +16,7 @@ interface OntologyCtx {
   id: string;
   ontology: OntologyDetail;
   reload: () => Promise<void>;
+  updateDetails: (details: OntologySummary) => void;
   view: AsyncState<OntologyView>;
   label: Labeler;
   myRoles: Role[];
@@ -148,12 +149,15 @@ export function OntologyLayout() {
   const { pathname } = useLocation();
   const section = pathname.split('/')[3] ?? '';
   const reloadView = view.reload;
+  const reloadSummary = state.reload;
   const seenSection = useRef(section);
   useEffect(() => {
     if (seenSection.current === section) return;
     seenSection.current = section;
     void reloadView();
-  }, [section, reloadView]);
+    // The Overview's first steps and counts reflect what was just done on another tab.
+    if (section === '') void reloadSummary();
+  }, [section, reloadView, reloadSummary]);
   useEffect(() => {
     const onFocus = () => void reloadView();
     window.addEventListener('focus', onFocus);
@@ -173,6 +177,7 @@ export function OntologyLayout() {
       id,
       ontology: o,
       reload: reloadAll,
+      updateDetails: (details) => state.setData((previous) => previous?.id === details.id ? { ...previous, ...details } : previous!),
       view,
       label: makeLabeler(view.data),
       myRoles,
