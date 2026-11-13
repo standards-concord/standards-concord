@@ -52,10 +52,13 @@ export const DEMO_DESCRIPTION =
   'A shared standard for publishing volunteering opportunities: who offers them, the roles, skills, sessions and locations involved, and how people apply.';
 
 /**
- * Descriptions the demo ontology was seeded with in earlier versions, which must not be shown any more. They are kept
- * only as SHA-256 hashes (of the whole description), so their wording isn't repeated here.
+ * Descriptions the demo ontology was seeded with in earlier versions, replaced by the current one. They are kept only
+ * as SHA-256 hashes (of the whole description), so their wording isn't repeated here.
  */
-export const RETIRED_DEMO_DESCRIPTION_HASHES: ReadonlySet<string> = new Set(['c8c241b29b204beaabd5051bee043561ed6fa77ea9125c1534b336597cf60f67']);
+export const RETIRED_DEMO_DESCRIPTION_HASHES: ReadonlySet<string> = new Set([
+  'c8c241b29b204beaabd5051bee043561ed6fa77ea9125c1534b336597cf60f67',
+  'a44653cee9bf8bdb3b23784b9d503dbad6d401a8095d4b8e9c0c2d0d020a02ee',
+]);
 
 const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
 
@@ -93,7 +96,11 @@ export async function retireDemoDescriptions(retired: ReadonlySet<string> = RETI
   let changed = 0;
   const stale = (o: OntologyProject | undefined) => !!o?.demo && o.slug === DEMO_SLUG && typeof o.description === 'string' && retired.has(sha256(o.description));
   for (const o of await list<OntologyProject>('ontologies')) {
-    if (!stale(o)) continue;
+    if (!stale(o)) {
+      // Said without the text: a description that is neither current nor retired was edited, or is one this list misses.
+      if (o.demo && o.slug === DEMO_SLUG && o.description !== DEMO_DESCRIPTION) console.log(`[seed] demo ontology ${o.id} keeps a description that differs from the seed's`);
+      continue;
+    }
     const done = await transaction(async () => {
       const fresh = await get<OntologyProject>('ontologies', o.id);
       if (!stale(fresh)) return false;

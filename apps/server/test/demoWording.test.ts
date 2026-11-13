@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { OntologyProject, User } from '@concord/shared';
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
 import { get, list, openDb, put } from '../src/db.js';
 import { createProject } from '../src/services/ontologies.js';
@@ -20,9 +20,14 @@ const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex
 const demo = async () => (await list<OntologyProject>('ontologies')).find((o) => o.demo && o.slug === DEMO_SLUG)!;
 const personaUser = async (key: string) => (await list<User>('users')).find((u) => u.simulated && u.providers.some((p) => p.subject === `persona:${key}`))!;
 
+// The demo ontology is shared with later test files: put its description back even when a test fails.
+const restore: OntologyProject[] = [];
 beforeAll(async () => {
   await openDb();
   await seedDemo();
+});
+afterEach(async () => {
+  for (const d of restore.splice(0)) await put('ontologies', { ...d, description: DEMO_DESCRIPTION });
 });
 
 describe('bringing the demo’s wording up to date', () => {
@@ -48,17 +53,25 @@ describe('bringing the demo’s wording up to date', () => {
     expect(await refreshPersonaProfiles()).toBe(0);
   });
 
-  it('leaves people who are not simulated alone, even with a persona’s name', async () => {
-    const lookalike = await createUser({ name: PERSONAS[0].name, organisation: 'Their own organisation', provider: 'demo', subject: `lookalike-${Date.now()}` });
+  it('leaves people who are not simulated alone, even with a persona’s name and sign-in, and other simulated people too', async () => {
+    const spec = PERSONAS[0];
+    const lookalike = await createUser({ name: spec.name, organisation: 'Their own organisation', provider: 'demo', subject: `lookalike-${Date.now()}` });
+    // Not simulated, though it carries a persona's sign-in: it must not be taken for the persona.
+    await put('users', { ...lookalike, providers: [{ provider: 'demo', subject: `persona:${spec.key}` }] });
+    const visitor = await createUser({ name: `Simulated visitor ${Date.now()}`, organisation: 'Somewhere', provider: 'demo', subject: `visitor-${Date.now()}` });
+    await put('users', { ...visitor, simulated: true });
     await refreshPersonaProfiles();
     expect(await get<User>('users', lookalike.id)).toMatchObject({ organisation: 'Their own organisation' });
     expect((await get<User>('users', lookalike.id))?.persona).toBeUndefined();
+    expect(await get<User>('users', visitor.id)).toMatchObject({ organisation: 'Somewhere' });
+    await put('users', { ...lookalike, providers: lookalike.providers });
   });
 
   it('replaces a retired seed description of the demo ontology, and only that', async () => {
     const retiredText = `Older seeded description ${Date.now()}.`;
     const retired = new Set([sha256(retiredText)]);
     const d = await demo();
+    restore.push(d);
     await put('ontologies', { ...d, description: retiredText });
     const owner = await createUser({ name: 'Wording Test Owner', provider: 'demo', subject: `wording-owner-${Date.now()}` });
     const other = await createProject({ title: 'Not the demo', description: retiredText, prefix: 'notdemo', domain: 'tests', governanceTemplate: 'working-group' } as never, owner);
@@ -75,11 +88,11 @@ describe('bringing the demo’s wording up to date', () => {
 
   it('leaves a demo description a steward has edited', async () => {
     const d = await demo();
+    restore.push(d);
     const edited = `A steward’s own description ${Date.now()}.`;
     await put('ontologies', { ...d, description: edited });
     expect(await retireDemoDescriptions(new Set([sha256(`Older seeded description.`)]))).toBe(0);
     expect((await get<OntologyProject>('ontologies', d.id))?.description).toBe(edited);
-    await put('ontologies', { ...d, description: DEMO_DESCRIPTION });
   });
 
   it('runs at start-up after the demo seed, and the personas list then shows the current wording', async () => {
