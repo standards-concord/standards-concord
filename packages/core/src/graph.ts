@@ -239,9 +239,10 @@ export class OntologyGraph {
   /* View projection                                                         */
   /* ---------------------------------------------------------------------- */
 
-  view(): OntologyView {
+  view({ includeVocabularyDeclarations = false }: { includeVocabularyDeclarations?: boolean } = {}): OntologyView {
+    // The app hides SKOS declarations; public documentation also lists the vocabularies it uses.
     const named = (type: string) =>
-      subjects(this.store, RDF_TYPE, type).filter((t) => t.termType === 'NamedNode').map((t) => t.value).filter((i) => !i.startsWith(NS.skos));
+      subjects(this.store, RDF_TYPE, type).filter((t) => t.termType === 'NamedNode').map((t) => t.value).filter((i) => includeVocabularyDeclarations || !i.startsWith(NS.skos));
     const uniqSorted = (xs: string[]) => [...new Set(xs)].sort();
     const ont = this.ontologyIRI;
 
@@ -325,7 +326,7 @@ export class OntologyGraph {
     return t.value;
   }
 
-  private annotations(iri: string): TermAnnotations & { deprecated?: boolean; replacedBy?: IRI } {
+  private annotations(iri: string): TermAnnotations & { definedBy?: IRI[]; deprecated?: boolean; replacedBy?: IRI } {
     const s = this.store;
     const vals = (p: string) => sortedValues(objects(s, iri, p).filter(isEnOrPlain));
     const mappings: Record<IRI, IRI[]> = {};
@@ -342,6 +343,7 @@ export class OntologyGraph {
       examples: vals(P.example),
       editorialNote: pickPreferred(objects(s, iri, P.editorialNote)),
       source: sortedValues(objects(s, iri, P.source)),
+      definedBy: sortedValues(objects(s, iri, P.isDefinedBy).filter((t) => t.termType === 'NamedNode')),
       mappings: Object.keys(mappings).length ? mappings : undefined,
       deprecated: dep || undefined,
       replacedBy: (firstObject(s, iri, P.replacedBy) ?? firstObject(s, iri, P.iaoReplacedBy))?.value,

@@ -1,10 +1,10 @@
-import { compactIRI, localName, type WorkedExample } from '@concord/core';
-import type { ClassView, IndividualView, OntologyView, PropertyView, Restriction, TermView } from '@concord/core/types';
+import { allTerms, compactIRI, localName, type WorkedExample } from '@concord/core';
+import type { ClassView, ConceptView, IndividualView, OntologyView, PropertyView, Restriction, TermView } from '@concord/core/types';
 import type { ChangeLevel } from '@concord/shared';
 import { escapeHtml as esc, renderMarkdown, safeHref } from './markdown.js';
 import type { PublicUseCaseView, PublishedRequirements, RequirementView } from './requirements.js';
 import { PAGE_CSS, PAGE_SCRIPT } from './assets.js';
-import { fragment, pageIds, termAnchors } from './anchors.js';
+import { fragment, ownTerm, ownTermsView, pageIds, termAnchors } from './anchors.js';
 import { memberReportUrl, reportChoices } from './reportForm.js';
 
 /**
@@ -124,21 +124,55 @@ const anchorSafe = (s: string) => s.replace(/[^A-Za-z0-9_.-]/g, '-');
  * pages already written to disk: refreshReleasePages regenerates any page
  * that doesn't carry the current value.
  */
-export const PAGE_GENERATOR = 'Concord public page 5';
+export const PAGE_GENERATOR = 'Concord public page 6';
 
 const BUG_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 2 1.88 1.88M14.12 3.88 16 2M9 7.13v-1a3 3 0 1 1 6 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6M12 20v-9M6.53 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M20.97 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4"/></svg>';
 const COPY_ICON = '<svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
 
 export function renderOntologyPage(input: OntologyPageInput): string {
-  const { view, project } = input;
+  const { project } = input;
+  const view = ownTermsView(input.view, project.namespace, project.ontologyIRI);
   const meta = view.metadata;
   const prefixes = { ...view.prefixes, [project.prefix]: project.namespace };
   const compact = (iri: string) => compactIRI(iri, prefixes);
 
+  const outside = [...new Map(allTerms(input.view)
+    .filter((t) => !ownTerm(t, project.namespace, project.ontologyIRI)).map((t) => [t.iri, t])).values()];
+  const vocabularyNames: Record<string, string> = {
+    'http://purl.org/dc/terms/': 'Dublin Core Terms',
+    'http://www.w3.org/2004/02/skos/core#': 'SKOS',
+    'http://purl.org/vocab/vann/': 'VANN',
+    'http://www.w3.org/ns/dcat#': 'DCAT',
+    'http://www.w3.org/ns/prov#': 'PROV',
+    'http://xmlns.com/foaf/0.1/': 'FOAF',
+    'http://www.w3.org/2000/01/rdf-schema#': 'RDF Schema',
+    'http://www.w3.org/2002/07/owl#': 'OWL',
+    'http://schema.org/': 'schema.org',
+    'https://schema.org/': 'schema.org',
+  };
+  const vocabularies = new Map<string, { name: string; terms: TermView[] }>();
+  for (const t of outside) {
+    const prefix = Object.entries(prefixes).filter(([, ns]) => ns && t.iri.startsWith(ns)).sort((a, b) => b[1].length - a[1].length)[0];
+    const namespace = prefix?.[1] ?? t.iri.slice(0, Math.max(t.iri.lastIndexOf('#'), t.iri.lastIndexOf('/')) + 1);
+    const vocabulary = vocabularies.get(namespace) ?? { name: vocabularyNames[namespace] ?? (prefix?.[0] || namespace), terms: [] };
+    vocabulary.terms.push(t);
+    vocabularies.set(namespace, vocabulary);
+  }
+  const outsideTerms = outside.length ? `<details class="namespaces"><summary>Terms from other vocabularies (${outside.length})</summary><ul>${[...vocabularies.values()]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((v) => `<li>${esc(v.name)}: ${v.terms.sort((a, b) => a.iri.localeCompare(b.iri)).map((t) => safeHref(t.iri) ? `<a href="${esc(t.iri)}" rel="noreferrer">${esc(localName(t.iri))}</a>` : esc(localName(t.iri))).join(', ')}</li>`).join('')}</ul></details>` : '';
+
   /* --------------------------- term index --------------------------- */
-  const anchors = termAnchors(view, project.namespace);
+  const anchors = termAnchors(view, project.namespace, project.ontologyIRI);
   // The page's own ids step aside for term anchors (an ontology may define #main).
   const id = pageIds(anchors.values());
+  const ownSchemes = new Set((view.conceptSchemes ?? []).map((s) => s.iri));
+  // A code that is also a class, property or individual already has its entry (and its anchor) there.
+  const entered = new Set([...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals].map((t) => t.iri));
+  const outsideListCodes = (view.concepts ?? []).filter((c) => !c.inScheme.some((s) => ownSchemes.has(s)));
+  const strayCodes = outsideListCodes.filter((c) => !entered.has(c.iri));
+  // ...and that entry carries what the code would have said: its value, its list and its broader code.
+  const alsoCode = new Map(outsideListCodes.filter((c) => entered.has(c.iri)).map((c) => [c.iri, c]));
   const groups: { id: string; title: string; terms: TermView[] }[] = [
     { id: id('sec-classes'), title: 'Classes', terms: view.classes },
     { id: id('sec-object-properties'), title: 'Object properties', terms: view.objectProperties },
@@ -146,6 +180,8 @@ export function renderOntologyPage(input: OntologyPageInput): string {
     { id: id('sec-annotation-properties'), title: 'Annotation properties', terms: view.annotationProperties },
     { id: id('sec-individuals'), title: 'Individuals', terms: view.individuals },
     { id: id('sec-code-lists'), title: 'Code lists', terms: view.conceptSchemes ?? [] },
+    // Own codes added to another vocabulary's code list: that list has no entry here, so they get their own.
+    { id: id('sec-codes'), title: 'Codes in other code lists', terms: strayCodes },
   ].map((g) => ({ ...g, terms: [...g.terms].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'en', { sensitivity: 'base' })) }));
 
   const index = new Map<string, Indexed>();
@@ -226,10 +262,14 @@ export function renderOntologyPage(input: OntologyPageInput): string {
 
   const reportHref = (t: TermView) =>
     input.links.report ? `${input.links.report}?term=${encodeURIComponent(t.iri)}&version=${encodeURIComponent(input.kind === 'draft' ? 'draft' : input.version)}` : undefined;
+  const codeRows = (c: ConceptView) =>
+    row('Code', c.notation ? `<code class="notation">${esc(c.notation)}</code>` : '') + row('In code list', refs(c.inScheme)) + row('Broader', refs(c.broader));
   const card = (t: TermView) => {
     const { anchor, name } = index.get(t.iri)!;
+    const code = t.kind === 'concept' ? undefined : alsoCode.get(t.iri);
     const rows =
-      t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : 'domain' in t ? propertyRows(t) : '';
+      (code ? codeRows(code) : '') +
+      (t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : t.kind === 'concept' ? codeRows(t) : 'domain' in t ? propertyRows(t) : '');
     const report = reportHref(t);
     return `<article class="term${t.deprecated ? ' is-deprecated' : ''}" id="${esc(anchor)}" data-kind="${t.kind}">
   <header class="term-head">
@@ -401,6 +441,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
         .map(([p, ns]) => `<tr><td><code>${esc(p)}:</code></td><td><code>${esc(ns)}</code></td></tr>`)
         .join('')}
       </tbody></table></details>
+      ${outsideTerms}
     </section>
     ${nonEmpty.map((g) => `<section id="${g.id}" class="term-group" aria-label="${esc(g.title)}"><h2 class="group-title">${esc(g.title)} <span class="count">${g.terms.length}</span></h2>${g.terms.map((t) => t.kind === 'conceptScheme' ? codeList(t) : card(t)).join('')}</section>`).join('')}
   </div>

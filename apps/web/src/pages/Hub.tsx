@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { GovernanceTemplateId } from '@concord/shared';
 import { BookOpen, Compass, Network, Plus } from 'lucide-react';
@@ -34,6 +34,9 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
     // In the background: the list counts every ontology, and the new one's first validation can be slow.
     void ontologies.reload();
   });
+  const hintId = useId();
+  const missing = !form.title.trim() && !form.prefix.trim() ? 'Add a title and prefix to continue.'
+    : !form.title.trim() ? 'Add a title to continue.' : !form.prefix.trim() ? 'Add a prefix to continue.' : undefined;
   const chosen = templates.data?.find((t) => t.templateId === form.governanceTemplate);
   const autoPrefix = (title: string) =>
     title
@@ -50,25 +53,28 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
       title="New ontology"
       footer={
         <>
+          {missing && <p id={hintId} className="w-full text-sm text-muted">{missing}</p>}
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" loading={create.pending} disabled={!form.title.trim() || !form.prefix.trim()} onClick={() => void create.run()}>
+          <Button variant="primary" loading={create.pending} disabled={!!missing} aria-describedby={missing ? hintId : undefined} onClick={() => void create.run()}>
             Create ontology
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        <Field label="Title">
+        <Field label={<>Title <span className="text-muted">(required)</span></>}>
           <Input
+            required
+            aria-required="true"
             value={form.title}
             onChange={(e) => setForm((f) => ({ ...f, title: e.target.value, prefix: f.prefix && f.prefix !== autoPrefix(f.title) ? f.prefix : autoPrefix(e.target.value) }))}
             placeholder="e.g. Volunteering Data Standard"
           />
         </Field>
-        <Field label="Prefix" hint="Short namespace prefix used in CURIEs, e.g. vol:Shift">
-          <Input value={form.prefix} onChange={set('prefix')} placeholder="vol" pattern="[a-z][a-z0-9-]*" />
+        <Field label={<>Prefix <span className="text-muted">(required)</span></>} hint="Short namespace prefix used in CURIEs, e.g. vol:Shift">
+          <Input required aria-required="true" value={form.prefix} onChange={set('prefix')} placeholder="vol" pattern="[a-z][a-z0-9-]*" />
         </Field>
         <Field label="Description">
           <Textarea value={form.description} onChange={set('description')} placeholder="What is this ontology for, and who will use it?" />
@@ -179,7 +185,6 @@ export function HubPage() {
                         <Badge tone="outline">{titleCase(o.stage)}</Badge>
                       </div>
                     </div>
-                    <p className="mt-0.5 font-mono text-xs text-subtle">{o.prefix}:</p>
                     <p className="mt-2 line-clamp-3 flex-1 text-sm text-muted">{o.description || 'No description yet.'}</p>
                     <p className="mt-4 border-t border-line pt-3 text-sm text-muted">
                       {/* Counts are withheld while the working draft is reviewed before publishing: show a dash, never "undefined". */}

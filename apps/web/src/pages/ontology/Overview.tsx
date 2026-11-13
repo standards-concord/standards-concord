@@ -101,6 +101,9 @@ export function OverviewTab() {
           <Disclosure className="mt-4 max-w-[68ch] border-t border-line pt-3" tone="muted" title="Ontology details">
             <dl className="grid gap-x-4 gap-y-1.5 text-sm sm:grid-cols-[9rem_1fr]">
               {/* Only what isn't said already: the counts are in the line above, the version in the header. */}
+              <Row term="Prefix">
+                <span className="font-mono text-xs break-all">{o.prefix}: {o.namespace}</span>
+              </Row>
               <Row term="Ontology IRI">
                 <span className="font-mono text-xs break-all">{o.ontologyIRI}</span>
               </Row>

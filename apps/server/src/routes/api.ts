@@ -1,6 +1,6 @@
 import path from 'node:path';
 import express, { Router, type Request } from 'express';
-import { allTerms, compactIRI, expandIRI, FORMAT_INFO, serialize, usedBy, validate } from '@concord/core';
+import { allTerms, compactIRI, exampleFiles, expandIRI, FORMAT_INFO, serialize, usedBy, validate } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
@@ -75,6 +75,7 @@ import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
 import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
 import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
+import { examplesFor } from '../public/examples.js';
 import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
 import { reasonInWorker } from '../reasoner/pool.js';
 import { keepAlive } from '../keepAlive.js';
@@ -301,6 +302,19 @@ export function apiRouter(): Router {
 
   r.get('/ontologies/:id/view', async (req, res) => {
     res.json((await readOntology(await project(req), optStr(req.query.ref), req.user)).view());
+  });
+
+  r.get('/ontologies/:id/examples/:version', async (req, res) => {
+    requireUser(req);
+    const p = await project(req);
+    const version = String(req.params.version);
+    if (version !== 'draft' && !(await ontologyStore.versions(p)).includes(version)) throw new HttpError(404, 'Not found');
+    res.set('Cache-Control', 'no-store');
+    if (await isHeld(p, version)) return res.json({ available: false });
+    // Use the public read gate and consent-filtered files, exactly as the download route does.
+    const graph = await readOntology(p, version, undefined);
+    const files = exampleFiles(await examplesFor(p, version, graph), graph.ontologyIRI);
+    res.json({ available: !!files['examples/data.ttl']?.trim() });
   });
 
   r.get('/ontologies/:id/terms/:iri', async (req, res) => {

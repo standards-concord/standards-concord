@@ -5,6 +5,25 @@ import { fixtureText, loadFixture } from './helpers.js';
 const VOL = 'https://w3id.org/odi/volunteering#';
 
 describe('OntologyGraph', () => {
+  it('can include vocabulary declarations for public documentation while the app view stays unchanged', async () => {
+    const graph = await OntologyGraph.fromTurtle(`@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+      @prefix owl: <http://www.w3.org/2002/07/owl#> . skos:definition a owl:AnnotationProperty .`);
+    expect(graph.view().annotationProperties).toEqual([]);
+    expect(graph.view({ includeVocabularyDeclarations: true }).annotationProperties.map((t) => t.iri)).toEqual(['http://www.w3.org/2004/02/skos/core#definition']);
+  });
+
+  // Public references need rdfs:isDefinedBy to recognise adopted terms outside the namespace.
+  it('projects only IRI-valued defining ontologies without changing the RDF', async () => {
+    const turtle = `@prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      <https://example.org/o> a owl:Ontology .
+      <https://outside.example/Term> a owl:Class ; rdfs:isDefinedBy <https://example.org/o>, "not an IRI" .`;
+    const graph = await OntologyGraph.fromTurtle(turtle);
+    const before = await graph.toTurtle();
+    expect(graph.term('https://outside.example/Term')?.definedBy).toEqual(['https://example.org/o']);
+    expect(await graph.toTurtle()).toBe(before);
+  });
+
   it('parses the fixture and exposes header, namespace and prefixes', async () => {
     const g = await loadFixture();
     expect(g.ontologyIRI).toBe('https://w3id.org/odi/volunteering');
