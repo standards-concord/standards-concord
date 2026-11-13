@@ -12,7 +12,7 @@ export function ActivityList({ items, compact }: { items: ActivityItem[]; compac
   if (!items.length) return <p className="py-6 text-center text-sm text-muted">No activity yet.</p>;
   return (
     <ol className="space-y-0.5">
-      {items.map((a) => {
+      {[...items].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).map((a) => {
         const body = (
           <div className={cx('flex gap-3 rounded-lg px-2 py-2', a.link && 'hover:bg-surface-2')}>
             {a.actorName ? <Avatar name={a.actorName} src={a.actorAvatarUrl} size={compact ? 22 : 26} simulated={a.simulated} /> : (
@@ -27,7 +27,7 @@ export function ActivityList({ items, compact }: { items: ActivityItem[]; compac
                 <span className="text-fg/85">{a.message}</span>
                 {a.simulated && <span className="ml-1.5 rounded bg-surface-2 px-1 py-px text-[0.65rem] text-muted">simulated</span>}
               </p>
-              <p className="mt-0.5 text-xs text-subtle">{relativeTime(a.at, now())}</p>
+              <p className="mt-0.5 text-xs text-subtle">{relativeTime(a.at, now(), true)}</p>
             </div>
           </div>
         );
@@ -47,5 +47,5 @@ export function ActivityFeed({ ontologyId, limit = 12, compact, refreshKey }: { 
         Activity from people, agents and the governance process will show up here.
       </EmptyState>
     );
-  return <ActivityList items={state.data.slice(0, limit)} compact={compact} />;
+  return <ActivityList items={[...state.data].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, limit)} compact={compact} />;
 }

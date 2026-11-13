@@ -3,6 +3,7 @@ import type { ValidationReport } from '@concord/core/types';
 import { fairContext } from './fairResolution.js';
 import type {
   ChangeRequest,
+  ActivityItem,
   GovernancePolicy,
   GovernanceTemplateId,
   Membership,
@@ -272,7 +273,7 @@ export async function summary(p: OntologyProject, { withHealth = true, withGraph
       useCases: visibleUseCases.length,
       // An interview makes its draft before anything is said: only use cases that say something count.
       activeUseCases: visibleUseCases.filter((u) => !u.withdrawnAt && u.status !== 'archived' && u.completeness > 0).length,
-      openChangeRequests: crs.filter((c) => !['merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
+      openChangeRequests: crs.filter((c) => !['draft', 'merged', 'released', 'rejected', 'withdrawn'].includes(c.status)).length,
       releases: (await list<Release>('releases', p.id)).filter((r) => r.status === 'published').length,
       members: (await members(p.id)).length,
     },
@@ -280,8 +281,15 @@ export async function summary(p: OntologyProject, { withHealth = true, withGraph
   };
 }
 
-export async function membersWithUsers(ontologyId: string) {
+export async function membersWithUsers(ontologyId: string, viewer?: User) {
+  // Use cases depend on this service too; load their projection after both services have initialised.
+  const { visibleActivity } = await import('./useCases.js');
+  const active = new Map<string, string>();
+  // Use the feed's visibility and actor redaction before deriving any per-person timestamps.
+  for (const a of await visibleActivity(await list<ActivityItem>('activity', ontologyId), viewer)) {
+    if (a.actorId && a.at > (active.get(a.actorId) ?? '')) active.set(a.actorId, a.at);
+  }
   return (await Promise.all((await members(ontologyId))
-    .map(async (m) => ({ ...m, user: (await getUser(m.userId))! }))))
+    .map(async (m) => ({ ...m, lastActiveAt: active.get(m.userId), user: (await getUser(m.userId))! }))))
     .filter((m) => m.user);
 }

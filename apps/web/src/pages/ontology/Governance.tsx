@@ -125,6 +125,7 @@ function Members() {
   const [transferTo, setTransferTo] = useState('');
   const [transferResult, setTransferResult] = useState<string>();
   const [editing, setEditing] = useState<string>();
+  const [memberSearch, setMemberSearch] = useState('');
   const canManage = hasRole('owner', 'steward');
   const act = useAction(async (fn: () => Promise<unknown>) => {
     await fn();
@@ -137,6 +138,14 @@ function Members() {
   });
   const memberIds = new Set(ontology.members.map((m) => m.userId));
   const candidates = (personas.data ?? []).filter((p) => !memberIds.has(p.id));
+  const ordered = [...ontology.members].sort((a, b) =>
+    Number(b.roles.some((r) => r !== 'member') || ontology.ownerIds.includes(b.userId)) - Number(a.roles.some((r) => r !== 'member') || ontology.ownerIds.includes(a.userId)) ||
+    (b.lastActiveAt ?? b.addedAt).localeCompare(a.lastActiveAt ?? a.addedAt));
+  const summary = `${plural(ordered.length, 'member')}: ${ordered.slice(0, 8).map((m) => m.user?.name ?? m.userId).join(', ')}${ordered.length > 8 ? ` and ${ordered.length - 8} others` : ''}`;
+  // Small groups have no search box, so nothing typed into it earlier may go on filtering them.
+  const searchable = ontology.members.length > 12;
+  const query = searchable ? memberSearch.trim().toLocaleLowerCase() : '';
+  const shown = ontology.members.filter((m) => !query || [m.user?.name, m.user?.organisation, m.user?.email].some((v) => v?.toLocaleLowerCase().includes(query)));
 
   return (
     <CollapsibleCard
@@ -144,11 +153,13 @@ function Members() {
       icon={Users}
       title="Members and roles"
       subtitle="A person can hold several roles. Roles decide whose approvals and votes count."
-      summary={`${plural(ontology.members.length, 'member')}: ${ontology.members.map((m) => m.user?.name ?? m.userId).join(', ')}`}
+      summary={summary}
       defaultOpen={window.location.hash === '#roles'}
     >
+      {searchable && <div className="px-5 pb-3"><Input type="search" aria-label="Find a member" placeholder="Find a member" value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)} /></div>}
+      {!shown.length && <p className="px-5 pb-3 text-sm text-muted">No members match.</p>}
       <div className="divide-y divide-line">
-        {ontology.members.map((m) => (
+        {shown.map((m) => (
           <div key={m.userId} className="flex flex-wrap items-start gap-3 px-5 py-3">
             <Avatar name={m.user?.name} src={m.user?.avatarUrl} simulated={m.user?.simulated} size={32} roles={ringRoles(m.roles, ontology.ownerIds.includes(m.userId))} />
             <div className="min-w-44 flex-1">

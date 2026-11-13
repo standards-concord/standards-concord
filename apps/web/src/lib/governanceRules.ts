@@ -1,4 +1,9 @@
-import type { ApprovalRule, ChangeLevel } from '@concord/shared';
+import type { ApprovalRule, ChangeLevel, Role } from '@concord/shared';
+
+/** The release page and Overview use the same permission to offer publication. */
+export function canPublishRelease(roles: readonly Role[], isAdmin = false): boolean {
+  return isAdmin || roles.some((r) => r === 'steward' || r === 'owner');
+}
 
 /**
  * Whether silence decides it: under lazy consensus, a patch or minor change (or release) with no objections

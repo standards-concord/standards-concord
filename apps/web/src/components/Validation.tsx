@@ -428,6 +428,7 @@ export function ValidationDetails({
   lintNote,
   headingLevel = 4,
   showQueries = false,
+  questionCount,
 }: {
   report: ValidationReport;
   label: Labeler;
@@ -438,6 +439,8 @@ export function ValidationDetails({
   headingLevel?: 3 | 4;
   /** Editors: each competency question opens to its SPARQL test and results. */
   showQueries?: boolean;
+  /** All questions the viewer can see, including those without an executable test. */
+  questionCount?: number;
 }) {
   const [advanced] = useAdvancedFeatures();
   const errors = report.lint.filter((i) => i.severity === 'error').length;
@@ -489,11 +492,16 @@ export function ValidationDetails({
           className="px-4 py-3"
           heading={headingLevel}
           title="Competency questions"
-          summary={report.competencyQuestions.length ? `${cqOk} of ${report.competencyQuestions.length} answerable` : 'none yet'}
+          summary={questionCount === undefined
+            ? report.competencyQuestions.length ? `${cqOk} of ${report.competencyQuestions.length} answerable` : 'none yet'
+            : !questionCount ? 'none yet'
+              : !report.competencyQuestions.length ? `${plural(questionCount, 'question')}, none tested yet`
+                : `${report.competencyQuestions.length} of ${questionCount} tested, ${cqOk === report.competencyQuestions.length ? 'all pass' : `${report.competencyQuestions.length - cqOk} fail`}`}
           defaultOpen={cqOk < report.competencyQuestions.length}
           failures={report.competencyQuestions.filter((q) => !q.satisfied).map((q) => q.question)}
           keepMounted
         >
+          {questionCount !== undefined && questionCount > report.competencyQuestions.length && <p className="mb-3 text-sm text-muted">Questions without a SPARQL test have not been tested. Only public use cases run in these checks.</p>}
           <CqResults report={report} showQueries={showQueries} />
         </Disclosure>
       </div>

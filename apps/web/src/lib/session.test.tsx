@@ -36,7 +36,7 @@ vi.mock('react-router', () => ({
   useNavigate: () => () => {}, useParams: () => ({}),
 }));
 vi.mock('./ontologies', () => ({ useOntologies: () => ({}) }));
-vi.mock('./walkthrough', () => ({ useWalkthrough: () => ({}), testerRoleFor: () => ({}) }));
+vi.mock('./walkthrough', () => ({ useWalkthrough: () => ({}), testerRoleFor: () => ({}), showWalkthroughDock: () => false }));
 vi.mock('./hooks', () => ({ useAction: () => ({}), useTick: () => {} }));
 vi.mock('../components/badges', () => ({ Logo: 'span', OdiLogo: 'span' }));
 vi.mock('../components/ui', () => ({ Avatar: 'span', Button: 'button', LinkButton: 'a', buttonClasses: () => '', cx: () => '' }));

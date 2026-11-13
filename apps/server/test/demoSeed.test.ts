@@ -1,9 +1,10 @@
-import type { OntologyProject, UseCase, User } from '@concord/shared';
+import type { ActivityItem, OntologyProject, UseCase, User } from '@concord/shared';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { get, list, openDb, put, remove } from '../src/db.js';
 import { createProject } from '../src/services/ontologies.js';
 import { DEMO_SLUG, seedDemo } from '../src/services/simulation.js';
 import { createUser } from '../src/services/users.js';
+import { clock } from '../src/clock.js';
 
 /**
  * Review r1 of step 5: seeding the demo took an existing demo ontology as a finished seed, but most of the seed is
@@ -23,6 +24,12 @@ describe('seeding the demo', () => {
     expect(first?.slug).toBe(DEMO_SLUG);
     expect(await get('kv', 'demo-seed-state')).toMatchObject({ state: 'done' });
     expect((await seedDemo())?.id).toBe(first?.id);
+    // Future activity was reported in the demo. The seed advances 17 of its 21 shifted days;
+    // keep its entire history before the shared clock, which seeding must never advance.
+    const activity = await list<ActivityItem>('activity', first!.id);
+    expect(activity.length).toBeGreaterThan(0);
+    expect(activity.every((a) => Date.parse(a.at) < clock.now().getTime())).toBe(true);
+    expect(clock.offsetMs).toBe(0);
   });
 
   it('clears a seed cut short and seeds the demo again, whole', async () => {

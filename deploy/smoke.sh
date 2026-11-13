@@ -31,8 +31,16 @@ printf '     reasoner: %s\n' "$(printf %s "$body" | json 'JSON.stringify(v.reaso
 post 'SPARQL' 200 "/api/ontologies/$id/sparql" '{"query":"SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }"}'
 post 'start interview' 201 "/api/ontologies/$id/interviews" '{}'
 iv=$(printf %s "$body" | json 'v.id')
+uc=$(printf %s "$body" | json 'v.useCaseId ?? ""')
 post 'interview turn' 200 "/api/interviews/$iv/messages" '{"content":"We need to record which dataset a licence applies to."}'
+turn_uc=$(printf %s "$body" | json 'v.useCase?.id ?? v.session?.useCaseId ?? ""')
+if [ -n "$turn_uc" ]; then uc=$turn_uc; fi
 post 'change request' 201 "/api/ontologies/$id/change-requests" '{"title":"Smoke test: add a label","description":"Raised by deploy/smoke.sh; safe to reject.","kind":"editorial"}'
+cr=$(printf %s "$body" | json 'v.id')
+post 'withdraw change request' 200 "/api/change-requests/$cr/withdraw" '{}'
+if [ -n "$uc" ]; then
+  post 'withdraw interview use case' 200 "/api/use-cases/$uc/withdraw" '{}'
+fi
 check 'meetings list' 200 "$base/api/ontologies/$id/meetings"
 check 'MCP needs a token' 401 -X POST -H 'Content-Type: application/json' -d '{}' "$base/mcp"
 check 'public ontology page' 200 "$base/def/volunteering"
