@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { GovernanceTemplateId } from '@concord/shared';
 import { BookOpen, Compass, Network, Plus } from 'lucide-react';
@@ -7,6 +7,7 @@ import { useAction, useAsync } from '../lib/hooks';
 import { useOntologies } from '../lib/ontologies';
 import { useSession } from '../lib/session';
 import { useAdvancedFeatures } from '../lib/advanced';
+import { warmOntology } from '../lib/routeChunks';
 import { plural, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { HealthChip } from '../components/Phase';
@@ -108,6 +109,7 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
 const count = (n: number | undefined, one: string, many = `${one}s`) => (n === undefined ? `— ${many}` : plural(n, one, many));
 
 export function HubPage() {
+  useEffect(warmOntology, []);
   const ontologies = useOntologies();
   const { now, isDemo } = useSession();
   const [open, setOpen] = useState(false);

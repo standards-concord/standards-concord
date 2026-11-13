@@ -6,12 +6,14 @@ import { api } from '../api';
 import { useAction } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { useDemoOntology } from '../lib/ontologies';
-import { CURRENT_RELEASE, changeLink, serverRendered, useTester } from '../lib/tester';
+import { changeLink, serverRendered, useTester } from '../lib/tester';
 import { TESTER_ROLES } from '../lib/walkthrough';
 import { formatDate } from '../lib/format';
 import { GitHubIcon, GoogleIcon } from './badges';
 import { Disclosure } from './Disclosure';
 import { Badge, Button, Card, InlineError, Select, buttonClasses, cx } from './ui';
+
+const CURRENT_RELEASE = APP_RELEASES[0];
 
 /**
  * The alpha tester's status, for the top of the alpha pages: the version of

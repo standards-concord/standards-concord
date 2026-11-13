@@ -9,7 +9,7 @@ import { useAction, useTick } from '../lib/hooks';
 import { formatDate, roleLabel } from '../lib/format';
 import { Logo, OdiLogo } from './badges';
 import { Avatar, Button, buttonClasses, cx, LinkButton } from './ui';
-import { WalkthroughDock } from './Walkthrough';
+import { WalkthroughDock } from './WalkthroughDock';
 import { useOffline } from '../lib/offline';
 import { Popover } from './Disclosure';
 

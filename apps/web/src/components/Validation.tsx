@@ -8,7 +8,7 @@ import { localName, pct, plural } from '../lib/format';
 import { checkedOf } from '../lib/reasonerCompare';
 import { useAdvancedFeatures } from '../lib/advanced';
 import { ProgressBar, cx } from './ui';
-import { HighlightedCode } from './code/CodeView';
+import { HighlightedCode } from './code/HighlightedCode';
 import { Disclosure } from './Disclosure';
 
 const SEV: Record<IssueSeverity, { icon: typeof Info; cls: string; label: string }> = {

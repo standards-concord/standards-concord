@@ -53,6 +53,19 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.52.3',
+    date: '2026-11-13',
+    title: 'Pages load faster',
+    changes: [{
+      id: 'faster-first-load',
+      type: 'perf',
+      title: 'Pages load faster',
+      detail: 'Pages download when you open them, so signing in and opening the hub need less JavaScript. The page you are on stays in view while the next one downloads, and pages kept on this device still open offline.',
+      roles: [],
+      to: '/',
+    }],
+  },
+  {
     version: '0.52.2',
     date: '2026-11-13',
     title: 'Tidier demo, clearer outcomes and a compact walkthrough button',

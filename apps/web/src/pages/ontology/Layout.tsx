@@ -4,6 +4,8 @@ import type { OntologySummary, OntologyView, Role, User } from '@concord/shared'
 import { api, type OntologyDetail } from '../../api';
 import { useAsync, type AsyncState } from '../../lib/hooks';
 import { prefetchKept } from '../../lib/kept';
+import { prefetchOntologyPage } from '../../lib/routeChunks';
+import { RouteBoundary } from '../../components/RouteBoundary';
 import { ADVANCED_TABS, useAdvancedFeatures } from '../../lib/advanced';
 import { useSession } from '../../lib/session';
 import { makeLabeler, type Labeler } from '../../lib/ontology';
@@ -136,6 +138,8 @@ function SectionNav({ id }: { id: string }) {
             <Link
               key={s.label}
               to={target()}
+              onPointerEnter={() => prefetchOntologyPage(target())}
+              onFocus={() => prefetchOntologyPage(target())}
               onClick={(e) => {
                 // The page is remembered after each render, so the href can lag behind a quick click
                 // made straight after navigating: look it up again at click time.
@@ -161,6 +165,8 @@ function SectionNav({ id }: { id: string }) {
                 <Link
                   key={path}
                   to={href(path)}
+                  onPointerEnter={() => prefetchOntologyPage(href(path))}
+                  onFocus={() => prefetchOntologyPage(href(path))}
                   aria-current={active ? 'page' : undefined}
                   className={cx('shrink-0 rounded-pill px-3 py-1 text-sm whitespace-nowrap transition-colors', active ? 'bg-accent-soft font-medium text-accent' : 'text-muted hover:bg-surface-2 hover:text-fg')}
                 >
@@ -293,7 +299,7 @@ export function OntologyLayout() {
       </div>
       {/* A clear gap between the ontology header and the page beneath it. */}
       <div className="ontology-content mx-auto max-w-7xl px-4 pt-10 pb-12 sm:px-6">
-        <Outlet />
+        <RouteBoundary><Outlet /></RouteBoundary>
       </div>
     </Ctx.Provider>
   );

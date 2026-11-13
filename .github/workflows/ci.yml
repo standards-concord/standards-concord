@@ -91,6 +91,8 @@ jobs:
           ONTOLOGY_STORE: db
       - name: Build the web app
         run: pnpm --filter @concord/web build
+      - name: Check initial bundle budget and offline chunks
+        run: node scripts/check-bundles.mjs
       - name: Check the public MCP URL is the same in every listing
         run: node scripts/public-url.mjs --check
       - name: Check the plugin files match their schemas

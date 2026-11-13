@@ -1,17 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import {
-  APP_RELEASES,
-  APP_VERSION,
-  changesFor,
-  changesSince,
-  compareVersions,
-  findRelease,
-  lastTestedBefore,
-  type AlphaMe,
-  type AppRelease,
-  type ChangeWithRelease,
-  type TesterRoleKey,
-} from '@concord/shared';
+import type { AlphaMe, AppRelease, ChangeWithRelease, TesterRoleKey } from '@concord/shared';
 import { api } from '../api';
 import { useAsync, useLocalStorage } from './hooks';
 import { useSession } from './session';
@@ -29,7 +17,7 @@ import { useSession } from './session';
 
 /** Short commit of this web build, when the build knew it. */
 export const APP_COMMIT: string = (import.meta.env.VITE_APP_COMMIT as string | undefined) ?? '';
-export const CURRENT_RELEASE: AppRelease = APP_RELEASES[0];
+const APP_VERSION: string = import.meta.env.VITE_APP_VERSION;
 
 export type SinceSource = 'picked' | 'pod' | 'browser' | 'compare';
 
@@ -69,6 +57,9 @@ const C = createContext<TesterCtx | null>(null);
 
 export function TesterProvider({ children, roleKey }: { children: ReactNode; roleKey?: TesterRoleKey }) {
   const { session } = useSession();
+  // Release history belongs to the guide; it must not hold up sign-in or the hub.
+  const history = useAsync(() => import('./testerReleases'), []);
+  const releases = history.data;
   const userId = session?.user?.id;
   // Each answer is tagged with the account it was asked for, so a slow answer for the
   // previous account (or a failed reload) never stands in for the current one.
@@ -110,10 +101,10 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
   const testerKey = me_?.tester?.id ?? 'anon';
   const compare = compareFor?.tester === testerKey ? compareFor.version : undefined;
   const value = useMemo<TesterCtx>(() => {
-    const valid = (v: string | undefined) => (v && findRelease(v) && compareVersions(v, APP_VERSION) < 0 ? findRelease(v)!.version : undefined);
+    const valid = (v: string | undefined) => (v && releases?.findRelease(v) && releases.compareVersions(v, APP_VERSION) < 0 ? releases.findRelease(v)!.version : undefined);
     const versions = Array.isArray(me_?.versions) ? me_.versions.filter((v) => typeof v?.version === 'string') : [];
-    const fromPod = lastTestedBefore(versions);
-    const fromBrowser = lastTestedBefore((Array.isArray(seen) ? seen : []).filter((v) => typeof v === 'string').map((version) => ({ version })));
+    const fromPod = releases?.lastTestedBefore(versions);
+    const fromBrowser = releases?.lastTestedBefore((Array.isArray(seen) ? seen : []).filter((v) => typeof v === 'string').map((version) => ({ version })));
     const pick = picks?.[testerKey] ?? (testerKey !== 'anon' ? picks?.anon : undefined);
     let baseline: string | undefined;
     let baselineSource: TesterCtx['baselineSource'];
@@ -125,13 +116,13 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
     const compared = valid(compare);
     const since = compared ?? baseline;
     const sinceSource: SinceSource | undefined = compared ? 'compare' : baselineSource;
-    const changes = since ? changesSince(since) : [];
+    const changes = since && releases ? releases.changesSince(since) : [];
     return {
       version: APP_VERSION,
       commit: APP_COMMIT,
       me: me_,
-      meLoading: me.loading,
-      meError: me.error,
+      meLoading: me.loading || history.loading,
+      meError: me.error ?? history.error,
       reloadMe: me.reload,
       since,
       sinceSource,
@@ -148,12 +139,12 @@ export function TesterProvider({ children, roleKey }: { children: ReactNode; rol
         });
       },
       changes,
-      forRole: changesFor(changes, roleKey),
+      forRole: releases?.changesFor(changes, roleKey) ?? [],
       newForRole: (role) => changes.filter((c) => c.roles.includes(role)),
-      earlier: APP_RELEASES.filter((r) => compareVersions(r.version, APP_VERSION) < 0),
+      earlier: releases?.APP_RELEASES.filter((r) => releases.compareVersions(r.version, APP_VERSION) < 0) ?? [],
       roleKey,
     };
-  }, [me_, me.loading, me.error, me.reload, seen, picks, setPicks, compare, testerKey, roleKey]);
+  }, [releases, history.loading, history.error, me_, me.loading, me.error, me.reload, seen, picks, setPicks, compare, testerKey, roleKey]);
 
   return <C.Provider value={value}>{children}</C.Provider>;
 }

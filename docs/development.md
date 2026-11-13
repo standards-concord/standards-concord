@@ -49,6 +49,24 @@ toolkit           Python virtualenv with LinkML, used by tests
 docs              How-tos, research and the alpha walkthrough script
 ```
 
+## Bundles
+
+Login, Hub, NotFound and the shell are eager. Other pages use one `lazy()` declaration per page in `App.tsx`; the ontology layout has its own content boundary so its masthead and navigation stay mounted while tabs load. Loading is announced politely after 150 ms. Failed page imports offer Retry, with one automatic online reload per app version and commit through the existing service worker update lifecycle.
+
+Rollup shares CodeMirror, SPARQL, markdown and diagram code between the pages that need them. The Solid provider dialog and walkthrough content load when opened; release history loads after first paint. A single manual UI runtime chunk consolidates the many tiny icon chunks produced by automatic splitting. The hub warms the ontology layout and Overview on idle, and tab links warm their page on pointer entry or focus; Save-Data disables warming.
+
+Build and inspect sizes (raw and gzip bytes):
+
+```sh
+pnpm --filter @concord/web build
+node scripts/check-bundles.mjs
+node scripts/check-bundles.mjs --sizes
+```
+
+The quick CI job runs the check against its existing build. Budgets are 175,000 bytes for the entry, 535,000 bytes for the entry plus every static JS import, and 800,000 bytes per JS chunk. The first two allow about 15% growth over this build. Vite warns at 500 KB. The check also verifies every JS, CSS and WebAssembly asset is in the service worker's install list and every relative static module import resolves, including worker imports. `dist/.vite/manifest.json` records the page/module graph. The worker installs after the window load event, caches all split chunks in the background and does not gate rendering.
+
+Use `E2E_MODE=preview pnpm test:e2e code-splitting.spec.ts offline.spec.ts` to exercise production chunk loading and offline navigation. The full preview suite covers the other tabs and workers; dev mode deliberately serves source modules instead of built chunks.
+
 ## Tests
 
 ```sh

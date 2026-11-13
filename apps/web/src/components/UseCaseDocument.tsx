@@ -4,7 +4,7 @@ import { USE_CASE_SECTION_LABELS } from '@concord/shared';
 import { CircleCheck, Circle } from 'lucide-react';
 import { CqStatusChip } from './badges';
 import { Badge, ProgressBar, cx } from './ui';
-import { HighlightedCode } from './code/CodeView';
+import { HighlightedCode } from './code/HighlightedCode';
 import { pct, titleCase } from '../lib/format';
 import { Disclosure } from './Disclosure';
 
