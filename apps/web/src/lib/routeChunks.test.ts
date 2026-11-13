@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { pageChunk, pagePending, prefetchOntologyPage, prefetchPage, registerPageFallback, RouteChunkError, warmOntology } from './routeChunks';
+import { dismissPageWaits, pageChunk, pagePending, prefetchOntologyPage, prefetchPage, registerPageFallback, RouteChunkError, warmOntology } from './routeChunks';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
@@ -69,6 +69,22 @@ describe('page chunk pending feedback', () => {
     await Promise.resolve();
     expect(pagePending.get().chunks).toBe(0);
     await expect(result).resolves.toBe('ready');
+  });
+
+  it('stops counting a wait once another page has opened, and never counts it again', async () => {
+    // Going elsewhere while a page was still downloading used to leave Loading showing until that download ended.
+    let release!: () => void;
+    const load = pageChunk('abandoned', () => new Promise<void>((resolve) => { release = resolve; }));
+    const abandoned = load();
+    expect(pagePending.get().chunks).toBe(1);
+    dismissPageWaits();
+    expect(pagePending.get().chunks).toBe(0);
+    const next = pageChunk('wanted-next', () => Promise.resolve())();
+    expect(pagePending.get().chunks).toBe(1);
+    release();
+    await abandoned;
+    await next;
+    expect(pagePending.get().chunks).toBe(0);
   });
 
   it('tracks mounted Suspense fallbacks so first loads have only one Loading status', () => {

@@ -2,11 +2,13 @@
 const pages = new Map<string, () => Promise<unknown>>();
 
 let pendingPages = { chunks: 0, fallbacks: 0 };
+/** The downloads a page on screen is waiting for now. One left behind by going elsewhere is taken out. */
+const waits = new Set<object>();
 const listeners = new Set<() => void>();
 let notificationQueued = false;
 
-function changePending(kind: keyof typeof pendingPages, delta: number) {
-  pendingPages = { ...pendingPages, [kind]: pendingPages[kind] + delta };
+function setPending(next: typeof pendingPages) {
+  pendingPages = next;
   // React.lazy calls its loader during render. Notify after that render, and batch fast loads.
   if (notificationQueued) return;
   notificationQueued = true;
@@ -27,8 +29,15 @@ export const pagePending = {
 
 /** A mounted Suspense fallback supplies its own delayed Loading status. */
 export function registerPageFallback() {
-  changePending('fallbacks', 1);
-  return () => changePending('fallbacks', -1);
+  setPending({ ...pendingPages, fallbacks: pendingPages.fallbacks + 1 });
+  return () => setPending({ ...pendingPages, fallbacks: pendingPages.fallbacks - 1 });
+}
+
+/** Another page has opened: a download that began before it is no longer what the person is waiting for. */
+export function dismissPageWaits() {
+  if (!waits.size) return;
+  waits.clear();
+  setPending({ ...pendingPages, chunks: 0 });
 }
 
 export class RouteChunkError extends Error {
@@ -47,8 +56,12 @@ export function pageChunk<T>(name: string, load: () => Promise<T>): () => Promis
   pages.set(name, preload);
   return () => {
     const result = preload();
-    changePending('chunks', 1);
-    return result.finally(() => changePending('chunks', -1));
+    const wait = {};
+    waits.add(wait);
+    setPending({ ...pendingPages, chunks: waits.size });
+    return result.finally(() => {
+      if (waits.delete(wait)) setPending({ ...pendingPages, chunks: waits.size });
+    });
   };
 }
 

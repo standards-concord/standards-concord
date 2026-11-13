@@ -1,9 +1,13 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { pagePending } from '../lib/routeChunks';
+import { useLocation } from 'react-router';
+import { dismissPageWaits, pagePending } from '../lib/routeChunks';
 
 /** Transitions keep the current page visible while the next page's code downloads. */
 export function PagePending() {
   const { chunks, fallbacks } = useSyncExternalStore(pagePending.subscribe, pagePending.get, pagePending.get);
+  // A page has opened (this one, or another chosen meanwhile): what was awaited before it no longer counts.
+  const { key } = useLocation();
+  useEffect(() => dismissPageWaits(), [key]);
   const waiting = chunks > 0 && fallbacks === 0;
   const [visible, setVisible] = useState(false);
   useEffect(() => {

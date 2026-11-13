@@ -7,20 +7,27 @@ const source = readFileSync(new URL('../../sw/sw.js', import.meta.url), 'utf8');
 const assetA = '/assets/Source-AAAA1111.js';
 const assetB = '/assets/Source-BBBB2222.js';
 
-function worker(version: string, files: string[], builds: Record<string, Record<string, string>>) {
-  const stored = new Map(Object.entries(builds).map(([name, files]) => [name, {
-    entries: new Map(Object.entries(files).map(([path, body]) => [path, new Response(body)])),
-    match: vi.fn(async function (this: { entries: Map<string, Response> }, path: string, _options?: CacheQueryOptions) {
-      return this.entries.get(path)?.clone();
-    }),
-    addAll: vi.fn(async (_paths: string[]) => {}),
-  }]));
+const fakeCache = (files: Record<string, string> = {}) => ({
+  entries: new Map(Object.entries(files).map(([path, body]) => [path, new Response(body)])),
+  match: vi.fn(async function (this: { entries: Map<string, Response> }, path: string, _options?: CacheQueryOptions) {
+    return this.entries.get(path)?.clone();
+  }),
+  put: vi.fn(async function (this: { entries: Map<string, Response> }, path: string, response: Response) {
+    this.entries.set(path, response);
+  }),
+  addAll: vi.fn(async (_paths: string[]) => {}),
+});
+type Stored = Map<string, ReturnType<typeof fakeCache>>;
+
+/** Pass `stored` from an earlier worker to carry this browser's caches over to the next build. */
+function worker(version: string, files: string[], builds: Record<string, Record<string, string>>, stored: Stored = new Map()) {
+  for (const [name, files] of Object.entries(builds)) stored.set(name, fakeCache(files));
   const caches = {
     keys: vi.fn(async () => [...stored.keys()]),
     open: vi.fn(async (name: string) => {
-      const cache = stored.get(name);
-      if (!cache) throw new Error(`Unexpected cache: ${name}`);
-      return cache;
+      // As in a browser, opening a cache that isn't there makes it (after the ones already there).
+      if (!stored.has(name)) stored.set(name, fakeCache());
+      return stored.get(name)!;
     }),
     delete: vi.fn(async (name: string) => stored.delete(name)),
   };
@@ -63,8 +70,22 @@ describe('service worker across deployments', () => {
       'concord-app-oldest': {}, 'unrelated-cache': {}, 'concord-app-A': {}, 'concord-app-B': {}, 'concord-app-C': {},
     });
     await sw.lifecycle('activate');
-    expect([...sw.stored.keys()]).toEqual(['unrelated-cache', 'concord-app-A', 'concord-app-B', 'concord-app-C']);
+    expect([...sw.stored.keys()].filter((k) => k !== 'concord-builds')).toEqual(['unrelated-cache', 'concord-app-A', 'concord-app-B', 'concord-app-C']);
     expect(sw.claim).toHaveBeenCalledOnce();
+  });
+
+  it('after a rollback, keeps the builds used most recently rather than the ones first installed latest', async () => {
+    // Rolling back to build A reused A's cache, which kept its old place in the browser's list: the next
+    // build then threw A away and kept B and C, so a tab opened during the rollback lost its pages offline.
+    const first = worker('C', [], { 'concord-app-A': {}, 'concord-app-B': {}, 'concord-app-C': {} });
+    await first.lifecycle('activate');
+    const rolledBack = worker('A', [], {}, first.stored);
+    await rolledBack.lifecycle('install');
+    await rolledBack.lifecycle('activate');
+    const next = worker('D', [], {}, first.stored);
+    await next.lifecycle('install');
+    await next.lifecycle('activate');
+    expect([...next.stored.keys()].filter((k) => k.startsWith('concord-app-')).sort()).toEqual(['concord-app-A', 'concord-app-C', 'concord-app-D']);
   });
 
   it('serves an older tab its hashed asset offline after the next build activates', async () => {

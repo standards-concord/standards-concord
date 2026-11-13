@@ -94,6 +94,36 @@ test.describe('Route chunks', () => {
     }
   });
 
+  test('going elsewhere while a tab is still downloading opens that page and clears Loading', async ({ page }) => {
+    // The Loading bar used to stay until the abandoned tab's download ended, over a page that had already opened.
+    await signIn(page, { name: `E2E abandoned tab ${uniq()}`, role: 'editor' });
+    await page.goto('/o/volunteering/connect');
+    await networkQuiet(page);
+    await page.goto('/o/volunteering/browse');
+    await networkQuiet(page);
+    await expect(page.getByRole('tree', { name: /Classes/ })).toBeVisible();
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route('**/assets/Source-*.js', async (route) => { await held; await route.continue(); });
+    try {
+      await page.getByRole('link', { name: 'Source & export', exact: true }).click();
+      const loading = page.getByRole('status').filter({ hasText: /^\s*Loading…\s*$/ });
+      await expect(loading).toHaveCount(1);
+      // Connect an agent was opened above, so its code is already here.
+      await page.getByRole('link', { name: 'Connect an agent', exact: true }).click();
+      await expect(page).toHaveURL(/\/connect$/);
+      await expect(page.getByRole('tree', { name: /Classes/ })).toHaveCount(0);
+      await expect(loading).toHaveCount(0);
+      // The abandoned download ending later changes nothing.
+      release();
+      await networkQuiet(page);
+      await expect(page).toHaveURL(/\/connect$/);
+      await expect(loading).toHaveCount(0);
+    } finally {
+      release();
+    }
+  });
+
   test('a direct visit shows only its Suspense Loading status while page code waits', async ({ page }) => {
     // The new pending bar must not duplicate the first-load Suspense fallback.
     await signIn(page, { name: `E2E direct tab ${uniq()}`, role: 'reviewer' });
