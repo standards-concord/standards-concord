@@ -94,6 +94,18 @@ describe('rewriting drafted term references', () => {
     ];
     expect(renameDraftedTerm(ops, 0, 'After', ns, { ex: ns }, view)[4]).toMatchObject({ types: [next], facts: { 'ex:remark': [old], 'ex:minute': [old] } });
   });
+  it('keeps literal fact values under the old name of a renamed datatype property', () => {
+    // Renaming a term keeps its old name as a deprecated term of the same kind. The old name stopped
+    // counting as a datatype property after the rename, so a literal under it was rewritten.
+    const view = { classes: [], objectProperties: [], datatypeProperties: [{ iri: ns + 'note' }], annotationProperties: [], individuals: [], conceptSchemes: [], concepts: [] } as unknown as OntologyView;
+    const ops: ChangeOp[] = [
+      { op: 'addClass', localName: 'Before', label: 'before', definition: 'Before.' },
+      { op: 'renameTerm', iri: 'ex:note', newLocalName: 'remark' },
+      { op: 'addIndividual', localName: 'thing', label: 'thing', definition: 'A thing.', types: [old], facts: { 'ex:note': [old], 'ex:remark': [old] } },
+    ];
+    expect(renameDraftedTerm(ops, 0, 'After', ns, { ex: ns }, view)[2]).toMatchObject({ types: [next], facts: { 'ex:note': [old], 'ex:remark': [old] } });
+    expect(dependentEdits(ops, 0, ns, { ex: ns }, view)).toEqual([2]);
+  });
   it('follows a property name through removal and re-adding as an object property', () => {
     // A name stayed "literal" for the whole request once any edit had made it a datatype property, so a
     // reference under the same name re-added as an object property was left pointing at the old IRI.

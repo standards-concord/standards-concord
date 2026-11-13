@@ -28,7 +28,8 @@ export function literalFacts(ops: ChangeOp[], namespace: string, view?: Ontology
     if (o.op === 'addDatatypeProperty') literal.add(namespace + o.localName);
     else if (o.op === 'addObjectProperty') literal.delete(namespace + o.localName);
     else if (o.op === 'removeTerm') literal.delete(expandIRI(o.iri, prefixes));
-    else if (o.op === 'renameTerm' && literal.delete(expandIRI(o.iri, prefixes))) literal.add(namespace + o.newLocalName);
+    // A rename keeps the old name as a deprecated term of the same kind, so both names hold literal text.
+    else if (o.op === 'renameTerm' && literal.has(expandIRI(o.iri, prefixes))) literal.add(namespace + o.newLocalName);
     return snapshot;
   });
   return (index) => (property) => !!before[index]?.has(property);
