@@ -21,8 +21,7 @@ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    {/* RouteBoundary supplies delayed pending UI; navigation must reveal it when a chunk suspends. */}
-    <BrowserRouter useTransitions={false}>
+    <BrowserRouter>
       <App />
     </BrowserRouter>
   </StrictMode>,

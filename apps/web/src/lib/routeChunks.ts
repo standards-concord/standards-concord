@@ -1,6 +1,36 @@
 /** Route loaders are registered by App, shared by React.lazy and navigation prefetches. */
 const pages = new Map<string, () => Promise<unknown>>();
 
+let pendingPages = { chunks: 0, fallbacks: 0 };
+const listeners = new Set<() => void>();
+let notificationQueued = false;
+
+function changePending(kind: keyof typeof pendingPages, delta: number) {
+  pendingPages = { ...pendingPages, [kind]: pendingPages[kind] + delta };
+  // React.lazy calls its loader during render. Notify after that render, and batch fast loads.
+  if (notificationQueued) return;
+  notificationQueued = true;
+  queueMicrotask(() => {
+    notificationQueued = false;
+    listeners.forEach((listener) => listener());
+  });
+}
+
+/** Only React.lazy's waits count; speculative downloads leave the current page alone. */
+export const pagePending = {
+  get: () => pendingPages,
+  subscribe(listener: () => void) {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  },
+};
+
+/** A mounted Suspense fallback supplies its own delayed Loading status. */
+export function registerPageFallback() {
+  changePending('fallbacks', 1);
+  return () => changePending('fallbacks', -1);
+}
+
 export class RouteChunkError extends Error {
   constructor(cause: unknown) {
     super('Could not download this page', { cause });
@@ -15,7 +45,11 @@ export function pageChunk<T>(name: string, load: () => Promise<T>): () => Promis
     throw new RouteChunkError(cause);
   });
   pages.set(name, preload);
-  return preload;
+  return () => {
+    const result = preload();
+    changePending('chunks', 1);
+    return result.finally(() => changePending('chunks', -1));
+  };
 }
 
 function saveData() {

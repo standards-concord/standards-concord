@@ -1,7 +1,87 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { pageChunk, prefetchOntologyPage, prefetchPage, RouteChunkError, warmOntology } from './routeChunks';
+import { pageChunk, pagePending, prefetchOntologyPage, prefetchPage, registerPageFallback, RouteChunkError, warmOntology } from './routeChunks';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+describe('page chunk pending feedback', () => {
+  it('does not count a prefetch as a page waiting for code', async () => {
+    // Speculative downloads used to be indistinguishable from a page waiting for its code.
+    vi.stubGlobal('navigator', { onLine: true });
+    let release!: () => void;
+    const download = new Promise<void>((resolve) => { release = resolve; });
+    pageChunk('prefetch-only', () => download);
+    prefetchPage('prefetch-only');
+    expect(pagePending.get()).toEqual({ chunks: 0, fallbacks: 0 });
+    release();
+    await download;
+    expect(pagePending.get().chunks).toBe(0);
+  });
+
+  it.each(['success', 'failure'])('counts lazy loads until they settle: %s', async (outcome) => {
+    // Transition navigation used to have no separate indication that a page was waiting.
+    let resolve!: (value: string) => void;
+    let reject!: (cause: Error) => void;
+    const download = new Promise<string>((yes, no) => { resolve = yes; reject = no; });
+    const load = pageChunk(`pending-${outcome}`, () => download);
+    const result = load();
+    expect(pagePending.get().chunks).toBe(1);
+    if (outcome === 'success') {
+      resolve('ready');
+      await expect(result).resolves.toBe('ready');
+    } else {
+      reject(new Error('offline'));
+      await expect(result).rejects.toBeInstanceOf(RouteChunkError);
+    }
+    expect(pagePending.get().chunks).toBe(0);
+  });
+
+  it('counts overlapping lazy calls separately and notifies subscribers outside render', async () => {
+    // Several suspended pages must not clear pending feedback when just one finishes.
+    const releases: Array<() => void> = [];
+    const loads = ['first', 'second'].map((name) => pageChunk(name, () => new Promise<void>((resolve) => { releases.push(resolve); })));
+    const changed = vi.fn();
+    const unsubscribe = pagePending.subscribe(changed);
+    const first = loads[0]();
+    const second = loads[1]();
+    expect(pagePending.get().chunks).toBe(2);
+    expect(changed).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(changed).toHaveBeenCalledOnce();
+    releases[0]();
+    await first;
+    expect(pagePending.get().chunks).toBe(1);
+    unsubscribe();
+    changed.mockClear();
+    releases[1]();
+    await second;
+    expect(pagePending.get().chunks).toBe(0);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it('counts an already prefetched chunk for no longer than a microtask', async () => {
+    // A fully downloaded first navigation used to blank and flash Loading anyway.
+    vi.stubGlobal('navigator', { onLine: true });
+    const load = pageChunk('already-downloaded', () => Promise.resolve('ready'));
+    prefetchPage('already-downloaded');
+    await Promise.resolve();
+    const result = load();
+    expect(pagePending.get().chunks).toBe(1);
+    await Promise.resolve();
+    expect(pagePending.get().chunks).toBe(0);
+    await expect(result).resolves.toBe('ready');
+  });
+
+  it('tracks mounted Suspense fallbacks so first loads have only one Loading status', () => {
+    // Separate pending feedback must not duplicate the first-load Suspense status.
+    const unmountOuter = registerPageFallback();
+    const unmountInner = registerPageFallback();
+    expect(pagePending.get().fallbacks).toBe(2);
+    unmountInner();
+    expect(pagePending.get().fallbacks).toBe(1);
+    unmountOuter();
+    expect(pagePending.get()).toEqual({ chunks: 0, fallbacks: 0 });
+  });
+});
 
 describe('route chunk warming', () => {
   it('shares a successful prefetch with navigation, including a tab URL with filters', async () => {

@@ -28,10 +28,49 @@ test.describe('Route chunks', () => {
     await expectNoCrash(page);
   });
 
-  test('a slow tab shows Loading politely inside the existing ontology layout', async ({ page }) => {
+  test('a tab whose code is already downloaded opens with no blank page and no Loading', async ({ page }) => {
+    // Hovering a tab downloads its code, so opening it must swap pages in one step. (A review predicted a blank
+    // page and a Loading flash here when navigation did not run as a transition. Chromium showed neither either
+    // way, so this guards the behaviour; the slow-tab test below is the one that fails without transitions.)
+    await signIn(page, { name: `E2E prefetched tab ${uniq()}`, role: 'editor' });
+    await page.mouse.move(0, 0);
+    await page.goto('/o/volunteering/browse');
+    await expect(page.getByRole('tree', { name: /Classes/ })).toBeVisible();
+    await networkQuiet(page);
+    const downloads: Promise<unknown>[] = [];
+    page.on('response', (response) => {
+      if (/\/assets\/.*\.js$/.test(response.url())) downloads.push(response.finished());
+    });
+    const source = page.getByRole('link', { name: 'Source & export', exact: true });
+    const prefetched = page.waitForResponse('**/assets/Source-*.js');
+    await source.hover();
+    expect(await (await prefetched).finished()).toBeNull();
+    // Vite may also request the editor and shared dependencies while evaluating Source.
+    await networkQuiet(page);
+    await Promise.all(downloads);
+    await page.evaluate(() => {
+      const seen = { blank: false, loading: false };
+      const check = () => {
+        // The ontology header stays either way: it is the page beneath it that went blank.
+        if (!document.querySelector('.ontology-content')?.childElementCount) seen.blank = true;
+        if ([...document.querySelectorAll('[role="status"]')].some((el) => el.textContent?.trim() === 'Loading…')) seen.loading = true;
+      };
+      new MutationObserver(check).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+      Object.assign(window, { routePaint: seen });
+      check();
+    });
+    await source.click();
+    await expect(page.getByTestId('source-code')).toContainText('@prefix');
+    expect(await page.evaluate(() => (window as typeof window & { routePaint: { blank: boolean; loading: boolean } }).routePaint)).toEqual({ blank: false, loading: false });
+  });
+
+  test('a slow tab keeps the current page and navigation visible with one polite Loading status', async ({ page }) => {
+    // Disabling transitions used to replace Browse with an empty fallback while code downloaded.
     await signIn(page, { name: `E2E slow tab ${uniq()}`, role: 'editor' });
     await page.goto('/o/volunteering/browse');
     await networkQuiet(page);
+    const tree = page.getByRole('tree', { name: /Classes/ });
+    await expect(tree).toBeVisible();
     const title = page.getByRole('heading', { level: 1 }).first();
     await title.evaluate((el) => el.setAttribute('data-kept-layout', 'yes'));
     let release = () => {};
@@ -39,14 +78,41 @@ test.describe('Route chunks', () => {
     await page.route('**/assets/Source-*.js', async (route) => { await held; await route.continue(); });
     try {
       await page.getByRole('link', { name: 'Source & export', exact: true }).click();
-      const loading = page.getByRole('main').getByRole('status').filter({ hasText: 'Loading…' });
+      const loading = page.getByRole('status').filter({ hasText: /^\s*Loading…\s*$/ });
+      await expect(loading).toHaveCount(1);
       await expect(loading).toBeVisible();
       await expect(loading).toHaveAttribute('aria-live', 'polite');
+      await expect(tree).toBeVisible();
       await expect(title).toHaveAttribute('data-kept-layout', 'yes');
       await expect(page.getByRole('navigation', { name: 'Explore pages' })).toBeVisible();
       release();
       await expect(page.getByTestId('source-code')).toContainText('@prefix');
+      await expect(loading).toHaveCount(0);
       await expect(title).toHaveAttribute('data-kept-layout', 'yes');
+    } finally {
+      release();
+    }
+  });
+
+  test('a direct visit shows only its Suspense Loading status while page code waits', async ({ page }) => {
+    // The new pending bar must not duplicate the first-load Suspense fallback.
+    await signIn(page, { name: `E2E direct tab ${uniq()}`, role: 'reviewer' });
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    await page.route('**/assets/Source-*.js', async (route) => { await held; await route.continue(); });
+    try {
+      const requested = page.waitForRequest('**/assets/Source-*.js');
+      await page.goto('/o/volunteering/source', { waitUntil: 'domcontentloaded' });
+      await requested;
+      await expect(page.getByRole('navigation', { name: 'Ontology sections' })).toBeVisible();
+      const loading = page.getByRole('status').filter({ hasText: /^\s*Loading…\s*$/ });
+      await expect(loading).toHaveCount(1);
+      await expect(loading).toBeVisible();
+      await expect(page.getByRole('main').getByRole('status').filter({ hasText: /^\s*Loading…\s*$/ })).toHaveCount(1);
+      await expect(loading).toHaveAttribute('aria-live', 'polite');
+      release();
+      await expect(page.getByTestId('source-code')).toContainText('@prefix');
+      await expect(loading).toHaveCount(0);
     } finally {
       release();
     }
@@ -65,6 +131,8 @@ test.describe('Route chunks', () => {
     await expect.poll(() => documents.length).toBe(1);
     await expect(page.getByText("This page isn't available offline yet. Reconnect and try again.")).toBeVisible();
     await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Ontology sections' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Explore pages' })).toBeVisible();
     await networkQuiet(page);
     expect(documents).toHaveLength(1);
     expect(await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith('concord.chunkReload.')))).toHaveLength(1);

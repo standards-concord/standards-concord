@@ -1,14 +1,15 @@
 import { Component, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useLocation } from 'react-router';
-import { RouteChunkError } from '../lib/routeChunks';
+import { registerPageFallback, RouteChunkError } from '../lib/routeChunks';
 import { reloadApp, reloadForChunkFailure } from '../lib/appUpdate';
 import { Button, Loading } from './ui';
 
 function DelayedLoading() {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
+    const unregister = registerPageFallback();
     const timer = setTimeout(() => setVisible(true), 150);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); unregister(); };
   }, []);
   return visible ? <Loading /> : null;
 }

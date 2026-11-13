@@ -3,6 +3,10 @@
  * (pages then show what lib/offlineStore.ts saved). The build (vite.config.ts) fills in VERSION and
  * the list of files to keep. Only the app's own files are handled here: the API, sign-in, MCP and
  * public ontology pages always go to the network.
+ * Keep this simple: retain the two newest earlier builds (cache keys are in creation order).
+ * Older open tabs can still load their hashed assets offline across two updates. A tab more
+ * than two builds behind may show the existing "isn't available offline yet" message when
+ * opening a page it has never opened. Documents always use the current build's cache.
  */
 const VERSION = self.__CONCORD_VERSION__;
 const FILES = self.__CONCORD_FILES__;
@@ -22,7 +26,7 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('concord-app-') && k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('concord-app-') && k !== CACHE).slice(0, -2).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
 });
@@ -41,5 +45,17 @@ self.addEventListener('fetch', (event) => {
     // Built files have a hash in their name, so a kept copy is always the right one. Matched by path
     // alone: scripts and styles are asked for with an Origin header the kept copy's request lacked.
     event.respondWith(caches.open(CACHE).then((c) => c.match(url.pathname, { ignoreVary: true }).then((r) => r || fetch(req))));
+    return;
+  }
+  if (/^\/assets\/[^/]+-[\w-]+\.\w+$/.test(url.pathname)) {
+    // An older tab still imports its build's hashed URLs after this worker claims it.
+    event.respondWith((async () => {
+      const keys = (await caches.keys()).filter((key) => key.startsWith('concord-app-')).reverse();
+      for (const key of keys) {
+        const cached = await (await caches.open(key)).match(url.pathname, { ignoreVary: true });
+        if (cached) return cached;
+      }
+      return fetch(req);
+    })());
   }
 });

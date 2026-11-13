@@ -9,6 +9,7 @@ import { LoginPage } from './pages/Login';
 import { HubPage } from './pages/Hub';
 import { NotFound } from './pages/NotFound';
 import { RouteBoundary } from './components/RouteBoundary';
+import { PagePending } from './components/PagePending';
 import { pageChunk } from './lib/routeChunks';
 
 const JoinPage = lazy(pageChunk('join', () => import('./pages/Join').then((m) => ({ default: m.JoinPage }))));
@@ -177,6 +178,7 @@ export function App() {
     <SessionProvider>
       <OntologiesProvider>
         <WalkthroughProvider>
+          <PagePending />
           <Shell>
             <Routed />
           </Shell>

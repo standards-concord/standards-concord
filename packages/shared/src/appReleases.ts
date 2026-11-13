@@ -60,7 +60,7 @@ export const APP_RELEASES: AppRelease[] = [
       id: 'faster-first-load',
       type: 'perf',
       title: 'Pages load faster',
-      detail: 'Pages download when you open them, so signing in and opening the hub need less JavaScript. Pages kept on this device still open offline.',
+      detail: 'Pages download when you open them, so signing in and opening the hub need less JavaScript. The page you are on stays in view while the next one downloads, and pages kept on this device still open offline.',
       roles: [],
       to: '/',
     }],
