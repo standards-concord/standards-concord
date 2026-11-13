@@ -58,3 +58,19 @@ it('the renderer keeps an own code whose code list belongs to another vocabulary
   const json = JSON.parse(html.match(/<script type="application\/ld\+json">([^]*?)<\/script>/)![1]);
   expect(json.hasDefinedTerm.map((t: { '@id': string }) => t['@id'])).toEqual(['https://example.org/own#Code']);
 });
+
+// Listing such a code on its own must not give a second entry (and a duplicate id) to one that is also a class.
+it('the renderer gives one entry to an own term that is both a class and a code in an outside list', async () => {
+  const graph = await OntologyGraph.fromTurtle(`
+    @prefix ex: <https://example.org/own#> .
+    @prefix other: <https://other.example/vocab#> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+    <https://example.org/own> a owl:Ontology .
+    other:Scheme a skos:ConceptScheme .
+    ex:Code a owl:Class, skos:Concept ; skos:inScheme other:Scheme .
+  `);
+  const html = renderOntologyPage(page(graph));
+  expect(html.match(/id="Code"/g)).toHaveLength(1);
+  expect(html).not.toContain('Codes in other code lists');
+});

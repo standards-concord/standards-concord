@@ -167,7 +167,9 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   // The page's own ids step aside for term anchors (an ontology may define #main).
   const id = pageIds(anchors.values());
   const ownSchemes = new Set((view.conceptSchemes ?? []).map((s) => s.iri));
-  const strayCodes = (view.concepts ?? []).filter((c) => !c.inScheme.some((s) => ownSchemes.has(s)));
+  // A code that is also a class, property or individual already has its entry (and its anchor) there.
+  const entered = new Set([...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals].map((t) => t.iri));
+  const strayCodes = (view.concepts ?? []).filter((c) => !entered.has(c.iri) && !c.inScheme.some((s) => ownSchemes.has(s)));
   const groups: { id: string; title: string; terms: TermView[] }[] = [
     { id: id('sec-classes'), title: 'Classes', terms: view.classes },
     { id: id('sec-object-properties'), title: 'Object properties', terms: view.objectProperties },
