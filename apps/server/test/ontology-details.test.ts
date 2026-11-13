@@ -81,4 +81,7 @@ it('refuses to create an ontology without a description', async () => {
     expect(refused.status).toBe(400);
     expect(refused.body.error).toBe('description is required');
   }
+  // Requiring one must not add a length limit that editing does not have.
+  const long = await owner.post('/api/ontologies').send({ title: `Long ${Math.random()}`, prefix: 'lg', description: 'd'.repeat(20_001) });
+  expect(long.status).toBe(201);
 });
