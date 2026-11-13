@@ -81,6 +81,19 @@ describe('rewriting drafted term references', () => {
     // Renaming the drafted datatype property itself moves the key and still keeps the literal.
     expect(renameDraftedTerm(ops, 1, 'remark', ns, { ex: ns }, view)[2]).toMatchObject({ facts: { [ns + 'remark']: [old] } });
   });
+  it('keeps literal fact values under a datatype property that the request itself renames', () => {
+    // A property renamed earlier in the same request was not recognised under its new name, so a literal
+    // spelling the old IRI was rewritten.
+    const view = { classes: [], objectProperties: [], datatypeProperties: [{ iri: ns + 'note' }], annotationProperties: [], individuals: [], conceptSchemes: [], concepts: [] } as unknown as OntologyView;
+    const ops: ChangeOp[] = [
+      { op: 'addClass', localName: 'Before', label: 'before', definition: 'Before.' },
+      { op: 'renameTerm', iri: 'ex:note', newLocalName: 'remark' },
+      { op: 'addDatatypeProperty', localName: 'memo', label: 'memo', definition: 'A memo.' },
+      { op: 'renameTerm', iri: `<${ns}memo>`, newLocalName: 'minute' },
+      { op: 'addIndividual', localName: 'thing', label: 'thing', definition: 'A thing.', types: [old], facts: { 'ex:remark': [old], 'ex:minute': [old] } },
+    ];
+    expect(renameDraftedTerm(ops, 0, 'After', ns, { ex: ns }, view)[4]).toMatchObject({ types: [next], facts: { 'ex:remark': [old], 'ex:minute': [old] } });
+  });
   it('rewrites and finds references written as <IRI> or with surrounding spaces', () => {
     // The engine accepts both spellings; a child left pointing at the old name failed validation after a rename.
     const ops: ChangeOp[] = [cases[0], { op: 'addClass', localName: 'Child', label: 'child', definition: 'Child.', subClassOf: [`<${old}>`] }, { op: 'setSuperClasses', iri: 'ex:Other', superClasses: [' ex:Before '] }];

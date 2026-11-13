@@ -16,9 +16,16 @@ export function draftedNameError(op: AddedOp, name: string, namespace: string, v
   if (allTerms(view).some((t) => t.iri === namespace + name) || ops.some((o, i) => i !== index && ((isAddedOp(o) && o.localName === name) || (o.op === 'renameTerm' && o.newLocalName === name)))) return 'This IRI is already used. Choose another local name.';
 }
 
-/** Whether a property's fact values are literal text: a datatype property in the ontology or drafted in these edits. */
-export function literalFacts(ops: ChangeOp[], namespace: string, view?: OntologyView): (property: string) => boolean {
-  const literal = new Set([...(view?.datatypeProperties ?? []).map((p) => p.iri), ...ops.flatMap((o) => o.op === 'addDatatypeProperty' ? [namespace + o.localName] : [])]);
+/**
+ * Whether a property's fact values are literal text: a datatype property in the ontology or drafted in these
+ * edits, under its own name or one a renameTerm edit here gives it.
+ */
+export function literalFacts(ops: ChangeOp[], namespace: string, view?: OntologyView, prefixes: Record<string, string> = {}): (property: string) => boolean {
+  const literal = new Set((view?.datatypeProperties ?? []).map((p) => p.iri));
+  for (const o of ops) {
+    if (o.op === 'addDatatypeProperty') literal.add(namespace + o.localName);
+    else if (o.op === 'renameTerm' && literal.has(expandIRI(o.iri, prefixes))) literal.add(namespace + o.newLocalName);
+  }
   return (property) => literal.has(property);
 }
 
@@ -71,7 +78,7 @@ export function rewriteOpIris(op: ChangeOp, oldIri: string, newIri: string, pref
 export function renameDraftedTerm(ops: ChangeOp[], index: number, name: string, namespace: string, prefixes: Record<string, string> = {}, view?: OntologyView): ChangeOp[] {
   const op = ops[index];
   if (!op || !isAddedOp(op)) return ops;
-  const literal = literalFacts(ops, namespace, view);
+  const literal = literalFacts(ops, namespace, view, prefixes);
   return ops.map((other, i) => {
     const rewritten = rewriteOpIris(other, namespace + op.localName, namespace + name, prefixes, literal);
     return i === index && isAddedOp(rewritten) ? { ...rewritten, localName: name } : rewritten;
@@ -83,6 +90,6 @@ export function dependentEdits(ops: ChangeOp[], index: number, namespace: string
   const op = ops[index];
   const provided = !op ? undefined : isAddedOp(op) ? namespace + op.localName : op.op === 'renameTerm' ? namespace + op.newLocalName : undefined;
   if (!provided) return [];
-  const literal = literalFacts(ops, namespace, view);
+  const literal = literalFacts(ops, namespace, view, prefixes);
   return ops.flatMap((other, i) => i !== index && JSON.stringify(other) !== JSON.stringify(rewriteOpIris(other, provided, namespace + '__removed__', prefixes, literal)) ? [i] : []);
 }
