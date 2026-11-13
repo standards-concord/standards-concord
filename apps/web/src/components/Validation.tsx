@@ -153,14 +153,14 @@ function StatusIcon({ icon: Icon, cls, status, note }: { icon: typeof Info; cls:
   );
 }
 
-/** Failures and unchecked items, unless expanded: then every check, failing first. Each check's FOOPS!/FAIR reference is on its icon's hover. */
+/** Only the failing checks, unless expanded: then every check, failing first. Each check's FOOPS!/FAIR reference is on its icon's hover. */
 export function FairChecks({ report }: { report: ValidationReport }) {
   const [open, setOpen] = useState(false);
   const { checks } = report.fair;
   const status = (c: (typeof checks)[number]) => c.status ?? (c.passed ? 'pass' : 'fail');
   const failed = checks.filter((c) => status(c) === 'fail');
   const order = { fail: 0, 'not-checked': 1, pass: 2 } as const;
-  const shown = (open ? [...checks] : checks.filter((c) => status(c) !== 'pass')).sort((a, b) => order[status(a)] - order[status(b)]);
+  const shown = open ? [...checks].sort((a, b) => order[status(a)] - order[status(b)]) : failed;
   const skipped = checks.filter((c) => status(c) === 'not-checked').length;
   return (
     <div className="text-sm">
@@ -186,7 +186,7 @@ export function FairChecks({ report }: { report: ValidationReport }) {
       {checks.length > failed.length || open ? (
         <button type="button" aria-expanded={open} onClick={() => setOpen((o) => !o)} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-accent">
           {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
-          {open ? 'Hide passing checks' : `Show all ${checks.length} checks`}
+          {open ? 'Show failing only' : `Show all ${checks.length} checks`}
         </button>
       ) : null}
     </div>

@@ -72,6 +72,9 @@ test('a new steward has four steps to do, useful links and neutral address check
     await expect(page).toHaveURL(new RegExp(`/o/${o.id}/${path}$`));
     await page.getByRole('link', { name: 'Overview', exact: true }).click();
   }
+  // The address checks wait with the passing ones behind "Show all": they are not failures, and not counted.
+  await expect(page.getByText('Checked once the first version is published.', { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: /^Show all \d+ checks$/ }).click();
   await expect(page.getByText('Checked once the first version is published.', { exact: true })).toHaveCount(2);
   for (const row of await page.getByRole('listitem').filter({ hasText: 'Checked once the first version is published.' }).all()) {
     await expect(row.getByRole('img', { name: /^Not checked/ })).toHaveCount(1);
