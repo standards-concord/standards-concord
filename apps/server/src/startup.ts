@@ -31,6 +31,11 @@ export const deployment = () => process.env.VERCEL_DEPLOYMENT_ID ?? process.env.
 const doneFor = (rec: Done | undefined, appVersion: string) =>
   !!rec && (compareVersions(rec.appVersion, appVersion) > 0 || (compareVersions(rec.appVersion, appVersion) === 0 && rec.deployment === deployment()));
 
+/** A cheap completion check for request paths that must wait for a particular start-up task. */
+export async function startupTaskDone(name: string, appVersion = APP_VERSION): Promise<boolean> {
+  return doneFor(await get<Done>('kv', `startup:${name}`), appVersion);
+}
+
 /**
  * Runs the tasks in order. `always` (the VM): every task runs, done or not. Otherwise only those not done yet,
  * and nothing if another instance is running them. Returns the names of the tasks that ran and finished.
@@ -41,7 +46,7 @@ export async function runStartupTasks(tasks: StartupTask[], opts: { always?: boo
     const finished: string[] = [];
     for (const t of tasks) {
       const key = `startup:${t.name}`;
-      if (!opts.always && doneFor(await get<Done>('kv', key), appVersion)) continue;
+      if (!opts.always && (await startupTaskDone(t.name, appVersion))) continue;
       try {
         if ((await t.run()) === false) continue;
         await put<Done>('kv', { id: key, appVersion, deployment: deployment(), at: new Date().toISOString() });
@@ -62,7 +67,7 @@ export async function runStartupTasks(tasks: StartupTask[], opts: { always?: boo
 /** The tasks this deployment still has to finish (none once every one has recorded that it is done). */
 export async function unfinishedTasks(tasks: StartupTask[], appVersion = APP_VERSION): Promise<string[]> {
   const out: string[] = [];
-  for (const t of tasks) if (!doneFor(await get<Done>('kv', `startup:${t.name}`), appVersion)) out.push(t.name);
+  for (const t of tasks) if (!(await startupTaskDone(t.name, appVersion))) out.push(t.name);
   return out;
 }
 
@@ -95,6 +100,13 @@ export async function defaultStartupTasks(): Promise<StartupTask[]> {
             },
           },
           { name: 'demo-seed', run: async () => void (await seedDemo()) },
+          {
+            name: 'sample-seed',
+            run: async () => {
+              const { seedSamples } = await import('./services/samples.js');
+              await seedSamples();
+            },
+          },
         ]
       : []),
     // Release pages written by an older renderer (or without a use case snapshot) are regenerated.

@@ -1,0 +1,134 @@
+/** Attribution for a converted vocabulary supplied for trying Concord. */
+export interface SampleAttribution {
+  source: string;
+  sourceTitle: string;
+  publisher: string;
+  licence: { name: string; url: string; noticePath?: string; copyPath?: string };
+  copyrightNotice?: string;
+  authors?: readonly string[];
+  upstreamCopy: string;
+  changes: string;
+  usedBy: string;
+  /** SHACL shapes for this vocabulary in the Solid Shapes Catalogue (file names under shapes/). */
+  shapes?: readonly string[];
+}
+
+export interface SampleVocabulary extends SampleAttribution {
+  slug: string;
+  title: string;
+  prefix: string;
+  namespace: string;
+  description: string;
+}
+
+/** The Solid Shapes Catalogue, which describes the SolidOS data model as SHACL shapes. */
+export const SOLID_SHAPES_CATALOGUE = 'https://github.com/solid/shapes';
+/** The catalogue commit the shapes lists were derived from (every shapes/*.ttl file that uses the sample's namespace); links are pinned to it. */
+export const SOLID_SHAPES_COMMIT = 'ccbccdb208091e0e822aaa4b14250315cd6f014d';
+
+/**
+ * Links to a sample's shapes in the Solid Shapes Catalogue. Looked up from the registry by the sample's source rather than
+ * read from the attribution stored with the project, so samples seeded before a list changed show the current list.
+ */
+export const sampleShapes = (sample: Pick<SampleAttribution, 'source'>) =>
+  (SAMPLE_VOCABULARIES.find((s) => s.source === sample.source)?.shapes ?? [])
+    .map((file) => ({ file, url: `${SOLID_SHAPES_CATALOGUE}/blob/${SOLID_SHAPES_COMMIT}/shapes/${file}` }));
+
+export const SAMPLE_HEALTH_NOTE = "Concord's checks flag some wording inherited from the original; it is kept as published so the copy stays faithful.";
+
+const w3c = { name: 'W3C Software and Document License (2015)', url: 'https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document', noticePath: '/licences/W3C-20150513', copyPath: '/docs/licences/W3C-20150513.md' };
+const w3cNotice = (title: string, uri: string, year?: string) => `This document includes material copied from or derived from ${title} (${uri}). Copyright (c) ${year ? year + ' ' : ''}W3C® (MIT, ERCIM, Keio, Beihang).`;
+const cc0 = { name: 'CC0 1.0', url: 'https://creativecommons.org/publicdomain/zero/1.0/' };
+const common = 'Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings.';
+
+/** One registry for conversion, seeding and attribution. Provenance: fixtures/samples/upstream/SOURCES.md. */
+export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
+  {
+    slug: 'solid-terms', title: 'Solid Terms', prefix: 'solid', namespace: 'http://www.w3.org/ns/solid/terms#',
+    description: 'Settings and links that help Solid apps find profiles, preferences and storage.',
+    usedBy: 'SolidOS account settings, profile discovery and type indexes', publisher: 'Solid Project',
+    source: 'http://www.w3.org/ns/solid/terms', sourceTitle: 'Solid Terms', licence: cc0,
+    shapes: ['agent.ttl', 'chat.ttl'],
+    upstreamCopy: 'solid-terms.ttl', changes: `${common} Resolved rdf:Property declarations from their ranges and usage. Named anonymous provenance records with stable URNs.`,
+  },
+  {
+    slug: 'acl', title: 'Web Access Control', prefix: 'acl', namespace: 'http://www.w3.org/ns/auth/acl#',
+    description: 'Rules describing who can read, write or share a resource in a Solid pod.',
+    usedBy: 'SolidOS sharing and permissions', publisher: 'W3C',
+    source: 'http://www.w3.org/ns/auth/acl', sourceTitle: 'Web Access Control', licence: w3c,
+    copyrightNotice: w3cNotice('Web Access Control', 'http://www.w3.org/ns/auth/acl'),
+    upstreamCopy: 'acl.ttl', changes: `${common} Promoted RDFS classes and properties to OWL declarations.`,
+  },
+  {
+    slug: 'ldp', title: 'Linked Data Platform', prefix: 'ldp', namespace: 'http://www.w3.org/ns/ldp#',
+    description: 'Resources and containers used to organise linked data on the web.',
+    usedBy: 'SolidOS pod folders and resource browsing', publisher: 'W3C',
+    source: 'http://www.w3.org/ns/ldp', sourceTitle: 'Linked Data Platform vocabulary', licence: w3c,
+    copyrightNotice: w3cNotice('Linked Data Platform vocabulary', 'http://www.w3.org/ns/ldp', '2015'),
+    shapes: ['container.ttl'],
+    upstreamCopy: 'ldp.ttl', changes: `${common} Preserved container hierarchies and resource links. Named anonymous publisher and author records with stable URNs; normalised owl:Individual declarations.`,
+  },
+  {
+    slug: 'pim-space', title: 'Workspace', prefix: 'space', namespace: 'http://www.w3.org/ns/pim/space#',
+    description: 'Personal, shared and public places for keeping data and preferences.',
+    usedBy: 'SolidOS workspaces, storage and preferences', publisher: 'W3C',
+    source: 'http://www.w3.org/ns/pim/space', sourceTitle: 'Workspace Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('Workspace Ontology', 'http://www.w3.org/ns/pim/space'),
+    shapes: ['agent.ttl'],
+    upstreamCopy: 'space.ttl', changes: `${common} Declared classes previously described only through their superclass.`,
+  },
+  {
+    slug: 'meeting', title: 'Meeting', prefix: 'meeting', namespace: 'http://www.w3.org/ns/pim/meeting#',
+    description: 'Agendas, notes, participants and calls for people meeting online.',
+    usedBy: 'SolidOS meeting pane', publisher: 'W3C',
+    source: 'http://www.w3.org/ns/pim/meeting', sourceTitle: 'Meeting Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('Meeting Ontology', 'http://www.w3.org/ns/pim/meeting', '2016'),
+    shapes: ['chat.ttl'],
+    upstreamCopy: 'meeting.ttl', changes: `${common} Retained meeting:label and also supplied an rdfs:label for Meeting.`,
+  },
+  {
+    slug: 'solid-ui-forms', title: 'Forms and user interface', prefix: 'ui', namespace: 'http://www.w3.org/ns/ui#',
+    description: 'Fields, forms and display hints used to build interfaces for linked data.',
+    usedBy: 'SolidOS form rendering and form editor in solid-ui', publisher: 'W3C / Tim Berners-Lee',
+    source: 'http://www.w3.org/ns/ui', sourceTitle: 'User Interface Ontology', licence: cc0,
+    shapes: ['chat.ttl'],
+    upstreamCopy: 'ui.ttl', changes: `${common} Kept form descriptions as annotations where they mix schema and data. Omitted embedded form collections that OWL cannot parse as axioms (the complete forms remain in the upstream copy). Replaced the named CSS colour facet restriction with a string datatype.`,
+  },
+  {
+    slug: 'workflow', title: 'Workflow and issue tracking', prefix: 'wf', namespace: 'http://www.w3.org/2005/01/wf/flow#',
+    description: 'Tasks, issues, assignments and the states a piece of work moves through.',
+    usedBy: 'SolidOS issue pane and meeting action items', publisher: 'W3C / Tim Berners-Lee; upstream copy maintained by SolidOS',
+    source: 'http://www.w3.org/2005/01/wf/flow', sourceTitle: 'Issue Tracking Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('Issue Tracking Ontology', 'http://www.w3.org/2005/01/wf/flow'),
+    shapes: ['chat.ttl', 'issue_tracker.ttl'],
+    upstreamCopy: 'wf.ttl', changes: `${common} Expanded legacy N3 bare names in the original namespace. Removed label-only anonymous inverse properties, which do not identify an OWL inverse.`,
+  },
+  {
+    slug: 'vcard', title: 'vCard', prefix: 'vcard', namespace: 'http://www.w3.org/2006/vcard/ns#',
+    description: 'Names, addresses and contact details for people and organisations.',
+    usedBy: 'SolidOS address book and contacts', publisher: 'W3C',
+    source: 'http://www.w3.org/2006/vcard/ns', sourceTitle: 'vCard Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('vCard Ontology', 'http://www.w3.org/2006/vcard/ns'),
+    shapes: ['address.ttl', 'address_book.ttl', 'agent.ttl', 'email.ttl', 'group.ttl', 'organization.ttl', 'person.ttl', 'personal_name.ttl', 'telephone.ttl', 'vcard.ttl', 'web-id.ttl', 'web-page.ttl'],
+    upstreamCopy: 'vcard.nq', changes: `${common} Flattened the N-Quads document into one ontology graph and retained OWL class restrictions. Widened non-OWL date members in datatype unions to rdfs:Literal. Omitted incompatible equivalence edges while keeping original datatype property kinds.`,
+  },
+  {
+    slug: 'foaf', title: 'FOAF', prefix: 'foaf', namespace: 'http://xmlns.com/foaf/0.1/',
+    description: 'People, organisations, their profiles and the connections between them.',
+    usedBy: 'SolidOS profiles, people and social links', publisher: 'FOAF Project / Dan Brickley and Libby Miller',
+    source: 'http://xmlns.com/foaf/0.1/', sourceTitle: 'FOAF Vocabulary Specification',
+    licence: { name: 'CC BY 1.0', url: 'https://creativecommons.org/licenses/by/1.0/', noticePath: '/licences/CC-BY-1.0', copyPath: '/docs/licences/CC-BY-1.0.md' },
+    authors: ['Dan Brickley', 'Libby Miller'],
+    shapes: ['agent.ttl', 'chat.ttl'],
+    upstreamCopy: 'foaf.nq', changes: `${common} Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible equivalence edges; kept object-property inverses and compatible property hierarchies.`,
+  },
+  {
+    slug: 'schedule', title: 'Schedule', prefix: 'sched', namespace: 'http://www.w3.org/ns/pim/schedule#',
+    description: 'Polls for finding a time that suits everyone, and how well each option suits each person.',
+    usedBy: 'SolidOS scheduler pane', publisher: 'W3C',
+    source: 'http://www.w3.org/ns/pim/schedule', sourceTitle: 'Schedule Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('Schedule Ontology', 'http://www.w3.org/ns/pim/schedule'),
+    shapes: ['event.ttl'],
+    upstreamCopy: 'schedule.ttl', changes: `${common} Promoted RDFS classes and properties to OWL declarations.`,
+  },
+];

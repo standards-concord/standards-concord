@@ -111,7 +111,6 @@ export function writeTurtle(store: Store, prefixes: Record<string, string>, opts
 
   // --- Term rendering -------------------------------------------------------
   const iri = (v: string): string => {
-    if (v === RDF_TYPE) return 'a';
     const q = qname(v, prefixes);
     if (q) {
       used.add(q.slice(0, q.indexOf(':')));
@@ -184,8 +183,8 @@ export function writeTurtle(store: Store, prefixes: Record<string, string>, opts
         const rendered = sorted.map((o) => obj(o, ind + '    '));
         // Short lists of simple objects stay on one line.
         const oneLine = rendered.join(' , ');
-        if (sorted.every((o) => o.termType !== 'BlankNode') && oneLine.length <= 72) return `${iri(p)} ${oneLine}`;
-        return `${iri(p)} ${rendered.join(` ,\n${ind}    `)}`;
+        if (sorted.every((o) => o.termType !== 'BlankNode') && oneLine.length <= 72) return `${p === RDF_TYPE ? 'a' : iri(p)} ${oneLine}`;
+        return `${p === RDF_TYPE ? 'a' : iri(p)} ${rendered.join(` ,\n${ind}    `)}`;
       })
       .join(` ;\n${ind}`);
   }

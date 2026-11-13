@@ -19,8 +19,8 @@ import { checkInputs, federationIRI, findFederation } from './federations.js';
 import { closureFingerprint, hostedImportClosure } from './importClosure.js';
 import { getProject } from './ontologies.js';
 import { ontologyStore } from './ontologyStore.js';
+import { publishedVersionIRI } from './releaseIri.js';
 
-const versionIRIOf = (ontologyIRI: string, version: string) => `${ontologyIRI.replace(/[#/]$/, '')}/${version}`;
 const SEMVER = /^\d+\.\d+\.\d+$/;
 
 const newer = (a: string, b: string) => {
@@ -77,7 +77,7 @@ export async function releasePlan(f: Federation): Promise<FederationReleasePlan 
     }
     const graph = await ontologyStore.at(p, m.version);
     seen.add(`${p.id}@${m.version}`);
-    pins.push({ role: 'member', ontologyId: p.id, title: p.title, ontologyIRI: p.ontologyIRI, version: m.version, versionIRI: versionIRIOf(p.ontologyIRI, m.version), hash: await hashOf(`${p.id}@${m.version}`, async () => graph) });
+    pins.push({ role: 'member', ontologyId: p.id, title: p.title, ontologyIRI: p.ontologyIRI, version: m.version, versionIRI: await publishedVersionIRI(p, m.version), hash: await hashOf(`${p.id}@${m.version}`, async () => graph) });
     const closure = await hostedImportClosure(graph);
     inputs.push({ id: p.id, title: p.title, version: m.version, graph, closure });
     keys.push(`${p.id}@${m.version}[${closureFingerprint(closure)}]`);
@@ -92,7 +92,9 @@ export async function releasePlan(f: Federation): Promise<FederationReleasePlan 
       if (seen.has(key)) continue;
       seen.add(key);
       const ontologyIRI = r.graph.ontologyIRI || r.iri;
-      pins.push({ role: 'import', ...(r.ontologyId ? { ontologyId: r.ontologyId } : {}), title: r.title, ontologyIRI, version: r.version, versionIRI: versionIRIOf(ontologyIRI, r.version), hash: await hashOf(key, async () => r.graph) });
+      const versionIRI = r.ontologyId ? await publishedVersionIRI({ id: r.ontologyId }, r.version) : r.graph.metadata().versionIRI;
+      if (!versionIRI) throw new HttpError(404, `No version IRI for ${r.title} ${r.version}`);
+      pins.push({ role: 'import', ...(r.ontologyId ? { ontologyId: r.ontologyId } : {}), title: r.title, ontologyIRI, version: r.version, versionIRI, hash: await hashOf(key, async () => r.graph) });
     }
   }
   if (!blockers.length) {
@@ -132,7 +134,7 @@ export async function publishFederationRelease(f: Federation, user: User | undef
     title: fed.title,
     description: fed.description || undefined,
     issued: clock.iso(),
-    previousVersion: latest?.version,
+    previousVersionIRI: latest ? (await OntologyGraph.fromTurtle(latest.manifest)).metadata().versionIRI : undefined,
     pins: plan.pins,
     shapes: { iri: `${fedVersionIRI(iri, version)}/shapes`, hash: shapesHash },
     closure: { iri: closureIRI, hash: closureHash },

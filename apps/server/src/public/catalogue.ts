@@ -19,6 +19,8 @@ export interface CatalogueEntry {
   version?: string;
   publishedAt?: string;
   held: boolean;
+  isSample: boolean;
+  sample?: OntologyProject['sample'];
   counts?: { classes: number; properties: number };
 }
 
@@ -40,6 +42,8 @@ export async function catalogueEntries(base: string): Promise<CatalogueEntry[]> 
       url: `${base}${PUBLIC_BASE}/${encodeURIComponent(project.slug)}`,
       domain: project.domain,
       held: await isHeld(project, version),
+      isSample: !!project.sample,
+      sample: project.sample,
     };
     // Decide before reading any graph. In particular, never count a held working draft.
     if (entry.held) return entry;
@@ -70,6 +74,9 @@ export function catalogueJsonLd(entries: CatalogueEntry[], url: string) {
       description: entry.description,
       url: entry.url,
       version: entry.version,
+      keywords: entry.isSample ? ['Sample standard'] : undefined,
+      isBasedOn: entry.sample?.source,
+      license: entry.sample?.licence.url,
     })),
   };
 }
@@ -98,12 +105,24 @@ export async function catalogueTurtle(entries: CatalogueEntry[], url: string): P
       quad(subject, iri(namespaces.dcat + 'landingPage'), subject),
     ]);
     if (entry.version) writer.addQuad(subject, iri(namespaces.owl + 'versionInfo'), literal(entry.version));
+    if (entry.isSample) writer.addQuad(subject, iri(namespaces.dcterms + 'type'), literal('Sample standard'));
+    if (entry.sample) {
+      writer.addQuad(subject, iri(namespaces.dcterms + 'source'), iri(entry.sample.source));
+      writer.addQuad(subject, iri(namespaces.dcterms + 'license'), iri(entry.sample.licence.url));
+    }
   }
   return new Promise((resolve, reject) => writer.end((error, result) => error ? reject(error) : resolve(result)));
 }
 
 export function renderCatalogue(entries: CatalogueEntry[], base: string): string {
   const url = `${base}${PUBLIC_BASE}`;
+  const standards = entries.filter((entry) => !entry.isSample);
+  const samples = entries.filter((entry) => entry.isSample);
+  const renderList = (items: CatalogueEntry[], label: string) => `<ul class="catalogue" aria-label="${label}">${items.map((entry) => {
+    const version = entry.held ? 'Being reviewed' : entry.version === 'draft' ? 'Draft, no published version yet' : `Version ${entry.version}${entry.publishedAt ? `, ${formatDate(entry.publishedAt)}` : ''}`;
+    const facts = [entry.isSample ? 'Sample copy' : undefined, version, entry.domain, entry.counts ? `${entry.counts.classes} classes, ${entry.counts.properties} properties` : undefined].filter(Boolean);
+    return `<li><h2><a href="${esc(entry.url)}">${esc(entry.title)}</a></h2>${entry.description ? `<p>${esc(entry.description)}</p>` : ''}<p class="muted">${facts.map((fact) => esc(fact!)).join(' · ')}</p></li>`;
+  }).join('')}</ul>`;
   return publicPage({
     title: TITLE,
     description: DESCRIPTION,
@@ -114,11 +133,7 @@ export function renderCatalogue(entries: CatalogueEntry[], base: string): string
     ],
     jsonLd: catalogueJsonLd(entries, url),
     header: `<p class="crumbs">Concord</p><h1>${TITLE}</h1><p>${DESCRIPTION}</p>`,
-    main: entries.length ? `<ul class="catalogue" aria-label="Standards">${entries.map((entry) => {
-      const version = entry.held ? 'Being reviewed' : entry.version === 'draft' ? 'Draft, no published version yet' : `Version ${entry.version}${entry.publishedAt ? `, ${formatDate(entry.publishedAt)}` : ''}`;
-      const facts = [version, entry.domain, entry.counts ? `${entry.counts.classes} classes, ${entry.counts.properties} properties` : undefined].filter(Boolean);
-      return `<li><h2><a href="${esc(entry.url)}">${esc(entry.title)}</a></h2>${entry.description ? `<p>${esc(entry.description)}</p>` : ''}<p class="muted">${facts.map((fact) => esc(fact!)).join(' · ')}</p></li>`;
-    }).join('')}</ul>` : '<p>No standards have been published here yet.</p>',
+    main: entries.length ? `${standards.length ? renderList(standards, 'Standards') : ''}${samples.length ? `<section aria-label="Sample standards"><details><summary>Sample standards</summary><p>Try Concord with standards used by SolidOS. Each copy links to its original publisher and licence.</p>${renderList(samples, 'Sample standards')}</details></section>` : ''}` : '<p>No standards have been published here yet.</p>',
     footer: `<p>Published with Concord · <a href="${esc(base)}/login">Sign in to Concord</a></p>`,
   });
 }

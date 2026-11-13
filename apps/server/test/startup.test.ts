@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { get, put, remove } from '../src/db.js';
-import { runStartupTasks, type StartupTask } from '../src/startup.js';
+import { runStartupTasks, startupTaskDone, type StartupTask } from '../src/startup.js';
 
 /**
  * Start-up work on Vercel (step 5): there is no single start, so every new function instance ran the migrations,
@@ -23,7 +23,10 @@ describe('start-up tasks', () => {
   it('runs each task once per deployment, then skips it at the next instance', async () => {
     const a = task();
     const b = task();
+    expect(await startupTaskDone(a.name, '1.0.0')).toBe(false);
     expect(await runStartupTasks([a, b], { appVersion: '1.0.0' })).toEqual([a.name, b.name]);
+    expect(await startupTaskDone(a.name, '1.0.0')).toBe(true);
+    expect(await startupTaskDone(a.name, '1.0.1')).toBe(false);
     expect(await runStartupTasks([a, b], { appVersion: '1.0.0' })).toEqual([]);
     expect([a.calls, b.calls]).toEqual([1, 1]);
     expect(await get('kv', `startup:${a.name}`)).toMatchObject({ appVersion: '1.0.0', deployment: 'local' });

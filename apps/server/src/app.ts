@@ -10,6 +10,7 @@ import { mcpHandler } from './mcp.js';
 import { oauthRoutes } from './oauth.js';
 import { reportRouter } from './public/report.js';
 import { publicRouter } from './public/routes.js';
+import { licenceRouter } from './public/licences.js';
 import { validationRouter } from './public/validate.js';
 import { apiRouter } from './routes/api.js';
 import { mountGithubAppWebhook } from './routes/githubApp.js';
@@ -75,6 +76,7 @@ export function createApp(): express.Express {
   app.use(reportRouter());
   app.use(validationRouter());
   app.use(publicRouter());
+  app.use(licenceRouter());
 
   // The built web app, with client-side routing fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

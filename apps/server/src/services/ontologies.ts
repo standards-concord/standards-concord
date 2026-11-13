@@ -13,8 +13,10 @@ import type {
   UseCase,
   User,
 } from '@concord/shared';
+import { SAMPLE_VOCABULARIES } from '@concord/shared';
+import { config } from '../config.js';
 import { clock } from '../clock.js';
-import { transaction, get, HttpError, list, mustGet, put, remove } from '../db.js';
+import { checkFence, transaction, get, HttpError, list, mustGet, put, remove } from '../db.js';
 import { newId, slugify } from '../ids.js';
 import { template } from './governance.js';
 import { ontologyStore } from './ontologyStore.js';
@@ -59,6 +61,10 @@ export async function requireRole(ontologyId: string, user: User | undefined, ro
   if (!have.some((r) => roles.includes(r))) throw new HttpError(403, `Only ${roles.join(' / ')} can ${action}`);
 }
 
+export class SlugConflictError extends HttpError {
+  constructor(slug: string) { super(409, `An ontology with slug ${slug} already exists`); }
+}
+
 export async function createProject(
   input: {
     title: string;
@@ -71,11 +77,17 @@ export async function createProject(
     creditCreator?: boolean;
     seedTurtle?: string;
     demo?: boolean;
+    sample?: OntologyProject['sample'];
     slug?: string;
   },
   owner: User,
 ): Promise<OntologyProject> {
+  let initialized: OntologyProject | undefined;
+  try { return await transaction(async () => {
+  await checkFence();
   const slug = input.slug ?? await uniqueSlug(slugify(input.title));
+  // The writer lock reserves this slug through store initialisation and metadata creation, on both stores.
+  if ((await list<OntologyProject>('ontologies')).some((p) => p.slug === slug)) throw new SlugConflictError(slug);
   const prefix = input.prefix.replace(/[^A-Za-z0-9_-]/g, '').toLowerCase() || 'ex';
   let graph: Graph;
   if (input.seedTurtle) graph = await OntologyGraph.fromTurtle(input.seedTurtle);
@@ -110,18 +122,62 @@ export async function createProject(
     updatedAt: now,
     domain: input.domain,
     demo: input.demo,
+    sample: input.sample,
   };
-  const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: CC BY 4.0\n\nManaged with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
+  const attribution = input.sample;
+  const sampleNotice = attribution ? [
+    '## Sample copy',
+    `This is a sample copy for trying Concord. The original is published by ${attribution.publisher}: [${attribution.sourceTitle}](${attribution.source}). Licence: [${attribution.licence.name}](${attribution.licence.url}). Used by ${attribution.usedBy}.`,
+    attribution.copyrightNotice,
+    attribution.authors?.length ? `Modified from ${attribution.sourceTitle} by ${attribution.authors.join(' and ')}.` : undefined,
+    attribution.licence.noticePath ? `[Full licence notice](${config.publicUrl}${attribution.licence.noticePath}) · [${attribution.licence.copyPath!.slice(1)}](${config.publicUrl}${attribution.licence.copyPath})` : undefined,
+    '[What the conversion changed](#conversion-changes)',
+    '### Conversion changes',
+    attribution.changes,
+    '',
+  ].filter((p) => p !== undefined).join('\n\n') : '';
+  const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: ${input.sample ? `[${input.sample.licence.name}](${input.sample.licence.url})` : 'CC BY 4.0'}\n\n${sampleNotice}Managed with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
+  // No project holds this slug, so any ontology history kept under it is an orphan from a creation that failed
+  // before its clean-up ran: start from a fresh history rather than inheriting it.
+  await ontologyStore.forget(project);
+  // Marked before initialising, so a failure part way through initialisation is cleaned up too.
+  initialized = project;
   await ontologyStore.init(project, await graph.toTurtle(), readme);
-  await put('ontologies', project);
-  await setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);
-  await logActivity({ ontologyId: project.id, actorId: owner.id, type: 'ontology.created', message: `created the ontology ${project.title}`, link: `/o/${project.id}` });
-  return project;
+  try {
+    await put('ontologies', project);
+    await setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);
+    await logActivity({ ontologyId: project.id, actorId: owner.id, type: 'ontology.created', message: `created the ontology ${project.title}`, link: `/o/${project.id}` });
+    return project;
+  } catch (err) {
+    // Metadata rolls back with this transaction. Git files do not: discard them before the
+    // writer lock releases the slug, so a retry starts with a fresh history on either store.
+    try {
+      await ontologyStore.forget(project);
+      initialized = undefined;
+    } catch { /* An aborted database transaction may prevent cleanup; retry after rollback below. */ }
+    throw err;
+  }
+  }); } catch (err) {
+    if (initialized) {
+      const failed = initialized;
+      // Also covers COMMIT failing after the callback succeeded. Recheck under the writer lock:
+      // an ambiguous commit or another creator may already have reserved this slug.
+      try {
+        await transaction(async () => {
+          if (!(await list<OntologyProject>('ontologies')).some((p) => p.slug === failed.slug)) await ontologyStore.forget(failed);
+        });
+      } catch (cleanup) {
+        // Report the creation's own failure, not the clean-up's; the next creation under this slug forgets the leftover first.
+        console.warn(`[ontologies] could not discard the failed creation of ${failed.slug}: ${(cleanup as Error).message}`);
+      }
+    }
+    throw err;
+  }
 }
 
 async function uniqueSlug(base: string) {
   // "fed" is taken by federation releases (/def/fed/...).
-  const taken = new Set(['fed', ...(await list<OntologyProject>('ontologies')).map((o) => o.slug)]);
+  const taken = new Set(['fed', ...SAMPLE_VOCABULARIES.map((s) => s.slug), ...(await list<OntologyProject>('ontologies')).map((o) => o.slug)]);
   let s = base;
   for (let i = 2; taken.has(s); i++) s = `${base}-${i}`;
   return s;

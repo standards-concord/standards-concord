@@ -33,8 +33,8 @@ export const CLASSIFICATION_RULES: { id: string; level: ChangeLevel; description
 
 // Versioning
 export function bumpVersion(version: string, level: ChangeLevel): string;  // semver
-export function stampRelease(graph: OntologyGraph, opts: { version: string; versionIRIBase?: string; priorVersionIRI?: string; level: ChangeLevel; date: string; backwardCompatible: boolean }): OntologyGraph;
-   // sets owl:versionIRI (`${ontologyIRI}/${version}` by default unless base given), owl:versionInfo, owl:priorVersion, owl:backwardCompatibleWith or owl:incompatibleWith, dcterms:modified/issued
+export function stampRelease(graph: OntologyGraph, opts: { version: string; versionIRI?: string; versionIRIBase?: string; priorVersionIRI?: string; level: ChangeLevel; date: string; backwardCompatible: boolean }): OntologyGraph;
+   // sets owl:versionIRI (explicit IRI, otherwise `${ontologyIRI}/${version}` unless base given), owl:versionInfo, owl:priorVersion, owl:backwardCompatibleWith or owl:incompatibleWith, dcterms:modified/issued
 
 // Quality
 export function lint(graph: OntologyGraph, opts?: { strict?: boolean }): Issue[];

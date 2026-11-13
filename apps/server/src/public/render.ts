@@ -1,6 +1,7 @@
 import { allTerms, compactIRI, localName, type WorkedExample } from '@concord/core';
 import type { ClassView, ConceptView, IndividualView, OntologyView, PropertyView, Restriction, TermView } from '@concord/core/types';
-import type { ChangeLevel } from '@concord/shared';
+import type { ChangeLevel, SampleAttribution } from '@concord/shared';
+import { SAMPLE_HEALTH_NOTE, SOLID_SHAPES_CATALOGUE, sampleShapes } from '@concord/shared';
 import { escapeHtml as esc, renderMarkdown, safeHref } from './markdown.js';
 import type { PublicUseCaseView, PublishedRequirements, RequirementView } from './requirements.js';
 import { PAGE_SCRIPT } from './assets.js';
@@ -47,6 +48,7 @@ export interface OntologyPageInput {
     namespace: string;
     ontologyIRI: string;
     github?: { repo: string };
+    sample?: SampleAttribution;
   };
   view: OntologyView;
   /** A published release, or the unreleased working draft. */
@@ -569,6 +571,17 @@ ${project.github ? `<section class="block"><h2>Source</h2><p>Every release is a 
     <h1>${esc(meta.title ?? project.title)}</h1>
     <p class="subtitle">${statusPill}<span class="version">${esc(versionLabel)}</span>${input.release?.publishedAt ? `<span class="muted">Released ${esc(formatDate(input.release.publishedAt))}</span>` : ''}</p>
     ${banner}
+    ${project.sample ? `<section aria-label="About this sample" class="block">
+      <h2>About this sample</h2>
+      <p>A sample copy for trying Concord. The original is published by ${esc(project.sample.publisher)}: <a href="${esc(project.sample.source)}">${esc(project.sample.sourceTitle)}</a>. Licence: <a href="${esc(project.sample.licence.url)}">${esc(project.sample.licence.name)}</a>.</p>
+      ${project.sample.copyrightNotice ? `<p>${esc(project.sample.copyrightNotice)}</p>` : ''}
+      ${project.sample.authors?.length ? `<p>Modified from ${esc(project.sample.sourceTitle)} by ${esc(project.sample.authors.join(' and '))}.</p>` : ''}
+      ${project.sample.licence.noticePath ? `<p><a href="${esc(project.sample.licence.noticePath)}">Full licence notice</a> · <a href="${esc(project.sample.licence.copyPath!)}">${esc(project.sample.licence.copyPath!.slice(1))}</a></p>` : ''}
+      <p>Used by ${esc(project.sample.usedBy)}.</p>
+      ${sampleShapes(project.sample).length ? `<p>SHACL shapes in the <a href="${esc(SOLID_SHAPES_CATALOGUE)}">Solid Shapes Catalogue</a>: ${sampleShapes(project.sample).map((shape) => `<a href="${esc(shape.url)}">${esc(shape.file)}</a>`).join(', ')}.</p>` : ''}
+      <p>${esc(SAMPLE_HEALTH_NOTE)}</p>
+      <details><summary>What the conversion changed</summary><p>${esc(project.sample.changes)}</p></details>
+    </section>` : ''}
     <dl class="meta">${metaRows}</dl>
     <p class="downloads"><span class="muted">Download</span> ${downloadsInline}</p>`,
     beforeMain: `<div class="tabbar">

@@ -17,8 +17,10 @@ import type {
   TermView,
   ValidationReport,
 } from '@concord/core/types';
+import type { SampleAttribution } from './samples.js';
 
 export * from './appReleases.js';
+export * from './samples.js';
 
 export type {
   ChangeClassification,
@@ -231,6 +233,8 @@ export interface OntologyProject {
   domain?: string;
   /** Example demo project for alpha testers. */
   demo?: boolean;
+  /** Original publisher and conversion details for a bundled sample. */
+  sample?: SampleAttribution;
   /** Everything this ontology publishes was approved as it was merged (older ones are checked once: see PublicHold). */
   publishedWithApproval?: boolean;
   /**

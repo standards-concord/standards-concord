@@ -3,6 +3,7 @@ import { DataFactory, Parser, Store } from 'n3';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { OntologyGraph } from '@concord/core';
 import type { OntologyProject, Release } from '@concord/shared';
+import { SAMPLE_VOCABULARIES } from '@concord/shared';
 import { createApp } from '../src/app.js';
 import { openDb, put } from '../src/db.js';
 import { catalogueDescription, catalogueEntries, catalogueJsonLd, catalogueTurtle, renderCatalogue } from '../src/public/catalogue.js';
@@ -96,6 +97,34 @@ describe('catalogue content', () => {
       expect(await catalogueTurtle([entry], `${BASE}/def`)).not.toContain('versionInfo');
     } finally {
       read.mockRestore();
+    }
+  });
+
+  it('carries sample attribution and groups sample copies after ordinary standards in a closed disclosure', async () => {
+    // The catalogue arrived after sample seeding and used to present copies as ordinary standards.
+    const { slug, title, prefix, namespace, description, ...sample } = SAMPLE_VOCABULARIES[0];
+    await put('ontologies', { ...published, sample });
+    try {
+      const entries = await catalogueEntries(BASE);
+      const entry = entries.find((e) => e.url.endsWith(`/${published.slug}`))!;
+      expect(entry).toMatchObject({ isSample: true, sample });
+      expect(entries.find((e) => e.title === unsafeTitle)).toMatchObject({ isSample: false });
+      const html = renderCatalogue(entries, BASE);
+      const [ordinary, samples] = html.split('<section aria-label="Sample standards">');
+      expect(ordinary).toContain(`href="${BASE}/def/${draft.slug}"`);
+      expect(ordinary).not.toContain(`href="${entry.url}"`);
+      expect(samples).toContain('<details><summary>Sample standards</summary>');
+      expect(samples).not.toContain('<details open');
+      expect(samples).toContain(`href="${entry.url}"`);
+      expect(samples).toContain('Sample copy');
+      const json = catalogueJsonLd(entries, `${BASE}/def`).hasPart.find((part) => part.url === entry.url)!;
+      expect(json).toMatchObject({ keywords: ['Sample standard'], isBasedOn: sample.source, license: sample.licence.url });
+      const turtle = new Store(new Parser().parse(await catalogueTurtle(entries, `${BASE}/def`)));
+      expect(turtle.getObjects(entry.url, 'http://purl.org/dc/terms/type', null).map((n) => n.value)).toEqual(['Sample standard']);
+      expect(turtle.getObjects(entry.url, 'http://purl.org/dc/terms/source', null).map((n) => n.value)).toEqual([sample.source]);
+      expect(turtle.getObjects(entry.url, 'http://purl.org/dc/terms/license', null).map((n) => n.value)).toEqual([sample.licence.url]);
+    } finally {
+      await put('ontologies', published);
     }
   });
 

@@ -9,6 +9,7 @@ import { useSession } from '../lib/session';
 import { useAdvancedFeatures } from '../lib/advanced';
 import { plural, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
+import { Disclosure } from '../components/Disclosure';
 import { HealthChip } from '../components/Phase';
 import { ActivityFeed } from '../components/ActivityFeed';
 import { OntologyDetailsFields } from '../components/OntologyDetails';
@@ -164,34 +165,51 @@ export function HubPage() {
               Start an ontology, then describe use cases to the interviewer or upload a meeting transcript — Concord drafts the terms for you.
             </EmptyState>
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2">
-              {ontologies.data.map((o) => (
-                <Link key={o.id} to={`/o/${o.id}`} className="group">
-                  <Card className="flex h-full flex-col p-5 transition-shadow group-hover:border-line-strong group-hover:shadow-md">
-                    <div className="flex items-start justify-between gap-2">
-                      <h2 className="font-semibold group-hover:text-accent">{o.title}</h2>
-                      <div className="flex gap-1">
-                        {o.demo && <Badge tone="warn">Demo</Badge>}
-                        <Badge tone="outline">{titleCase(o.stage)}</Badge>
+            <div className="space-y-6">
+              <div className="grid gap-4 sm:grid-cols-2">
+                {ontologies.data.filter((o) => !o.sample).map((o) => (
+                  <Link key={o.id} to={`/o/${o.id}`} className="group">
+                    <Card className="flex h-full flex-col p-5 transition-shadow group-hover:border-line-strong group-hover:shadow-md">
+                      <div className="flex items-start justify-between gap-2">
+                        <h2 className="font-semibold group-hover:text-accent">{o.title}</h2>
+                        <div className="flex gap-1">
+                          {o.demo && <Badge tone="warn">Demo</Badge>}
+                          <Badge tone="outline">{titleCase(o.stage)}</Badge>
+                        </div>
                       </div>
-                    </div>
-                    <p className="mt-2 line-clamp-3 flex-1 text-sm text-muted">{o.description || 'No description yet.'}</p>
-                    <p className="mt-4 border-t border-line pt-3 text-sm text-muted">
-                      {/* Counts are withheld while the working draft is reviewed before publishing: show a dash, never "undefined". */}
-                      {count(o.stats.classes, 'class', 'classes')}, {count(o.stats.properties, 'property', 'properties')}, {count(o.stats.useCases, 'use case')} and{' '}
-                      {count(o.stats.members, 'member')}.
-                    </p>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                      <span className="flex flex-wrap items-center gap-2 text-xs text-muted">
-                        <HealthChip o={o} />
-                        <span>Version {o.currentVersion}</span>
-                        {(o.stats.openChangeRequests ?? 0) > 0 && <span>{plural(o.stats.openChangeRequests!, 'open change')}</span>}
-                      </span>
-                      <span className="text-xs text-subtle">Updated {relativeTime(o.updatedAt, now())}</span>
-                    </div>
-                  </Card>
-                </Link>
-              ))}
+                      <p className="mt-2 line-clamp-3 flex-1 text-sm text-muted">{o.description || 'No description yet.'}</p>
+                      <p className="mt-4 border-t border-line pt-3 text-sm text-muted">
+                        {/* Counts are withheld while the working draft is reviewed before publishing: show a dash, never "undefined". */}
+                        {count(o.stats.classes, 'class', 'classes')}, {count(o.stats.properties, 'property', 'properties')}, {count(o.stats.useCases, 'use case')} and{' '}
+                        {count(o.stats.members, 'member')}.
+                      </p>
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <span className="flex flex-wrap items-center gap-2 text-xs text-muted">
+                          <HealthChip o={o} />
+                          <span>Version {o.currentVersion}</span>
+                          {(o.stats.openChangeRequests ?? 0) > 0 && <span>{plural(o.stats.openChangeRequests!, 'open change')}</span>}
+                        </span>
+                        <span className="text-xs text-subtle">Updated {relativeTime(o.updatedAt, now())}</span>
+                      </div>
+                    </Card>
+                  </Link>
+                ))}
+              </div>
+              {ontologies.data.some((o) => o.sample) && (
+                <section aria-label="Sample standards">
+                  <Disclosure title="Sample standards" heading={2}>
+                    <p className="mb-3 text-sm text-muted">Try Concord with standards used by SolidOS. Each copy links to its original publisher and licence.</p>
+                    <ul className="divide-y divide-line">
+                      {ontologies.data.filter((o) => o.sample).map((o) => (
+                        <li key={o.id} className="py-3">
+                          <Link to={`/o/${o.id}`} className="font-semibold text-accent underline underline-offset-2">{o.title}</Link>
+                          <p className="mt-1 text-sm text-muted">{o.description}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </Disclosure>
+                </section>
+              )}
             </div>
           )}
         </div>

@@ -249,6 +249,8 @@ describe('versioning', () => {
     expect(mm.priorVersion).toBe('https://example.org/test/0.2.0');
     expect(mm.incompatibleWith).toEqual(['https://example.org/test/0.2.0']);
     expect(mm.backwardCompatibleWith).toEqual([]);
+    const hosted = stampRelease(g, { version: '1.0.0', versionIRI: 'https://concord.example/def/test/1.0.0', priorVersionIRI: 'https://concord.example/def/test/0.1.0', level: 'minor', date: '2026-07-01', backwardCompatible: true });
+    expect(hosted.metadata()).toMatchObject({ versionIRI: 'https://concord.example/def/test/1.0.0', priorVersion: 'https://concord.example/def/test/0.1.0', backwardCompatibleWith: ['https://concord.example/def/test/0.1.0'] });
     expect(g.view().metadata.versionInfo).toBe('0.1.0'); // input untouched
   });
 

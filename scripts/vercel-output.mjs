@@ -6,7 +6,7 @@
 // the function.
 
 // What the API answers (the same paths middleware.ts forwarded to the VM). Everything else is the web app.
-export const API_PATHS = '^/(api(/.*)?|auth/.*|mcp(/.*)?|people/.*|def(/.*|\\.(jsonld|ttl))?|healthz|\\.well-known/.*|authorize|token|register|revoke)$';
+export const API_PATHS = '^/(api(/.*)?|auth/.*|mcp(/.*)?|people/.*|def(/.*|\\.(jsonld|ttl))?|licences/.*|docs/licences/.*|healthz|\\.well-known/.*|authorize|token|register|revoke)$';
 
 export function outputConfig() {
   return {

@@ -21,3 +21,7 @@ Try it at [standards-concord.vercel.app](https://standards-concord.vercel.app). 
 - **Alpha testing built in.** `/alpha` walks testers through the platform in a role of their choice with a simulated working group around them, and `/feedback` is a voice-enabled feedback chat with guided and open pathways.
 
 See also [running it locally](development.md) and [connecting a coding agent](agents.md).
+
+## Solid ecosystem samples
+
+In demo mode, the home page groups ten sample standards used by SolidOS under a collapsed Sample standards section. Browse their original term IRIs, read the publisher, source, licence and conversion notice, or propose a governed change. Each has a public 1.0.0 release. Existing samples are never overwritten by seeding; reset-demo restores the set. See [sample vocabularies](sample-vocabularies.md) for all sources and conversion decisions.

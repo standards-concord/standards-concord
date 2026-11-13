@@ -29,6 +29,7 @@ import { crForViewer, crWithheld, withConsentLock } from './useCases.js';
 import { someAsync } from '../asyncList.js';
 import { syncUseCasesForCR } from './traceability.js';
 import { logActivity } from './users.js';
+import { projectVersionIRI, publishedVersionIRI } from './releaseIri.js';
 
 const LEVEL_ORDER: ChangeLevel[] = ['patch', 'minor', 'major'];
 const maxLevel = (levels: ChangeLevel[]) => levels.reduce<ChangeLevel>((m, l) => (LEVEL_ORDER.indexOf(l) > LEVEL_ORDER.indexOf(m) ? l : m), 'patch');
@@ -55,8 +56,6 @@ const create = async (r: Release) =>
     r.rev = 1;
     return await put('releases', r, r.ontologyId);
   });
-
-const versionIRI = (p: OntologyProject, version: string) => `${p.ontologyIRI.replace(/[#/]$/, '')}/${version}`;
 
 async function pendingChanges(ontologyId: string) {
   return (await list<ChangeRequest>('changeRequests', ontologyId))
@@ -167,7 +166,7 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
     status: 'draft',
     changeRequestIds: [],
     notes: '',
-    versionIRI: versionIRI(project, version),
+    versionIRI: projectVersionIRI(project, version),
     createdBy: actor?.id ?? 'system',
     createdAt: now,
     statusSince: now,
@@ -179,8 +178,9 @@ export async function draftRelease(project: OntologyProject, actor: User | undef
   const allCrs = (await Promise.all(all.map(async (id) => await mustGet<ChangeRequest>('changeRequests', id))));
   r.changeRequestIds = all;
   r.level = maxLevel(allCrs.map((c) => c.classification?.level ?? 'minor'));
-  r.version = bumpVersion(project.currentVersion, r.level);
-  r.versionIRI = versionIRI(project, r.version);
+  const revisedVersion = bumpVersion(project.currentVersion, r.level);
+  if (r.version !== revisedVersion) r.versionIRI = projectVersionIRI(project, revisedVersion);
+  r.version = revisedVersion;
   r.notes = notes ?? draftNotes(project, allCrs, r.level, r.version);
   // Notes a steward wrote are theirs to publish; drafted ones are rebuilt as the release is published.
   r.notesBy = notes !== undefined && actor ? actor.id : undefined;
@@ -275,7 +275,8 @@ async function publishNow(stale: Release, actor: User | undefined): Promise<Rele
   const priorVersion = project.currentVersion !== '0.0.0' ? project.currentVersion : undefined;
   const stamped = stampRelease(working, {
     version: r.version,
-    priorVersionIRI: priorVersion ? versionIRI(project, priorVersion) : undefined,
+    versionIRI: r.versionIRI,
+    priorVersionIRI: priorVersion ? await publishedVersionIRI(project, priorVersion) : undefined,
     level: r.level,
     date: clock.iso().slice(0, 10),
     backwardCompatible: r.level !== 'major',

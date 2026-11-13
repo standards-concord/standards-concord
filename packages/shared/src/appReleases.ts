@@ -53,6 +53,17 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.53.0',
+    date: '2026-11-13',
+    title: 'Ten sample standards from the Solid ecosystem',
+    changes: [{
+      id: 'solid-sample-standards', type: 'feat',
+      title: 'Ten sample standards from the Solid ecosystem',
+      detail: 'Open Sample standards on the home page to explore vocabularies used by SolidOS, including sharing permissions, forms, contacts, meetings and scheduling. Each sample names its original publisher and licence, links to its shapes in the Solid Shapes Catalogue, and lists what the conversion changed.',
+      roles: [], to: '/',
+    }],
+  },
+  {
     version: '0.52.1',
     date: '2026-11-13',
     title: 'Signing in straight after signing out',

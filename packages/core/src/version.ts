@@ -20,6 +20,8 @@ export function bumpVersion(version: string, level: ChangeLevel): string {
 
 export interface StampOptions {
   version: string;
+  /** Exact release IRI, when publication is hosted separately from the ontology namespace. */
+  versionIRI?: string;
   versionIRIBase?: string;
   priorVersionIRI?: string;
   level: ChangeLevel;
@@ -38,7 +40,7 @@ export function stampRelease(graph: OntologyGraph, opts: StampOptions): Ontology
   const iri = g.ontologyIRI;
   if (!iri) throw new Error('ontology has no owl:Ontology header');
   const base = opts.versionIRIBase ?? iri;
-  const versionIRI = /[#/]$/.test(base) ? `${base}${opts.version}` : `${base}/${opts.version}`;
+  const versionIRI = opts.versionIRI ?? (/[#/]$/.test(base) ? `${base}${opts.version}` : `${base}/${opts.version}`);
   const current = g.metadata().versionIRI;
   // A major release is never backward compatible, whatever the caller says.
   const compatible = opts.backwardCompatible && opts.level !== 'major';

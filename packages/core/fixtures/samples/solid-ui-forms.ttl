@@ -1,0 +1,716 @@
+# Concord sample copy for trying Concord: Forms and user interface
+# Source: http://www.w3.org/ns/ui
+# Publisher: W3C / Tim Berners-Lee
+# Licence: CC0 1.0 <https://creativecommons.org/publicdomain/zero/1.0/>
+# Upstream copy: upstream/ui.ttl (see upstream/SOURCES.md)
+# Changes: Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Kept form descriptions as annotations where they mix schema and data. Omitted embedded form collections that OWL cannot parse as axioms (the complete forms remain in the upstream copy). Replaced the named CSS colour facet restriction with a string datatype.
+
+@prefix dc: <http://purl.org/dc/elements/1.1/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix ui: <http://www.w3.org/ns/ui#> .
+@prefix vann: <http://purl.org/vocab/vann/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+#################################################################
+### Ontology
+#################################################################
+
+<http://www.w3.org/ns/ui> a owl:Ontology ;
+    dcterms:title "Forms and user interface"@en ;
+    dcterms:description "Fields, forms and display hints used to build interfaces for linked data."@en ;
+    rdfs:comment "Concord sample copy for trying Concord. Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Kept form descriptions as annotations where they mix schema and data. Omitted embedded form collections that OWL cannot parse as axioms (the complete forms remain in the upstream copy). Replaced the named CSS colour facet restriction with a string datatype."@en ;
+    dcterms:source <http://www.w3.org/ns/ui> ;
+    dc:author <https://www.w3.org/People/Berners-Lee/card#i> ;
+    dc:created "2010-08-07" ;
+    dc:description """The User Interface ontology allows the definition
+	of forms for processing RDF model data, and include a bootstrap form for
+	editing forms. It allows user interface hints such as background colors,
+	can be associated with objects and classes.
+	""" ;
+    dc:license <https://creativecommons.org/publicdomain/zero/1.0/> ;
+    dc:modified "2026-07-21" ;
+    dc:title "An ontology for User Interface description, Hints and Forms." ;
+    dcterms:license <https://creativecommons.org/publicdomain/zero/1.0/> ;
+    dcterms:rights "Original vocabulary published by W3C / Tim Berners-Lee." ;
+    vann:preferredNamespacePrefix "ui" ;
+    vann:preferredNamespaceUri ui: ;
+    prov:wasDerivedFrom <http://www.w3.org/ns/ui> .
+
+#################################################################
+### Classes
+#################################################################
+
+ui:BooleanField a owl:Class ;
+    rdfs:label "BooleanField"@en ;
+    rdfs:subClassOf ui:NumericField .
+
+ui:Choice a owl:Class ;
+    rdfs:label "Choice"@en ;
+    rdfs:subClassOf ui:Form , ui:Single .
+
+ui:Classifier a owl:Class ;
+    rdfs:label "classifier" ;
+    rdfs:comment """A classifier allows the user to select the type of an object.
+    The possible types must be subclasses of some overall class, the \"category\".
+    (Ideally, the superclass is also set up as the disjoint union of the subclasses,
+    if they are disjoint.)
+
+    The form normally stores the resulting classes using an r:type triple,
+    but a different predicate can be used if required, so the classifier field
+    needs is 'property' defined too.
+
+    If the subclass selected itself is has subclasses defined, the user can
+    recursively select from them in turn, as many levels as needed.""" ;
+    rdfs:subClassOf ui:Form , ui:Single .
+
+ui:ColorField a owl:Class ;
+    rdfs:label "ColorField"@en ;
+    rdfs:subClassOf ui:ValueField .
+
+ui:ColorScheme a owl:Class ;
+    rdfs:label "Color scheme"@en .
+
+ui:Command a owl:Class ;
+    rdfs:label "Command"@en ;
+    rdfs:comment "A plugin that loads by executing a command in the host script." .
+
+ui:Comment a owl:Class ;
+    rdfs:label "Comentario"@es , "Comment"@en ;
+    rdfs:subClassOf ui:Form , ui:Single ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:Component a owl:Class ;
+    rdfs:label "Component"@en ;
+    rdfs:comment "A plugin that loads by including a custom-element web component." .
+
+ui:DateField a owl:Class ;
+    rdfs:label "DateField"@en ;
+    rdfs:subClassOf ui:ValueField .
+
+ui:DateTimeField a owl:Class ;
+    rdfs:label "DateTimeField"@en ;
+    rdfs:subClassOf ui:ValueField .
+
+ui:DecimalField a owl:Class ;
+    rdfs:label "DecimalField"@en ;
+    rdfs:subClassOf ui:NumericField .
+
+ui:EditorKeys a owl:Class ;
+    rdfs:label "Editor keys"@en .
+
+ui:EmailField a owl:Class ;
+    rdfs:label "EmailField"@en ;
+    rdfs:subClassOf ui:ValueField .
+
+ui:FloatField a owl:Class ;
+    rdfs:label "FloatField"@en ;
+    rdfs:subClassOf ui:NumericField .
+
+ui:FontSize a owl:Class ;
+    rdfs:label "Font size"@en .
+
+ui:Form a owl:Class ;
+    rdfs:label "Form"@en ;
+    rdfs:comment """A form can be any type of single field, or typically a Group of several fields,
+    including interspersed headings and comments.  """ ;
+    owl:disjointUnionOf (
+            ui:ValueField
+            ui:Group
+            ui:Choice
+            ui:Classifier
+            ui:Options
+            ui:Multiple
+            ui:Heading
+            ui:Comment
+        ) ;
+    ui:creationForm ui:FormForm .
+
+ui:Group a owl:Class ;
+    rdfs:label "Group"@en ;
+    rdfs:subClassOf ui:Form , ui:Single .
+
+ui:Heading a owl:Class ;
+    rdfs:label "Heading"@en ;
+    rdfs:subClassOf ui:Form , ui:Single .
+
+ui:IntegerField a owl:Class ;
+    rdfs:label "IntegerField"@en ;
+    rdfs:subClassOf ui:NumericField .
+
+ui:Layout a owl:Class ;
+    rdfs:label "Layout"@en ;
+    rdfs:comment "A rectangular page/screen container whose contained elements render stacked or side by side as determined by its ui:orientation." .
+
+ui:Link a owl:Class ;
+    rdfs:label "Link"@en ;
+    rdfs:comment "A plugin that loads by including an external IRI e.g. in an iframe or via transclusion." .
+
+ui:Menu a owl:Class ;
+    rdfs:label "Menu"@en ;
+    rdfs:comment "A collection of named actions which may be displayed as a visual menu or set of tabs or other UI." .
+
+ui:MultiLineTextField a owl:Class ;
+    rdfs:label "MultiLineTextField"@en ;
+    rdfs:subClassOf ui:TextField .
+
+ui:Multiple a owl:Class ;
+    rdfs:label "Multiple"@en ;
+    rdfs:subClassOf ui:Form .
+
+ui:NamedNodeURIField a owl:Class ;
+    rdfs:label "Something by its URI" ;
+    rdfs:comment """A NamedNodeURIField is like a SingleLineTextField, except
+		that the value it generates is not a literal string but an RDF node with the given URI.
+		Normally users should not see URIs. When they do, this a way to do it.
+		""" ;
+    rdfs:subClassOf ui:TextField .
+
+ui:NumericField a owl:Class ;
+    rdfs:label "NumericField"@en ;
+    rdfs:subClassOf ui:ValueField ;
+    owl:disjointUnionOf (
+            ui:BooleanField
+            ui:TriStateField
+            ui:IntegerField
+            ui:DecimalField
+            ui:FloatField
+        ) .
+
+ui:Options a owl:Class ;
+    rdfs:label "Options"@en ;
+    rdfs:subClassOf ui:Form , ui:Single .
+
+ui:Orientation a owl:Class ;
+    rdfs:label "Orientation"@en .
+
+ui:PhoneField a owl:Class ;
+    rdfs:label "PhoneField"@en ;
+    rdfs:subClassOf ui:ValueField .
+
+ui:Plugin a owl:Class ;
+    rdfs:label "Plugin"@en ;
+    rdfs:comment "A plugin is a widget or app that can be called from a host app either by importing an external URL, by running an internal command, or by adding a custom element (web component) to the DOM." .
+
+ui:Region a owl:Class ;
+    rdfs:label "Region"@en .
+
+ui:Single a owl:Class ;
+    rdfs:label "Single"@en ;
+    owl:disjointUnionOf (
+            ui:ValueField
+            ui:Group
+            ui:Choice
+            ui:Classifier
+            ui:Options
+            ui:Heading
+            ui:Comment
+        ) .
+
+ui:SingleLineTextField a owl:Class ;
+    rdfs:label "SingleLineTextField"@en ;
+    rdfs:subClassOf ui:TextField .
+
+ui:TemperatureUnit a owl:Class ;
+    rdfs:label "Temperature unit"@en .
+
+ui:TextField a owl:Class ;
+    rdfs:label "TextField"@en ;
+    rdfs:subClassOf ui:ValueField ;
+    owl:disjointUnionOf ( ui:SingleLineTextField ui:MultiLineTextField ui:NamedNodeURIField ) .
+
+ui:TriStateField a owl:Class ;
+    rdfs:label "TriStateField"@en ;
+    rdfs:subClassOf ui:NumericField .
+
+ui:ValueField a owl:Class ;
+    rdfs:label "ValueField"@en ;
+    rdfs:subClassOf ui:Form , ui:Single ;
+    owl:disjointUnionOf (
+            ui:TextField
+            ui:NumericField
+            ui:ColorField
+            ui:DateField
+            ui:DateTimeField
+            ui:PhoneField
+            ui:EmailField
+        ) .
+
+#################################################################
+### Object properties
+#################################################################
+
+ui:canMintNew a owl:ObjectProperty ;
+    rdfs:label "canMintNew"@en .
+
+ui:colorScheme a owl:ObjectProperty ;
+    rdfs:label "color scheme"@en ;
+    rdfs:comment "Preferred page color scheme; the value is a ui:ColorScheme instance, e.g. ui:DarkColorScheme." ;
+    rdfs:range ui:ColorScheme .
+
+ui:default a owl:ObjectProperty ;
+    rdfs:label "default"@en .
+
+ui:editorKeys a owl:ObjectProperty ;
+    rdfs:label "editor keys"@en ;
+    rdfs:comment "Preferred editor keybindings; the value is a ui:EditorKeys instance, e.g. ui:VimKeys." ;
+    rdfs:range ui:EditorKeys .
+
+ui:fontSize a owl:ObjectProperty ;
+    rdfs:label "font size"@en ;
+    rdfs:comment "Preferred page font size; the value is a ui:FontSize instance, e.g. ui:SmallFont." ;
+    rdfs:range ui:FontSize .
+
+ui:layout a owl:ObjectProperty ;
+    rdfs:label "layout"@en ;
+    rdfs:comment "Links a thing (e.g. a schema:WebApplication) to its root ui:Layout." ;
+    rdfs:range ui:Layout .
+
+ui:optional a owl:ObjectProperty ;
+    rdfs:label "optional"@en .
+
+ui:orientation a owl:ObjectProperty ;
+    rdfs:label "orientation"@en ;
+    rdfs:comment "The orientation of the menu; a ui:Orientation instance e.g. ui:Horizontal." ;
+    rdfs:range ui:Orientation .
+
+ui:region a owl:ObjectProperty ;
+    rdfs:label "region"@en ;
+    rdfs:comment "The default target for menu items; a ui:Region instance e.g. ui:Modal." ;
+    rdfs:range ui:Region .
+
+ui:temperatureUnit a owl:ObjectProperty ;
+    rdfs:label "temperature unit"@en ;
+    rdfs:comment "Display unit(s) for temperature, each a ui:TemperatureUnit instance, e.g. ui:Celsius" ;
+    rdfs:range ui:TemperatureUnit .
+
+ui:use a owl:ObjectProperty ;
+    rdfs:label "use"@en ;
+    rdfs:range ui:Form .
+
+#################################################################
+### Datatype properties
+#################################################################
+
+ui:backgroundColor a owl:DatatypeProperty ;
+    rdfs:label "background color"@en ;
+    rdfs:range rdfs:Literal .
+
+ui:backgroundImage a owl:DatatypeProperty ;
+    rdfs:label "background image"@en ;
+    rdfs:comment "URI or base64 representation of an image" .
+
+ui:color a owl:DatatypeProperty ;
+    rdfs:label "color"@en ;
+    rdfs:range rdfs:Literal .
+
+ui:columns a owl:DatatypeProperty ;
+    rdfs:label "columns"@en ;
+    rdfs:comment "On a ui:Layout: render the parts as a grid with this many columns." ;
+    rdfs:range xsd:integer .
+
+ui:ignorePattern a owl:DatatypeProperty ;
+    rdfs:label "ignore pattern"@en ;
+    rdfs:comment "A filename/path glob pattern hidden from listings (e.g. \"*~\", \".*\"); repeatable." ;
+    rdfs:range xsd:string .
+
+ui:maxLength a owl:DatatypeProperty ;
+    rdfs:label "Longitud máxima"@es , "max length of value" , "Max length"@en ;
+    rdfs:domain ui:TextField ;
+    rdfs:range xsd:integer ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:privatePort a owl:DatatypeProperty ;
+    rdfs:label "private port"@en ;
+    rdfs:comment "TCP port the private server, behind the router, listens on." ;
+    rdfs:range xsd:integer .
+
+ui:proxy a owl:DatatypeProperty ;
+    rdfs:label "proxy"@en ;
+    rdfs:comment "URL prefix that wraps a target URL for CORS proxying; the target is URI-encoded onto the end." ;
+    rdfs:range xsd:string .
+
+ui:proxyPort a owl:DatatypeProperty ;
+    rdfs:label "proxy port"@en ;
+    rdfs:comment "TCP port the CORS proxy listens on." ;
+    rdfs:range xsd:integer .
+
+ui:publicPort a owl:DatatypeProperty ;
+    rdfs:label "public port"@en ;
+    rdfs:comment "TCP port the public routing server (the origin clients talk to) listens on." ;
+    rdfs:range xsd:integer .
+
+ui:seqeunce a owl:DatatypeProperty ;
+    rdfs:label "sequence number" ;
+    rdfs:comment "The sequence in which this item is arranged with repect to other parts." ;
+    rdfs:range xsd:integer .
+
+ui:size a owl:DatatypeProperty ;
+    rdfs:label "size of field" ;
+    rdfs:domain ui:ValueField ;
+    rdfs:range xsd:integer ;
+    ui:prompt "size of field in characters" .
+
+ui:sortPriority a owl:DatatypeProperty ;
+    rdfs:label "sort priority" ;
+    rdfs:comment """When individuals or classes must be sorted, then
+        if they are given different values of sortPriority a user agent can
+        use this as a hint to how to present information.""" ;
+    rdfs:range xsd:integer .
+
+ui:style a owl:DatatypeProperty ;
+    rdfs:label "style" ;
+    rdfs:comment """Must be a valid CSS style string such as one could put in
+        an HTML style attribute.  Depending on the user interface system, this can
+        by given to individuals, classes or properties. It is up to a user interface
+        which wants to draw on them to pick how it uses styles from which parts
+        of the data it has.  For example, the style of a class may be picked
+        to distinguish information about things in that class.""" ;
+    ui:prompt "CSS style" .
+
+ui:windowX a owl:DatatypeProperty ;
+    rdfs:label "window x"@en ;
+    rdfs:comment "The x (horizontal) screen coordinate, in pixels, of an element or window's top-left corner." ;
+    rdfs:range xsd:integer .
+
+ui:windowY a owl:DatatypeProperty ;
+    rdfs:label "window y"@en ;
+    rdfs:comment "The y (vertical) screen coordinate, in pixels, of  an element or window's top-left corner." ;
+    rdfs:range xsd:integer .
+
+#################################################################
+### Annotation properties
+#################################################################
+
+dc:author a owl:AnnotationProperty .
+
+dc:created a owl:AnnotationProperty .
+
+dc:description a owl:AnnotationProperty .
+
+dc:license a owl:AnnotationProperty .
+
+dc:modified a owl:AnnotationProperty .
+
+dc:title a owl:AnnotationProperty .
+
+dcterms:description a owl:AnnotationProperty .
+
+dcterms:license a owl:AnnotationProperty .
+
+dcterms:rights a owl:AnnotationProperty .
+
+dcterms:source a owl:AnnotationProperty .
+
+dcterms:title a owl:AnnotationProperty .
+
+vann:preferredNamespacePrefix a owl:AnnotationProperty .
+
+vann:preferredNamespaceUri a owl:AnnotationProperty .
+
+rdfs:comment a owl:AnnotationProperty .
+
+rdfs:isDefinedBy a owl:AnnotationProperty .
+
+rdfs:label a owl:AnnotationProperty .
+
+rdfs:seeAlso a owl:AnnotationProperty .
+
+prov:wasDerivedFrom a owl:AnnotationProperty .
+
+ui:TimeField a owl:AnnotationProperty ;
+    rdfs:label "Campo de tiempo"@es , "Time field"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:annotationForm a owl:AnnotationProperty ;
+    rdfs:label "annotation form" ;
+    rdfs:comment """A form which may be used to add more infromation to an
+instance of this class which we know something about.  Anything from
+adding just add one more fact, to adding a whole lot of information about a specific
+facet of the thing.
+""" .
+
+ui:base a owl:AnnotationProperty ;
+    rdfs:label "Base"@en , "Base"@es ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:case a owl:AnnotationProperty .
+
+ui:category a owl:AnnotationProperty ;
+    rdfs:label "overall superclass"@en ;
+    rdfs:comment "The superclass subclasses of which will be selected." .
+
+ui:contents a owl:AnnotationProperty ;
+    rdfs:label "Contenido"@es , "Contents"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:creationForm a owl:AnnotationProperty ;
+    rdfs:label "creation form" ;
+    rdfs:comment """A form which may be used to collect information about a
+    hitherto locally undocumented instance instance of this class.""" .
+
+ui:defaultError a owl:AnnotationProperty ;
+    rdfs:label "Default error"@en , "Error predeterminado"@es ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:dependingOn a owl:AnnotationProperty ;
+    rdfs:label "depending on"@en ;
+    rdfs:comment "Many fields prompt for information about a given property of the subject" .
+
+ui:e a owl:AnnotationProperty .
+
+ui:for a owl:AnnotationProperty ;
+    rdfs:label "for"@en ;
+    rdfs:comment "The value for which this case is selected." .
+
+ui:from a owl:AnnotationProperty ;
+    rdfs:label "from" ;
+    ui:prompt "from what class" .
+
+ui:icon a owl:AnnotationProperty ;
+    rdfs:label "icon"@en ;
+    rdfs:comment "Optional icon URL or emoji/text-string shown for a menu item." .
+
+ui:initialProperties a owl:AnnotationProperty ;
+    rdfs:label "initial properties" ;
+    rdfs:comment """A really simple way of enabling user interfaces to
+            create new information about a class of things is to make a define of properties
+            to be specified when a information about a new item
+            (\"New item\" here means an item which the system
+            does not have prvious information about yet,
+            not an items which has just been created,
+            like new friend as opposed to new baby)""" ;
+    ui:prompt "Properties to be specified for new ones" .
+
+ui:label a owl:AnnotationProperty ;
+    rdfs:label "Etiqueta"@es , "Label"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:max a owl:AnnotationProperty .
+
+ui:maxDateOffset a owl:AnnotationProperty ;
+    rdfs:label "Fecha máxima de desplazamiento"@es , "Maximum date offset"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:maxDatetimeOffset a owl:AnnotationProperty ;
+    rdfs:label "Desplazamiento máximo de fecha y hora"@es ,
+        "Maximum datetime offset"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:maxValue a owl:AnnotationProperty ;
+    rdfs:label "max" .
+
+ui:min a owl:AnnotationProperty .
+
+ui:minDateOffset a owl:AnnotationProperty ;
+    rdfs:label "Fecha mínima compensada"@es , "Minimum date offset"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:minDatetimeOffset a owl:AnnotationProperty ;
+    rdfs:label "Desplazamiento mínimo de fecha y hora"@es ,
+        "Minimum datetime offset"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:minLength a owl:AnnotationProperty ;
+    rdfs:label "Longitud mínima"@es , "Min length"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:minValue a owl:AnnotationProperty ;
+    rdfs:label "min" .
+
+ui:name a owl:AnnotationProperty ;
+    rdfs:label "Name"@en , "Nombre"@es ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:oldValue a owl:AnnotationProperty ;
+    rdfs:label "Old value"@en , "Valor antiguo"@es ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:ordered a owl:AnnotationProperty ;
+    rdfs:label "ordered" ;
+    ui:e rdf:Property .
+
+ui:parentProperty a owl:AnnotationProperty ;
+    rdfs:label "Parent property"@en , "Propiedad principal"@es ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:part a owl:AnnotationProperty ;
+    rdfs:label "part"@en .
+
+ui:parts a owl:AnnotationProperty ;
+    rdfs:label "parts"@en .
+
+ui:partsClone a owl:AnnotationProperty ;
+    rdfs:label "Clon de piezas"@es , "Parts clone"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:pattern a owl:AnnotationProperty ;
+    rdfs:label "Modelo"@es , "Pattern"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:prompt a owl:AnnotationProperty ;
+    rdfs:label "user prompt" ;
+    rdfs:comment """A string for the UI to use if the user needs a longer
+        prompts than just a field name, the s:label. """ ;
+    ui:prompt "A longer prompt for a user inputting this property" .
+
+ui:property a owl:AnnotationProperty ;
+    rdfs:label "property to be stored"@en ;
+    rdfs:comment """Many fields prompt for information about a given property of the subject.
+    When field is filled in, this gives which property is written into the data.""" .
+
+ui:reference a owl:AnnotationProperty ;
+    rdfs:label "Reference"@en , "Referencia"@es ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:required a owl:AnnotationProperty ;
+    rdfs:label "Requerido"@es , "Required"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:requiredError a owl:AnnotationProperty ;
+    rdfs:label "Error requerido"@es , "Required error"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:sequence a owl:AnnotationProperty .
+
+ui:sortBy a owl:AnnotationProperty ;
+    rdfs:label "sort by" ;
+    rdfs:comment """A property which typically is used to sort
+        members of a given class.""" .
+
+ui:tableProperties a owl:AnnotationProperty ;
+    rdfs:label "table properties" ;
+    rdfs:comment """This  is a crude way of specifying a table-based
+            view for objects of this class.""" ;
+    ui:prompt "Properties to be given in a default table view" .
+
+ui:valid a owl:AnnotationProperty ;
+    rdfs:label "Valid"@en , "Válida"@es ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:validationError a owl:AnnotationProperty ;
+    rdfs:label "Error de validacion"@es , "Validation error"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:value a owl:AnnotationProperty ;
+    rdfs:label "Valor"@es , "Value"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+ui:values a owl:AnnotationProperty ;
+    rdfs:label "Valores"@es , "Values"@en ;
+    rdfs:isDefinedBy <http://www.w3.org/ns/ui> .
+
+#################################################################
+### Datatypes
+#################################################################
+
+ui:Color a rdfs:Datatype ;
+    rdfs:label "hex color"@en ;
+    rdfs:comment """Must be a valid CSS color string such as one could put in
+			an HTML style attribute.  This must be in the #xxxxxx form,
+			(with 6 digits of lowercase hex) so that it
+			can work eg with Graphviz.
+			As this is just an encoded array of RGB values,
+			you can do math with these, such as blending, complement, etc.""" ;
+    owl:equivalentClass xsd:string .
+
+#################################################################
+### Individuals
+#################################################################
+
+ui:CaseForm a ui:Group ;
+    dc:title "Form for a conditional case in a form" .
+
+ui:Celsius a ui:TemperatureUnit ;
+    rdfs:label "Celsius"@en .
+
+ui:ColorValuespaceRestriction a owl:NamedIndividual .
+
+ui:DarkColorScheme a ui:ColorScheme ;
+    rdfs:label "Dark"@en .
+
+ui:DefaultKeys a ui:EditorKeys ;
+    rdfs:label "Default"@en .
+
+ui:Dropdown a ui:Region ;
+    rdfs:label "Dropdown"@en .
+
+ui:Element a ui:Region ;
+    rdfs:label "Element"@en .
+
+ui:EmacsKeys a ui:EditorKeys ;
+    rdfs:label "Emacs"@en .
+
+ui:FF1 a ui:Heading ;
+    ui:contents "Edit Form"@en ;
+    ui:sequence 1 .
+
+ui:FF2 a ui:SingleLineTextField ;
+    ui:property dc:title ;
+    ui:sequence 2 ;
+    ui:size 60 .
+
+ui:FF3 a ui:Comment ;
+    ui:contents """To add a field to the form, press the plus at the bottom,
+        and then select what sort of field you want."""@en ;
+    ui:sequence 3 ;
+    ui:style "background-color: #ffe;" .
+
+ui:Fahrenheit a ui:TemperatureUnit ;
+    rdfs:label "Fahrenheit"@en .
+
+ui:FieldForm a ui:Group ;
+    dc:title "Form for selecting a type of field" .
+
+ui:FieldList a ui:Multiple ;
+    ui:ordered ui:true ;
+    ui:part ui:FieldForm ;
+    ui:property ui:parts ;
+    ui:sequence 10 .
+
+ui:Floating a ui:Region ;
+    rdfs:label "Floating"@en .
+
+ui:FormForm a ui:Form , ui:Group ;
+    dc:title "Form for editing Forms" .
+
+ui:Horizontal a ui:Orientation ;
+    rdfs:label "Horizontal"@en .
+
+ui:Inline a ui:Region ;
+    rdfs:label "Inline"@en .
+
+ui:LargeFont a ui:FontSize ;
+    rdfs:label "Large"@en .
+
+ui:LightColorScheme a ui:ColorScheme ;
+    rdfs:label "Light"@en .
+
+ui:MediumFont a ui:FontSize ;
+    rdfs:label "Medium"@en .
+
+ui:Modal a ui:Region ;
+    rdfs:label "Modal"@en .
+
+ui:SmallFont a ui:FontSize ;
+    rdfs:label "Small"@en .
+
+ui:SystemColorScheme a ui:ColorScheme ;
+    rdfs:label "System"@en .
+
+ui:Tab a ui:Region ;
+    rdfs:label "Tab"@en .
+
+ui:Vertical a ui:Orientation ;
+    rdfs:label "Vertical"@en .
+
+ui:VimKeys a ui:EditorKeys ;
+    rdfs:label "Vim"@en .
+
+ui:Window a ui:Region ;
+    rdfs:label "Window"@en .
+
+ui:true a owl:NamedIndividual .

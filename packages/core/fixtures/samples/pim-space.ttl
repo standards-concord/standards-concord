@@ -1,0 +1,240 @@
+# Concord sample copy for trying Concord: Workspace
+# Source: http://www.w3.org/ns/pim/space
+# Publisher: W3C
+# Licence: W3C Software and Document License (2015) <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>
+# Upstream copy: upstream/space.ttl (see upstream/SOURCES.md)
+# Changes: Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Declared classes previously described only through their superclass.
+# This document includes material copied from or derived from Workspace Ontology (http://www.w3.org/ns/pim/space). Copyright (c) W3C® (MIT, ERCIM, Keio, Beihang).
+#
+# Full licence: /licences/W3C-20150513; repository copy: /docs/licences/W3C-20150513.md
+#
+# # W3C Software and Document Notice and License (2015-05-13)
+#
+# Source: <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>. Text as recorded by SPDX (identifier `W3C-20150513`, spdx-license-list 6.12.0).
+#
+# This work is being provided by the copyright holders under the following license.
+#
+# License
+# By obtaining and/or copying this work, you (the licensee) agree that you have read, understood, and will comply with the following terms and conditions.
+#
+# Permission to copy, modify, and distribute this work, with or without modification, for any purpose and without fee or royalty is hereby granted, provided that you include the following on ALL copies of the work or portions thereof, including modifications:
+#
+# - The full text of this NOTICE in a location viewable to users of the redistributed or derivative work.
+# - Any pre-existing intellectual property disclaimers, notices, or terms and conditions. If none exist, the W3C Software and Document Short Notice should be included.
+# - Notice of any changes or modifications, through a copyright statement on the new code or document such as "This software or document includes material copied from or derived from [title and URI of the W3C document]. Copyright (c) [YEAR] W3C® (MIT, ERCIM, Keio, Beihang)."
+#
+# Disclaimers
+# THIS WORK IS PROVIDED "AS IS," AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+#
+# COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+#
+# The name and trademarks of copyright holders may NOT be used in advertising or publicity pertaining to the work without specific, written prior permission. Title to copyright in this work will at all times remain with copyright holders.
+#
+
+@prefix dc: <http://purl.org/dc/elements/1.1/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix space: <http://www.w3.org/ns/pim/space#> .
+@prefix vann: <http://purl.org/vocab/vann/> .
+
+#################################################################
+### Ontology
+#################################################################
+
+<http://www.w3.org/ns/pim/space> a owl:Ontology ;
+    dcterms:title "Workspace"@en ;
+    dcterms:description "Personal, shared and public places for keeping data and preferences."@en ;
+    rdfs:comment "Concord sample copy for trying Concord. Added an ontology header, explicit OWL declarations and declarations for referenced terms. Kept term IRIs, namespaces, labels and comments. Unconstrained or mixed-use properties are annotations; class and property metadata has no metamodel domain or range. Removed reserved RDF/RDFS metamodel constraints. Unsupported datatype ranges are widened to rdfs:Literal; annotation dates keep their lexical values as strings. Declared classes previously described only through their superclass."@en ,
+        """This ontology is for use in describing
+Workspaces.  Workspaces are places where data is stored and associated policies of privacy.
+A given application typically stores information in several different
+workspaces, some being user private, some shared, and some public.
+it is crucial that the user has easy control over the destiny of information.
+
+Goals then are that the user can
+
+      - create workspaces
+      - easily understand which workspace data is going into
+      - understand what the implications of that are
+      - (later) set ACLS on them
+      - publish apropriate use policies for them
+
+""" ;
+    dcterms:source <http://www.w3.org/ns/pim/space> ;
+    dc:title "Workspace Ontology" ;
+    dcterms:license <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document> ;
+    dcterms:rights """# W3C Software and Document Notice and License (2015-05-13)
+
+Source: <https://www.w3.org/Consortium/Legal/2015/copyright-software-and-document>. Text as recorded by SPDX (identifier `W3C-20150513`, spdx-license-list 6.12.0).
+
+This work is being provided by the copyright holders under the following license.
+
+License
+By obtaining and/or copying this work, you (the licensee) agree that you have read, understood, and will comply with the following terms and conditions.
+
+Permission to copy, modify, and distribute this work, with or without modification, for any purpose and without fee or royalty is hereby granted, provided that you include the following on ALL copies of the work or portions thereof, including modifications:
+
+- The full text of this NOTICE in a location viewable to users of the redistributed or derivative work.
+- Any pre-existing intellectual property disclaimers, notices, or terms and conditions. If none exist, the W3C Software and Document Short Notice should be included.
+- Notice of any changes or modifications, through a copyright statement on the new code or document such as \"This software or document includes material copied from or derived from [title and URI of the W3C document]. Copyright (c) [YEAR] W3C® (MIT, ERCIM, Keio, Beihang).\"
+
+Disclaimers
+THIS WORK IS PROVIDED \"AS IS,\" AND COPYRIGHT HOLDERS MAKE NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO, WARRANTIES OF MERCHANTABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE OF THE SOFTWARE OR DOCUMENT WILL NOT INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS.
+
+COPYRIGHT HOLDERS WILL NOT BE LIABLE FOR ANY DIRECT, INDIRECT, SPECIAL OR CONSEQUENTIAL DAMAGES ARISING OUT OF ANY USE OF THE SOFTWARE OR DOCUMENT.
+
+The name and trademarks of copyright holders may NOT be used in advertising or publicity pertaining to the work without specific, written prior permission. Title to copyright in this work will at all times remain with copyright holders.
+""" ,
+        "Full licence notice: /licences/W3C-20150513. Bundled copy: /docs/licences/W3C-20150513.md." ,
+        "Original vocabulary published by W3C." ,
+        "This document includes material copied from or derived from Workspace Ontology (http://www.w3.org/ns/pim/space). Copyright (c) W3C® (MIT, ERCIM, Keio, Beihang)." ;
+    vann:preferredNamespacePrefix "space" ;
+    vann:preferredNamespaceUri space: ;
+    <http://www.w3.org/2000/10/swap/pim/doc#version> "2021-10-01 18:47:19" ;
+    prov:wasDerivedFrom <http://www.w3.org/ns/pim/space> .
+
+#################################################################
+### Classes
+#################################################################
+
+<http://www.w3.org/2006/gen/ont#InformationResource> a owl:Class .
+
+space:ConfigurationFile a owl:Class ;
+    rdfs:label "ConfigurationFile"@en ;
+    rdfs:subClassOf <http://www.w3.org/2006/gen/ont#InformationResource> .
+
+space:ControlledStorage a owl:Class ;
+    rdfs:label "access controlled storage" ;
+    rdfs:comment """A  storage is a space of URIs in which you can individually control for each resource
+    who has access to it.
+""" ;
+    rdfs:subClassOf space:Storage .
+
+space:MasterWorkspace a owl:Class ;
+    rdfs:label "Master Workspace"@en ;
+    rdfs:comment """This is a workspace for storing the
+    information about the other workspaces.
+    As a user, you normally don't have to worry about it.""" ;
+    rdfs:subClassOf space:PrivateWorkspace .
+
+space:PersonalStorage a owl:Class ;
+    rdfs:label "personal storage" ;
+    rdfs:comment """A personal storage is a space of URIs in which you and only you have access to data,
+    you cannot give access to anyone else.
+""" ;
+    rdfs:subClassOf space:Storage .
+
+space:PreferencesWorkspace a owl:Class ;
+    rdfs:label "Preferences workspace" ;
+    rdfs:comment "Aceess may not be open to the public. Contains preferences resources." ;
+    rdfs:subClassOf space:Workspace .
+
+space:PrivateWorkspace a owl:Class ;
+    rdfs:label "Private workspace" ;
+    rdfs:comment "Access only by the you, the user." ;
+    rdfs:subClassOf space:Workspace .
+
+space:PublicStorage a owl:Class ;
+    rdfs:label "public storage" ;
+    rdfs:comment """A public storage is a space of URIs in which you have access to data,
+    and all data is accessible to anyone without control.
+""" ;
+    rdfs:subClassOf space:Storage .
+
+space:PublicWorkspace a owl:Class ;
+    rdfs:label "Public workspace" ;
+    rdfs:comment """Aceess is open to the public. Anything in a public workspace
+    can be accesed by anyone.""" ;
+    rdfs:subClassOf space:Workspace .
+
+space:SharedWorkspace a owl:Class ;
+    rdfs:label "Shared workspace" ;
+    rdfs:comment "Access is to some but not all people." ;
+    rdfs:subClassOf space:Workspace .
+
+space:Storage a owl:Class ;
+    rdfs:label "storage" ;
+    rdfs:comment """A storage is a space of URIs in which you have access to data.
+""" .
+
+space:Workspace a owl:Class ;
+    rdfs:label "workspace" ;
+    rdfs:comment """Workspaces are place where data is stored, and associated polices of privacy.
+A given application typically stores information in several different
+workspaces, some being user private, some shared, and some public.
+""" ;
+    owl:disjointUnionOf ( space:PrivateWorkspace space:SharedWorkspace space:PublicWorkspace ) .
+
+foaf:Agent a owl:Class .
+
+#################################################################
+### Object properties
+#################################################################
+
+space:masterWorkspace a owl:ObjectProperty ;
+    rdfs:label "master workspace"@en ;
+    rdfs:domain foaf:Agent ;
+    rdfs:range space:MasterWorkspace .
+
+space:preferencesFile a owl:ObjectProperty ;
+    rdfs:label "preferences file" ;
+    rdfs:domain foaf:Agent ;
+    rdfs:range space:ConfigurationFile .
+
+space:storage a owl:ObjectProperty ;
+    rdfs:label "storage" ;
+    rdfs:comment """The storage in which this workspace is, or the storage which
+contains this resource, or a storage available to this agent to use.""" ;
+    rdfs:range space:Storage .
+
+space:workspace a owl:ObjectProperty ;
+    rdfs:label "workspace"@en ;
+    rdfs:range space:Workspace .
+
+#################################################################
+### Datatype properties
+#################################################################
+
+space:uriPrefix a owl:DatatypeProperty ;
+    rdfs:label "URI prefix" ;
+    rdfs:comment """URIs which start with this string are in this workspace or storage.
+This may be used for constructing URIs for new storage resources.
+""" ;
+    <http://www.w3.org/ns/ui#prompt> "Give the first part of the URis in this workspace" .
+
+#################################################################
+### Annotation properties
+#################################################################
+
+dc:title a owl:AnnotationProperty .
+
+dcterms:description a owl:AnnotationProperty .
+
+dcterms:license a owl:AnnotationProperty .
+
+dcterms:rights a owl:AnnotationProperty .
+
+dcterms:source a owl:AnnotationProperty .
+
+dcterms:title a owl:AnnotationProperty .
+
+vann:preferredNamespacePrefix a owl:AnnotationProperty .
+
+vann:preferredNamespaceUri a owl:AnnotationProperty .
+
+rdfs:comment a owl:AnnotationProperty .
+
+rdfs:isDefinedBy a owl:AnnotationProperty .
+
+rdfs:label a owl:AnnotationProperty .
+
+rdfs:seeAlso a owl:AnnotationProperty .
+
+<http://www.w3.org/2000/10/swap/pim/doc#version> a owl:AnnotationProperty .
+
+prov:wasDerivedFrom a owl:AnnotationProperty .
+
+<http://www.w3.org/ns/ui#prompt> a owl:AnnotationProperty .

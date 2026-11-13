@@ -70,6 +70,7 @@ export default defineConfig({
       // Public ontology pages and fork documents; the regex keeps app routes such as /definitions out, and
       // allows a query string (Vite matches the whole URL).
       '^/def(?:/|$|\\?|\\.(?:jsonld|ttl)(?:$|\\?))': { target, changeOrigin: false },
+      '^/(licences/|docs/licences/)': { target, changeOrigin: false },
     },
   },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },

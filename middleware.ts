@@ -24,6 +24,8 @@ export const config = {
     '/def/:path*',
     '/def.jsonld',
     '/def.ttl',
+    '/licences/:path*',
+    '/docs/licences/:path*',
     '/healthz',
     // OAuth for MCP clients (discovery, client registration, sign-in, tokens).
     '/.well-known/:path*',

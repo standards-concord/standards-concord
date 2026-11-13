@@ -15,6 +15,7 @@ import { LevelBadge, RoleChips, RoleRingLegend, StatusPill } from '../../compone
 import { Disclosure } from '../../components/Disclosure';
 import { ValidationDetails } from '../../components/Validation';
 import { ImportsSection } from '../../components/Imports';
+import { SampleNotice } from '../../components/SampleNotice';
 import { EditOntologyDetailsDialog } from '../../components/OntologyDetails';
 import { Avatar, Button, ErrorCard, Loading } from '../../components/ui';
 import { useOntology } from './Layout';
@@ -78,6 +79,7 @@ export function OverviewTab() {
   return (
     <div className="grid gap-x-12 gap-y-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="min-w-0 space-y-10">
+        {o.sample && <SampleNotice sample={o.sample} />}
         {typeof loc.state?.notice === 'string' && <p role="status" className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm">{loc.state.notice}</p>}
         {firstSteps && !hiddenSteps && (
           <section aria-labelledby="first-steps-title">
