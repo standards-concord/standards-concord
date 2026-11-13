@@ -732,16 +732,19 @@ interface EditsPatch {
   title?: string;
   description?: string;
   ops?: ChangeOp[];
+  /** The edits the caller loaded; optional for existing API clients. */
+  basis?: string;
 }
 
 /** Identifies the edits a revision started from, to tell whether someone changed them meanwhile. */
 const editsBasis = (cr: ChangeRequest) => `${cr.opsUpdatedAt ?? cr.createdAt} ${JSON.stringify(cr.ops)}`;
 
 export async function updateOps(cr: ChangeRequest, actor: User, patch: EditsPatch) {
-  const { title, description, ops } = patch;
+  const { title, description, ops, basis } = patch;
+  if (basis !== undefined && typeof basis !== 'string') throw new HttpError(400, 'basis must be a string');
   checkEditCount(ops);
   await canEdit(cr, actor);
-  return withTriageBudget(actor, () => updateOpsNow(cr, actor, { title, description, ops }));
+  return withTriageBudget(actor, () => updateOpsNow(cr, actor, { title, description, ops, basis }));
 }
 
 async function canEdit(cr: ChangeRequest, actor: User) {
@@ -752,7 +755,7 @@ async function canEdit(cr: ChangeRequest, actor: User) {
 async function updateOpsNow(
   cr: ChangeRequest,
   actor: User,
-  patch: EditsPatch & { basis?: string; tests?: ChangeRequest['tests']; warnings?: string[]; note?: string },
+  patch: EditsPatch & { tests?: ChangeRequest['tests']; warnings?: string[]; note?: string },
 ) {
   // Every path that replaces the edits (an AI revision included) comes through here.
   checkEditCount(patch.ops);

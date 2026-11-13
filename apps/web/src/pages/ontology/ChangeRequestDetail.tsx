@@ -2,7 +2,7 @@ import { useMemo, useState, type KeyboardEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { canCastVote, type ChangeOp, type ChangeRequestDetail } from '@concord/shared';
 import { ArrowLeft, Check, CircleSlash, ClipboardList, GitMerge, Lightbulb, MessageSquare, Send, ShieldCheck, ThumbsDown, ThumbsUp, TriangleAlert, Undo2, X, Minus, History, Scale, PenLine, ScanSearch, FileDiff } from 'lucide-react';
-import { api, type ReviewDecision, type VoteChoice } from '../../api';
+import { api, ApiError, type ReviewDecision, type VoteChoice } from '../../api';
 import { useAction, useAsync } from '../../lib/hooks';
 import { useSession } from '../../lib/session';
 import { formatDate, plural, relativeTime, roleLabel, titleCase } from '../../lib/format';
@@ -11,6 +11,9 @@ import { LevelBadge, OriginIcon, RoleChips } from '../../components/badges';
 import { GovernancePanel } from '../../components/GovernancePanel';
 import { PolicyGlance } from '../../components/PolicyRules';
 import { OpCards, TermChanges } from '../../components/OpsView';
+import { ChangeRequestEditDialog, type RequestEdit, type RequestPatch } from '../../components/ChangeRequestEdit';
+import { changeEditsBasis } from '../../lib/changeRequestEdits';
+import { termNamespace } from '@concord/core/term-rules';
 import { TurtleDiff } from '../../components/code/TurtleDiff';
 import { ValidationDetails, validationVerdict } from '../../components/Validation';
 import { AppChecksCard, AutopilotBadge } from '../../components/AppChecks';
@@ -380,8 +383,22 @@ function Tabs({ view, onChange, items }: { view: View; onChange: (v: View) => vo
 export function ChangeRequestPage() {
   const { crId = '' } = useParams();
   const { id, ontology, view, userById, hasRole } = useOntology();
-  const { now } = useSession();
+  const { now, session } = useSession();
   const state = useAsync(() => api.changeRequest(crId), [crId], { keep: `changeRequest|${crId}` });
+  const [editing, setEditing] = useState<RequestEdit>();
+  const saveEdit = useAction(async (patch: RequestPatch) => {
+    if (!editing) return;
+    try {
+      state.setData(await api.updateChangeRequest(editing.cr.id, { ...patch, ...(patch.ops !== undefined && { basis: changeEditsBasis(editing.cr) }) }));
+      setEditing(undefined);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        state.setData(await api.changeRequest(editing.cr.id));
+        setEditing(undefined);
+      }
+      throw error;
+    }
+  });
   const [params, setParams] = useSearchParams();
   const tab = (['changes', 'diff', 'checks', 'discussion'].includes(params.get('view') ?? '') ? params.get('view') : 'changes') as View;
   const setTab = (v: View) => {
@@ -400,6 +417,9 @@ export function ChangeRequestPage() {
   if (state.error && !state.data) return <ErrorCard error={state.error} onRetry={state.reload} />;
   if (!state.data) return <Loading />;
   const cr = state.data;
+  const canEdit = !!session?.user && !cr.withheld && ['draft', 'triage', 'review', 'voting', 'approved', 'needs-work'].includes(cr.status) && (cr.authorId === session.user.id || hasRole('editor', 'steward', 'owner'));
+  const namespace = view.data ? termNamespace(view.data.metadata, view.data.prefixes) : ontology.namespace;
+  const startEdit = (edit: RequestEdit) => { saveEdit.clearError(); setEditing(edit); };
   const author = cr.author ?? userById(cr.authorId);
   const nameOf = (uid: string) => userById(uid)?.name ?? (uid === cr.authorId ? author?.name : undefined) ?? 'Someone';
   const avatarOf = (uid: string) => userById(uid)?.avatarUrl ?? (uid === cr.authorId ? author?.avatarUrl : undefined);
@@ -411,9 +431,10 @@ export function ChangeRequestPage() {
       </Link>
       <div className="mb-5">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-xl font-semibold">
+          <h2 className="min-w-0 break-words text-xl font-semibold">
             <span className="font-normal text-muted">#{cr.number}</span> {cr.title}
           </h2>
+          {canEdit && <Button size="sm" variant="ghost" icon={PenLine} aria-label="Edit title and reason" onClick={() => startEdit({ kind: 'title', cr })}>Edit</Button>}
           <ChangeStatusBubble status={cr.status} hasVote={!!cr.governance.rule.vote} />
           <ClassificationBubble cr={cr} />
         </div>
@@ -457,6 +478,9 @@ export function ChangeRequestPage() {
           cr.status === 'needs-work' && <p className="mt-2 text-xs font-medium text-warn">Sent back for more work: revise and resubmit.</p>
         )}
       </div>
+
+      {!editing && <InlineError error={saveEdit.error} />}
+      {editing && editing.cr.id === cr.id && <ChangeRequestEditDialog edit={editing} namespace={namespace} view={view.data} label={label} userId={session?.user?.id} pending={saveEdit.pending} error={saveEdit.error} onCancel={() => { if (!saveEdit.pending) { setEditing(undefined); saveEdit.clearError(); } }} onSave={(patch) => void saveEdit.run(patch)} />}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 space-y-6">
@@ -550,7 +574,7 @@ export function ChangeRequestPage() {
               />
               <div className="p-5">
                 <div className="space-y-4">
-                  <OpCards ops={cr.ops} label={label} />
+                  <OpCards ops={cr.ops} label={label} onEdit={canEdit ? (index) => startEdit({ kind: 'op', cr, index }) : undefined} onRemove={canEdit && (cr.ops.length > 1 || cr.status === 'draft') ? (index) => startEdit({ kind: 'remove', cr, index }) : undefined} />
                   {cr.diff?.terms.length ? (
                     <details>
                       <summary className="cursor-pointer text-xs font-medium text-accent">Effect on terms ({cr.diff.terms.length})</summary>

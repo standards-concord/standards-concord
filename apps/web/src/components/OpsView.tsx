@@ -1,7 +1,8 @@
 import type { ChangeOp, OntologyDiff } from '@concord/shared';
 import { Minus, Pencil, Plus, Archive } from 'lucide-react';
 import { describeOp, type Labeler } from '../lib/ontology';
-import { cx, EmptyState } from './ui';
+import { Button, cx, EmptyState } from './ui';
+import { canEditOp } from './ChangeRequestEdit';
 
 const TONE = {
   add: { cls: 'border-l-ok', icon: Plus, iconCls: 'text-ok bg-ok-soft' },
@@ -10,10 +11,10 @@ const TONE = {
   deprecate: { cls: 'border-l-warn', icon: Archive, iconCls: 'text-warn bg-warn-soft' },
 };
 
-export function OpCards({ ops, label }: { ops: ChangeOp[]; label: Labeler }) {
+export function OpCards({ ops, label, onEdit, onRemove }: { ops: ChangeOp[]; label: Labeler; onEdit?: (index: number) => void; onRemove?: (index: number) => void }) {
   if (!ops.length) return <EmptyState title="No changes proposed yet">The author, or the AI, still needs to draft the actual ontology changes.</EmptyState>;
   return (
-    <ul className="space-y-2">
+    <ul className="space-y-2" aria-label="Proposed changes">
       {ops.map((op, i) => {
         const d = describeOp(op, label);
         const t = TONE[d.tone];
@@ -23,7 +24,7 @@ export function OpCards({ ops, label }: { ops: ChangeOp[]; label: Labeler }) {
             <span className={cx('mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md', t.iconCls)}>
               <Icon className="size-3.5" />
             </span>
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1 break-words">
               <div className="text-sm">
                 <span className="text-muted">{d.verb}</span> {d.title && <strong className="font-semibold">{d.title}</strong>}
               </div>
@@ -32,6 +33,10 @@ export function OpCards({ ops, label }: { ops: ChangeOp[]; label: Labeler }) {
                   {l}
                 </p>
               ))}
+              {(onEdit || onRemove) && <div className="mt-2 flex flex-wrap gap-2">
+                {onEdit && canEditOp(op) && <Button size="sm" variant="ghost" icon={Pencil} onClick={() => onEdit(i)}>Edit</Button>}
+                {onRemove && <Button size="sm" variant="ghost" onClick={() => onRemove(i)}>Remove this edit</Button>}
+              </div>}
             </div>
           </li>
         );

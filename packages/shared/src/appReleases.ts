@@ -53,6 +53,16 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.50.0',
+    date: '2026-11-13',
+    title: 'Edit a change request by hand',
+    changes: [{
+      id: 'edit-change-request-by-hand', type: 'feat', title: 'Edit a change request by hand',
+      detail: 'Correct a request’s title and reason, reword or rename drafted terms, and remove individual edits before or during review. Renaming keeps references together, and saving new edits asks reviewers to look again.',
+      roles: ['steward', 'contributor', 'member'], to: '{o}/changes',
+    }],
+  },
+  {
     version: '0.49.0',
     date: '2026-11-13',
     title: 'First steps for a new standard, and editing its details',
