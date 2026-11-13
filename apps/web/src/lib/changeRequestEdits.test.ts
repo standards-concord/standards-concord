@@ -94,6 +94,23 @@ describe('rewriting drafted term references', () => {
     ];
     expect(renameDraftedTerm(ops, 0, 'After', ns, { ex: ns }, view)[4]).toMatchObject({ types: [next], facts: { 'ex:remark': [old], 'ex:minute': [old] } });
   });
+  it('follows a property name through removal and re-adding as an object property', () => {
+    // A name stayed "literal" for the whole request once any edit had made it a datatype property, so a
+    // reference under the same name re-added as an object property was left pointing at the old IRI.
+    const view = { classes: [], objectProperties: [], datatypeProperties: [{ iri: ns + 'note' }], annotationProperties: [], individuals: [], conceptSchemes: [], concepts: [] } as unknown as OntologyView;
+    const ops: ChangeOp[] = [
+      { op: 'addClass', localName: 'Before', label: 'before', definition: 'Before.' },
+      { op: 'addIndividual', localName: 'early', label: 'early', definition: 'Early.', types: [old], facts: { 'ex:note': [old] } },
+      { op: 'renameTerm', iri: 'ex:note', newLocalName: 'remark' },
+      { op: 'removeTerm', iri: 'ex:remark' },
+      { op: 'addObjectProperty', localName: 'remark', label: 'remark', definition: 'A remark.' },
+      { op: 'addIndividual', localName: 'late', label: 'late', definition: 'Late.', types: [old], facts: { 'ex:remark': [old] } },
+    ];
+    const result = renameDraftedTerm(ops, 0, 'After', ns, { ex: ns }, view);
+    expect(result[1]).toMatchObject({ facts: { 'ex:note': [old] } });
+    expect(result[5]).toMatchObject({ facts: { 'ex:remark': [next] } });
+    expect(dependentEdits(ops, 0, ns, { ex: ns }, view)).toEqual([1, 5]);
+  });
   it('rewrites and finds references written as <IRI> or with surrounding spaces', () => {
     // The engine accepts both spellings; a child left pointing at the old name failed validation after a rename.
     const ops: ChangeOp[] = [cases[0], { op: 'addClass', localName: 'Child', label: 'child', definition: 'Child.', subClassOf: [`<${old}>`] }, { op: 'setSuperClasses', iri: 'ex:Other', superClasses: [' ex:Before '] }];
