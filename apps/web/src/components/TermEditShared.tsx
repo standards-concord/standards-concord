@@ -1,9 +1,37 @@
-import { useId, useRef } from 'react';
+import { useId, useRef, type ReactNode } from 'react';
+import { TERM_EDIT_FIELDS, type TermEditField, type TermEditValues } from '@concord/shared';
 import { Plus, X } from 'lucide-react';
 import { useAction } from '../lib/hooks';
-import { Button, Input, Textarea, cx } from './ui';
-type ListField = 'altLabels' | 'examples';
-const FIELD_LABEL = { altLabels: 'Also known as', examples: 'Examples' };
+import { Button, Field, Input, Textarea, cx } from './ui';
+type ListField = 'altLabels' | 'examples' | 'source';
+const FIELD_LABEL = { altLabels: 'Also known as', examples: 'Examples', source: 'Sources' };
+
+export type AnnotationValues = Record<'label' | 'definition' | 'comment' | 'editorialNote', string> & Record<'altLabels' | 'examples', string[]>;
+export function annotationValuesFrom(t: TermEditValues): AnnotationValues {
+  return { label: t.label ?? '', definition: t.definition ?? '', comment: t.comment ?? '', editorialNote: t.editorialNote ?? '', altLabels: [...(t.altLabels ?? [])], examples: [...(t.examples ?? [])] };
+}
+export const cleanAnnotationField = (f: TermEditField, v: AnnotationValues) => f === 'altLabels' || f === 'examples' ? [...new Set(v[f].map((x) => x.trim()).filter(Boolean))] : v[f].trim();
+
+/** Shared wording fields for a term proposal and for correcting its drafted edits. */
+export function AnnotationFields({ values, onChange, fields = TERM_EDIT_FIELDS, changed = [], labelEmpty, afterDefinition }: {
+  values: AnnotationValues; onChange: (v: AnnotationValues) => void; fields?: readonly TermEditField[]; changed?: TermEditField[]; labelEmpty?: boolean; afterDefinition?: ReactNode;
+}) {
+  const text = (f: 'label' | 'definition' | 'comment' | 'editorialNote', label: string, rows: number, hint?: string) => fields.includes(f) && <Field label={<>{label}<ChangedMark on={changed.includes(f)} /></>} hint={hint}>
+    {rows === 1 ? <Input value={values[f]} aria-invalid={f === 'label' && labelEmpty} onChange={(e) => onChange({ ...values, [f]: e.target.value })} /> : <Textarea rows={rows} value={values[f]} onChange={(e) => onChange({ ...values, [f]: e.target.value })} />}
+  </Field>;
+  return <>
+    {text('label', 'Label', 1)}
+    {fields.includes('label') && labelEmpty && <p className="-mt-2 text-xs text-danger">A term needs a label.</p>}
+    {text('definition', 'Definition', 3, 'Strict OWL practice: genus and differentia, e.g. “A person who …”.')}
+    {afterDefinition}
+    {text('comment', 'Comment', 2)}
+    {(fields.includes('altLabels') || fields.includes('examples')) && <div className="grid gap-4 sm:grid-cols-2">
+      {fields.includes('altLabels') && <ListEditor field="altLabels" noun="alternative label" items={values.altLabels} changed={changed.includes('altLabels')} onChange={(v) => onChange({ ...values, altLabels: v })} />}
+      {fields.includes('examples') && <ListEditor field="examples" noun="example" multiline items={values.examples} changed={changed.includes('examples')} onChange={(v) => onChange({ ...values, examples: v })} />}
+    </div>}
+    {text('editorialNote', 'Editorial note', 2)}
+  </>;
+}
 
 export function ChangedMark({ on }: { on: boolean; }) {
   return on ? (
