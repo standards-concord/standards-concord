@@ -119,3 +119,12 @@ describe('lazy consensus and votes against', () => {
     expect(evaluate(input([vote('a', 'no', 1, 1), vote('a', 'yes', 1, 2)])).outcome).toBe('approved');
   });
 });
+
+// Draft releases used to inherit the change request instruction to submit for review.
+it('a draft release explains publishing while a draft change still explains submitting for review', () => {
+  const input = { policy: GOVERNANCE_TEMPLATES['steward-led'], level: 'patch' as const, status: 'draft' as const,
+    statusSince: '2026-11-13T00:00:00Z', reviewStartedAt: '2026-11-13T00:00:00Z', authorId: 'author',
+    reviews: [], votes: [], members: [], validationOk: true, now: new Date('2026-11-13T00:00:00Z') };
+  expect(evaluate({ ...input, kind: 'release' }).next).toBe('Publish it when it includes everything this version should.');
+  expect(evaluate({ ...input, kind: 'change' }).next).toBe('The author needs to submit this for review.');
+});

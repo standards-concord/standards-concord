@@ -9,6 +9,23 @@ import { test, expect, signIn, demoOntology } from './fixtures';
 const PAGE = '/def/volunteering';
 
 test.describe('Public ontology page', () => {
+  test('the public reference lists own terms and folds terms from other vocabularies', async ({ page }) => {
+    // The page used to present dcterms:title and friends as terms of the standard.
+    await page.goto(PAGE);
+    const nav = page.getByRole('complementary', { name: 'Terms' });
+    await expect(nav.getByText(/Annotation properties/)).toHaveCount(0);
+    await expect(nav.getByRole('link', { name: /dcterms:title/ })).toHaveCount(0);
+    const list = page.locator('details').filter({ has: page.locator('summary', { hasText: /^Terms from other vocabularies \(\d+\)$/ }) });
+    await expect(list).toHaveCount(1);
+    await expect(list).not.toHaveAttribute('open');
+    await list.locator('summary').click();
+    await expect(list).toContainText('Dublin Core Terms:');
+    await expect(list.getByRole('link', { name: 'title', exact: true })).toHaveAttribute('href', 'http://purl.org/dc/terms/title');
+    // The standard's own vol:title keeps its entry; Dublin Core's title has none.
+    await expect(page.locator('article.term').filter({ hasText: 'http://purl.org/dc/terms/title' })).toHaveCount(0);
+    await expect(page.locator('article.term').filter({ hasText: 'http://www.w3.org/2004/02/skos/core#definition' })).toHaveCount(0);
+  });
+
   test('the ontology IRI shows the latest release with its metadata and tabs', async ({ page }) => {
     await page.goto(PAGE);
     await expect(page).toHaveTitle(/Volunteering.*1\.0\.0/i);
@@ -316,6 +333,7 @@ test.describe('Public ontology page', () => {
     await expect(dialog).toContainText(`“${user.name}” is shown publicly`);
     await credit.uncheck();
     await dialog.getByLabel('Title').fill(`Uncredited ${Date.now()}`);
+    await dialog.getByLabel('Description').fill('A standard that does not name its creator.');
     await dialog.getByRole('button', { name: 'Create ontology' }).click();
     await expect(page).toHaveURL(/\/o\/[^/]+/);
     const [pub] = await Promise.all([page.waitForEvent('popup'), page.getByTestId('public-page-link').click()]);

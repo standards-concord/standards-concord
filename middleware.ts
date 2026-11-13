@@ -22,6 +22,8 @@ export const config = {
     '/mcp/:path*',
     '/people/:path*',
     '/def/:path*',
+    '/def.jsonld',
+    '/def.ttl',
     '/licences/:path*',
     '/docs/licences/:path*',
     '/healthz',

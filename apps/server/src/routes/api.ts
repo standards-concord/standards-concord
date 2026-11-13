@@ -1,6 +1,10 @@
 import path from 'node:path';
 import express, { Router, type Request } from 'express';
-import { allTerms, compactIRI, expandIRI, FORMAT_INFO, serialize, usedBy, validate } from '@concord/core';
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
+import { clientIp } from '../oauth.js';
+import { DbRateStore } from '../rateLimitStore.js';
+import * as invites from '../services/invites.js';
+import { allTerms, compactIRI, exampleFiles, expandIRI, FORMAT_INFO, serialize, usedBy, validate } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
 import { PUBLIC_NOTICE_VERSION, ROLE_INFO } from '@concord/shared';
@@ -75,8 +79,9 @@ import { seedSamples } from '../services/samples.js';
 import { startupTaskDone } from '../startup.js';
 import * as useCases from '../services/useCases.js';
 import { approveRequest, denyRequest, describeRequest, disconnect, listConnections } from '../oauth.js';
-import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
+import { createAgentToken, createUser, deleteAgentToken, destroySession, getUser, listActivity, logActivity, listAgentTokens, personas, publicReporter } from '../services/users.js';
 import { claimPublicReport, convertPublicReport, dismissPublicReport, getPublicReport, listPublicReports, releasePublicReport, removePublicReport } from '../public/report.js';
+import { examplesFor } from '../public/examples.js';
 import { approveHold, isHeld, listHolds, readOntology } from '../public/holds.js';
 import { reasonInWorker } from '../reasoner/pool.js';
 import { keepAlive } from '../keepAlive.js';
@@ -90,6 +95,10 @@ const str = (v: unknown, name: string, max = 20000) => {
   return v.trim();
 };
 const optStr = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+// Requiring JSON keeps another origin's forms from acting through same-site session cookies.
+const requireJson = (req: Request, action: string) => {
+  if (!req.is('application/json')) throw new HttpError(415, `Send ${action} as JSON`);
+};
 
 async function sessionInfo(user?: User, token?: unknown): Promise<SessionInfo> {
   return {
@@ -161,6 +170,26 @@ export function apiRouter(): Router {
   /* ------------------------------ auth ------------------------------ */
   r.get('/session', async (req, res) => res.json(await sessionInfo(req.user, req.cookies?.[SESSION_COOKIE])));
 
+  const inviteLimiter = rateLimit({
+    windowMs: 60_000, limit: 60,
+    ...(config.sharedLimits ? { store: new DbRateStore('invites') } : {}),
+    standardHeaders: true, legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(clientIp(req as Request)),
+    validate: { trustProxy: false, xForwardedForHeader: false },
+    message: { error: 'Too many invitation requests. Try again in a minute.' },
+  });
+  // Public lookup comes before the signed-in read gate. Neither route may be cached.
+  r.get('/invites/:secret', inviteLimiter, async (req, res) => {
+    const { info, status } = await invites.lookupInvite(String(req.params.secret));
+    // A link that no longer works says only which standard it was for, so the page can point there: not who
+    // sent it or what it granted.
+    res.status(status).json(status === 200 ? info : { ontology: info.ontology, state: info.state, error: invites.inactiveMessage(info.state) });
+  });
+  r.post('/invites/:secret/accept', inviteLimiter, async (req, res) => {
+    requireJson(req, 'the invitation acceptance');
+    res.json(await invites.acceptInvite(String(req.params.secret), requireUser(req)));
+  });
+
   // Walkthrough videos for the alpha landing page (public; see services/media.ts).
   r.get('/media/index.json', async (_req, res) => {
     const index = await mediaIndex().catch(() => ({ release: null, files: [], unavailable: true }));
@@ -215,7 +244,7 @@ export function apiRouter(): Router {
   r.post('/auth/logout', async (req, res) => {
     // Only Concord's own pages sign out: a JSON request can't come from another site's form, which
     // could otherwise sign people out of Concord without their asking.
-    if (!req.is('application/json')) throw new HttpError(415, 'Send the sign-out as JSON');
+    requireJson(req, 'the sign-out');
     // A sign-out made earlier with no connection names the session it meant (SessionInfo.sessionId):
     // if this browser's session is now another one (a newer sign-in, another account, or none), nothing ends.
     const meant = optStr(req.body?.session);
@@ -253,7 +282,7 @@ export function apiRouter(): Router {
   /** Owners and activity counts are for signed-in users: owner ids lead to names, and counts reveal private work. */
   const forCaller = async (req: Request, s: OntologySummary) => {
     if (req.user) return s;
-    const { useCases: _u, openChangeRequests: _c, members: _m, ...stats } = s.stats;
+    const { useCases: _u, activeUseCases: _a, openChangeRequests: _c, members: _m, ...stats } = s.stats;
     // Counted from the working draft: while that waits for approval, nothing about it is public (see readOntology).
     // (summaryFor doesn't read it then; this also covers a hold that began while the summary was being made.)
     if (await isHeld(s, 'draft')) {
@@ -271,8 +300,10 @@ export function apiRouter(): Router {
   r.post('/ontologies', async (req, res) => {
     const user = requireUser(req);
     const b = req.body ?? {};
+    // The description is written into the ontology's header, and a header without one fails every change's checks.
+    // It has no length limit of its own, as when it is edited: the JSON body limit applies.
     const p = await createProject(
-      { title: str(b.title, 'title', 200), description: optStr(b.description) ?? '', prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator === true },
+      { title: str(b.title, 'title', 200), description: str(b.description, 'description', Infinity), prefix: str(b.prefix, 'prefix', 20), namespace: optStr(b.namespace), domain: optStr(b.domain), governanceTemplate: b.governanceTemplate, creditCreator: b.creditCreator === true },
       user,
     );
     // Without its health: validating a new ontology (the OWL reasoner's first run) can take a while, and nothing
@@ -285,6 +316,31 @@ export function apiRouter(): Router {
     // Who is in the working group, and who made each commit, is for signed-in users.
     const signedIn = !!req.user;
     res.json({ ...(await summaryFor(req, p)), members: signedIn ? await membersWithUsers(p.id) : [], versions: await ontologyStore.versions(p), history: signedIn ? await crs.withRequesters(p.id, await ontologyStore.log(p, 30)) : [] });
+  });
+
+  r.patch('/ontologies/:id', async (req, res) => {
+    const user = requireUser(req);
+    const found = await project(req);
+    await requireRole(found.id, user, ['owner', 'steward'], 'edit ontology details');
+    const b = req.body ?? {};
+    const p = await transaction(async () => {
+      const current = await mustFindProject(found.id);
+      const edits: { title?: string; description?: string; domain?: string } = {};
+      if (b.title !== undefined) edits.title = str(typeof b.title === 'string' ? b.title.trim() : b.title, 'title', 200);
+      // Creation has no separate description or domain limit: both use the JSON body limit.
+      for (const field of ['description', 'domain'] as const) {
+        if (b[field] === undefined) continue;
+        if (typeof b[field] !== 'string') throw new HttpError(400, `${field} must be text`);
+        edits[field] = b[field].trim();
+      }
+      for (const field of ['title', 'description', 'domain'] as const) {
+        if (edits[field] === undefined || edits[field] === (current[field] ?? '')) continue;
+        current[field] = edits[field];
+        await logActivity({ ontologyId: current.id, actorId: user.id, type: 'ontology.updated', message: field === 'title' ? `changed the title to “${edits.title}”` : `updated the ${field === 'domain' ? 'subject area' : 'description'}`, link: `/o/${current.id}` });
+      }
+      return updateProject(current);
+    });
+    res.json(await summary(p, { withHealth: false, viewer: user }));
   });
 
   // The query assistant: plain language in, SPARQL out. Counts of sample records only, never the data.
@@ -306,6 +362,19 @@ export function apiRouter(): Router {
 
   r.get('/ontologies/:id/view', async (req, res) => {
     res.json((await readOntology(await project(req), optStr(req.query.ref), req.user)).view());
+  });
+
+  r.get('/ontologies/:id/examples/:version', async (req, res) => {
+    requireUser(req);
+    const p = await project(req);
+    const version = String(req.params.version);
+    if (version !== 'draft' && !(await ontologyStore.versions(p)).includes(version)) throw new HttpError(404, 'Not found');
+    res.set('Cache-Control', 'no-store');
+    if (await isHeld(p, version)) return res.json({ available: false });
+    // Use the public read gate and consent-filtered files, exactly as the download route does.
+    const graph = await readOntology(p, version, undefined);
+    const files = exampleFiles(await examplesFor(p, version, graph), graph.ontologyIRI);
+    res.json({ available: !!files['examples/data.ttl']?.trim() });
   });
 
   r.get('/ontologies/:id/terms/:iri', async (req, res) => {
@@ -349,7 +418,7 @@ export function apiRouter(): Router {
     // viewer may see that use case now: a report that was running when one was withdrawn drops it.
     if (!ref || ref === 'working') return void res.json(await useCases.validationForViewer(await workingValidation(p), req.user));
     const graph = await ontologyStore.at(p, ref);
-    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI), imports: await hostedImportClosure(graph) }), req.user));
+    res.json(await useCases.validationForViewer(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(graph.ontologyIRI, p.id), imports: await hostedImportClosure(graph) }), req.user));
   });
 
   r.post('/ontologies/:id/sparql', async (req, res) => {
@@ -359,6 +428,16 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------ members & governance --------------------- */
+  r.post('/ontologies/:id/invites', async (req, res) => {
+    res.status(201).json(await invites.createInvite((await project(req)).id, requireUser(req), req.body ?? {}));
+  });
+  r.get('/ontologies/:id/invites', async (req, res) => {
+    res.json(await invites.listInvites((await project(req)).id, requireUser(req)));
+  });
+  r.delete('/ontologies/:id/invites/:inviteId', async (req, res) => {
+    await invites.revokeInvite((await project(req)).id, String(req.params.inviteId), requireUser(req));
+    res.status(204).end();
+  });
   r.put('/ontologies/:id/members/:userId', async (req, res) => {
     const p = await project(req);
     await requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');
@@ -895,7 +974,7 @@ export function apiRouter(): Router {
     const p = await project(req);
     const f = await fork(req);
     const graph = await ontologyStore.graphAt(p, f.head);
-    res.json(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI), imports: await hostedImportClosure(graph) }));
+    res.json(await validate(graph, { cqs: await competencyTests(p.id), reasoner: 'owl', fair: await fairContext(graph.ontologyIRI, p.id), imports: await hostedImportClosure(graph) }));
   });
   r.post('/ontologies/:id/forks/:fork/edits', async (req, res) => {
     const b = req.body ?? {};

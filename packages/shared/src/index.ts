@@ -86,6 +86,37 @@ export type Role =
   | 'agent'
   | 'odi';
 
+export type InviteState = 'active' | 'used up' | 'expired' | 'revoked';
+/** Public invitation record. The server alone keeps its secret's hash. */
+export interface Invite {
+  id: string;
+  ontologyId: string;
+  roles: Role[];
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+  maxUses: number;
+  uses: number;
+  usedBy: { userId: string; at: string }[];
+  revokedAt?: string;
+  note?: string;
+  invitedBy: string;
+  state: InviteState;
+}
+export interface InviteInput {
+  roles: Role[];
+  expiresInDays?: number;
+  maxUses?: number;
+  note?: string;
+}
+export interface InviteLookup {
+  ontology: { id: string; title: string; slug: string };
+  roles: Role[];
+  invitedBy: string;
+  expiresAt: string;
+  state: InviteState;
+}
+
 /**
  * Whether someone with these roles can cast a vote that counts under a rule's voter roles. Members
  * who only act as AI agents never vote. The server's acceptance check, its tally and the app's
@@ -336,6 +367,8 @@ export interface OntologySummary extends OntologyProject {
     properties?: number;
     individuals?: number;
     useCases?: number;
+    /** Visible use cases excluding withdrawn and archived ones. */
+    activeUseCases?: number;
     openChangeRequests?: number;
     releases: number;
     members?: number;
@@ -1772,6 +1805,7 @@ export interface SessionInfo {
  *  GET  /api/ontologies/:id/terms/:iri(encoded)    -> TermView & { usedBy: {iri:string; label?:string; via:string}[] }
  *  GET  /api/ontologies/:id/search?q=              -> TermView[]
  *  GET  /api/ontologies/:id/source?format=turtle|...&ref=working|<version>  -> text (Content-Type by format); ?download=1 sets attachment
+ *  GET  /api/ontologies/:id/examples/:version     -> {available:boolean} (signed in; release version or draft; false while held)
  *  GET  /api/ontologies/:id/validation?ref=working -> ValidationReport
  *  POST /api/ontologies/:id/sparql {query}         -> {head:{vars:string[]}, rows: Record<string,string>[]}
  *
@@ -1790,6 +1824,11 @@ export interface SessionInfo {
  *  POST /api/ontologies/:id/federations/:fed/commitment {committed} -> FederationDetail   (owners, stewards)
  *
  * Members & governance
+ *  POST /api/ontologies/:id/invites {roles, expiresInDays?, maxUses?, note?} -> { invite: Invite, link: string } (link shown once)
+ *  GET  /api/ontologies/:id/invites                  -> Invite[] (owners and stewards; newest first)
+ *  DELETE /api/ontologies/:id/invites/:inviteId       -> 204 (revoke; owners and stewards)
+ *  GET  /api/invites/:secret                         -> InviteLookup (public; 410 with reason when inactive)
+ *  POST /api/invites/:secret/accept                  -> { ontologyId } (signed in, real accounts only)
  *  PUT  /api/ontologies/:id/members/:userId {roles}  -> Membership
  *  DELETE /api/ontologies/:id/members/:userId
  *  GET  /api/governance/templates                    -> GovernancePolicy[]

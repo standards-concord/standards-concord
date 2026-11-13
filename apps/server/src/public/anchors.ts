@@ -1,5 +1,24 @@
-import { localName } from '@concord/core';
+import { allTerms, localName } from '@concord/core';
 import type { OntologyView, TermView } from '@concord/core/types';
+
+/** A public reference includes only terms this ontology defines. RDF downloads keep every declaration. */
+export function ownTerm(t: TermView, namespace: string, ontologyIRI: string): boolean {
+  return (!!namespace && t.iri.startsWith(namespace)) || !!t.definedBy?.includes(ontologyIRI);
+}
+
+export function ownTermsView(view: OntologyView, namespace: string, ontologyIRI = view.metadata.iri): OntologyView {
+  const own = (t: TermView) => ownTerm(t, namespace, ontologyIRI);
+  return {
+    ...view,
+    classes: view.classes.filter(own),
+    objectProperties: view.objectProperties.filter(own),
+    datatypeProperties: view.datatypeProperties.filter(own),
+    annotationProperties: view.annotationProperties.filter(own),
+    individuals: view.individuals.filter(own),
+    conceptSchemes: view.conceptSchemes?.filter(own),
+    concepts: view.concepts?.filter(own),
+  };
+}
 
 /** Ids the page itself uses. A term from another namespace whose name would clash gets a "term-" prefix. */
 const UI_ID = /^(main|(tab|sec|uc|req)-.*)$/;
@@ -11,11 +30,11 @@ const UI_ID = /^(main|(tab|sec|uc|req)-.*)$/;
  * A term in the ontology's own namespace keeps everything after the namespace
  * exactly, so https://…/vocab#part:Child lands on id="part:Child" and
  * https://…/vocab#Café on id="Café". Those fragments are reserved: the page's
- * own ids move out of their way (see pageIds). Terms from other namespaces get
+ * own ids move out of their way (see pageIds). Terms explicitly defined by this ontology in other namespaces get
  * their local name, prefixed or numbered when it would clash.
  */
-export function termAnchors(view: OntologyView, namespace: string): Map<string, string> {
-  const all: TermView[] = [...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals, ...(view.conceptSchemes ?? []), ...(view.concepts ?? [])];
+export function termAnchors(view: OntologyView, namespace: string, ontologyIRI = view.metadata.iri): Map<string, string> {
+  const all = allTerms(ownTermsView(view, namespace, ontologyIRI));
   const own = (t: TermView) => namespace.length > 0 && t.iri.startsWith(namespace) && t.iri.length > namespace.length;
   // Own terms first, so they win their exact fragment. Among them, a name
   // already holding "%" goes last: browsers rewrite #Café as #Caf%C3%A9, so

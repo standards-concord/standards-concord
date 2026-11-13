@@ -12,6 +12,7 @@ import { outputConfig } from '../../../scripts/vercel-output.mjs';
 const vercelJson = JSON.parse(fs.readFileSync(path.resolve(import.meta.dirname, '../../../vercel.json'), 'utf8')) as {
   crons: { path: string; schedule: string }[];
   headers: { source: string; headers: { key: string; value: string }[] }[];
+  rewrites: { source: string; destination: string }[];
 };
 type Route = { src?: string; dest?: string; headers?: Record<string, string>; handle?: string };
 const routes = (outputConfig() as { routes: Route[] }).routes;
@@ -36,7 +37,16 @@ describe('the function build’s routing', () => {
 
   it('sends the API’s paths to the function and everything else to the web app', () => {
     const to = (p: string) => routes.find((r) => r.src && r.dest && new RegExp(r.src).test(p))?.dest;
-    for (const p of ['/api/cron/daily', '/auth/google/callback', '/mcp', '/healthz', '/.well-known/oauth-authorization-server', '/token', '/licences/W3C-20150513', '/docs/licences/CC-BY-1.0.md']) expect(to(p), p).toBe('/api');
+    for (const p of ['/api/cron/daily', '/auth/google/callback', '/mcp', '/healthz', '/.well-known/oauth-authorization-server', '/token', '/def', '/def/', '/def.jsonld', '/def.ttl', '/def/volunteering', '/licences/W3C-20150513', '/docs/licences/CC-BY-1.0.md']) expect(to(p), p).toBe('/api');
     for (const p of ['/', '/o/x/terms', '/welcome', '/apiary']) expect(to(p), p).toBe('/index.html');
+  });
+
+  it('keeps the catalogue, its representations and licence notices out of Vercel’s app rewrite', () => {
+    // The rewrite used to exclude only /def/, sending the catalogue to index.html.
+    for (const rule of vercelJson.rewrites.filter((r) => r.destination === '/index.html')) {
+      const pattern = new RegExp(`^${rule.source}$`);
+      for (const url of ['/def', '/def/', '/def.jsonld', '/def.ttl', '/def/volunteering', '/licences/W3C-20150513', '/docs/licences/CC-BY-1.0.md']) expect(pattern.test(url), url).toBe(false);
+      for (const url of ['/', '/definitions', '/o/example']) expect(pattern.test(url), url).toBe(true);
+    }
   });
 });

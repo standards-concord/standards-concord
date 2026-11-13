@@ -5,6 +5,25 @@ const LICENCE = 'https://www.w3.org/Consortium/Legal/2015/copyright-software-and
 const ACL = 'http://www.w3.org/ns/auth/acl#';
 const HEALTH_NOTE = "Concord's checks flag some wording inherited from the original; it is kept as published so the copy stays faithful.";
 
+test('the public catalogue groups sample copies after ordinary standards and marks their machine-readable entries', async ({ page }) => {
+  // The new public catalogue used to list sample copies as ordinary standards.
+  await page.goto('/def');
+  const samples = page.getByRole('region', { name: 'Sample standards', exact: true });
+  const sampleLink = samples.getByRole('link', { name: 'Web Access Control', exact: true });
+  await expect(sampleLink).toBeHidden();
+  await samples.locator('summary').click();
+  await expect(sampleLink).toBeVisible();
+  await expect(samples.getByRole('listitem').filter({ has: sampleLink })).toContainText('Sample copy');
+  const standards = page.getByRole('list', { name: 'Standards', exact: true });
+  await expect(standards.getByRole('link', { name: 'Volunteering opportunities', exact: true })).toBeVisible();
+  await expect(standards.getByRole('link', { name: 'Web Access Control', exact: true })).toHaveCount(0);
+  expect(await standards.evaluate((el, section) => Boolean(el.compareDocumentPosition(section!) & Node.DOCUMENT_POSITION_FOLLOWING), await samples.elementHandle())).toBe(true);
+  const json = await (await page.request.get('/def.jsonld')).json();
+  expect(json.hasPart.find((part: { url: string }) => part.url.endsWith('/acl'))).toMatchObject({ keywords: ['Sample standard'], isBasedOn: SOURCE, license: LICENCE });
+  await sampleLink.click();
+  await expect(page.getByRole('region', { name: 'About this sample', exact: true })).toBeVisible();
+});
+
 test('a tester finds compact sample standards after the demo, reads attribution and browses ACL terms', async ({ page }) => {
   await signIn(page, { name: 'Sample reader', role: 'contributor' });
   await page.goto('/');

@@ -219,6 +219,11 @@ html:not(.js) .uc-filters{display:none}
 .uc-meta{font-size:.875rem;margin:.6em 0 0}
 .foot{border-top:1px solid var(--line);padding-top:18px;padding-bottom:36px;color:var(--muted);font-size:.875rem}
 .foot a{color:var(--muted)}
+.catalogue{list-style:disc;margin:28px 0 48px;padding-left:1.25rem;max-width:800px;overflow-wrap:anywhere}
+.catalogue li{padding:20px 0;border-bottom:1px solid var(--line)}
+.catalogue li:first-child{padding-top:0}
+.catalogue h2{font-size:1.3rem}
+.catalogue p:last-child{margin-bottom:0}
 details summary{cursor:pointer;font-weight:600;margin-bottom:8px}
 @media (max-width:860px){
   .browse{grid-template-columns:1fr;gap:16px}

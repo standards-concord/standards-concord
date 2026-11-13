@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useSearchParams } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import type { OntologyView, TermView } from '@concord/shared';
 import { Bug, ChevronDown, ChevronRight, Crosshair, LayoutTemplate, ListTree, Maximize, PanelLeftClose, PanelLeftOpen, PenLine, Plus, Search, X } from 'lucide-react';
 import { CodeEditForm, CodeListContents, NewCodeListPanel } from '../../components/CodeLists';
@@ -658,7 +658,8 @@ export function BrowseTab() {
   if (view.error && !view.data) return <ErrorCard error={view.error} onRetry={view.reload} />;
   if (!view.data || !model) return <Loading label="Loading ontology…" />;
   const v = view.data;
-  const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length && !v.conceptSchemes?.length && !session?.user;
+  // Nothing in any list on the left: individuals count as terms too.
+  const empty = !v.classes.length && !v.objectProperties.length && !v.datatypeProperties.length && !v.individuals.length && !v.conceptSchemes?.length;
   const codeCounts = new Map((v.conceptSchemes ?? []).map((s) => [s.iri, (v.concepts ?? []).filter((c) => c.inScheme.includes(s.iri)).length]));
   // In the canvas views the navigation folds away so the drawing gets the room.
   const showNav = navOpen ?? !canvas;
@@ -716,7 +717,7 @@ export function BrowseTab() {
               {showNav ? 'Hide terms' : 'Terms'}
             </Button>
           )}
-          <div className="relative w-full">
+          {!empty && <div className="relative w-full">
             <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted" />
             <Input
               value={q}
@@ -733,7 +734,7 @@ export function BrowseTab() {
                 <X className="size-4" />
               </button>
             )}
-          </div>
+          </div>}
         </div>
         <div className="inline-flex rounded-lg border border-line-strong p-0.5" role="radiogroup" aria-label="View" aria-describedby="view-task">
           {MODES.map((m) => (
@@ -754,16 +755,16 @@ export function BrowseTab() {
         {MODES.find((m) => m.key === mode)!.task}
       </p>
 
-      {empty ? (
-        <EmptyState icon={ListTree} title="This ontology has no terms yet">
-          Describe a use case or upload a meeting, then synthesise a change request — approved changes appear here.
-        </EmptyState>
-      ) : !canvas ? (
+      {!canvas ? (
         <div className="grid gap-6 lg:grid-cols-[300px_1fr]">
           <div id="browse-nav">{nav}</div>
           <div className="min-w-0 space-y-4">
             {newCodeList ? <NewCodeListPanel key={id} onCancel={clear} /> : selected ? (
               <TermDetailPanel iri={selected} onSelect={select} model={model} showNeighbourhood />
+            ) : empty ? (
+              <EmptyState icon={ListTree} title="No terms yet">
+                {session?.user ? <>Terms arrive through change requests. <Link className="text-accent underline" to={`/o/${id}/use-cases`}>Describe a use case</Link> and draft changes from it, <Link className="text-accent underline" to={`/o/${id}/changes?new=1`}>propose a change in plain language</Link>, or <Link className="text-accent underline" to={`/o/${id}/browse?view=diagram`}>draw classes on the Diagram</Link>.</> : 'Terms arrive through change requests.'}
+              </EmptyState>
             ) : (
               <EmptyState icon={ListTree} title="Pick a term">
                 Choose a class, property or code list on the left to see its definition, properties and where it’s used. Use the Diagram to see what data each class has and how the classes connect.

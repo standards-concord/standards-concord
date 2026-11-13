@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router';
 import type { ChangeRequestStatus } from '@concord/shared';
+import { Circle, CircleCheck } from 'lucide-react';
 import { askOf, odiApprovedFromTimeline } from '../../lib/asks';
 import { scrollBehavior } from '../../lib/motion';
 import { api } from '../../api';
-import { useAsync } from '../../lib/hooks';
+import { useAsync, useLocalStorage } from '../../lib/hooks';
+import { useOntologies } from '../../lib/ontologies';
+import { forgetKept } from '../../lib/kept';
 import { formatDate, plural, relativeTime, ringRoles } from '../../lib/format';
 import { useSession } from '../../lib/session';
 import { ActivityFeed } from '../../components/ActivityFeed';
@@ -13,7 +16,8 @@ import { Disclosure } from '../../components/Disclosure';
 import { ValidationDetails } from '../../components/Validation';
 import { ImportsSection } from '../../components/Imports';
 import { SampleNotice } from '../../components/SampleNotice';
-import { Avatar, ErrorCard, Loading } from '../../components/ui';
+import { EditOntologyDetailsDialog } from '../../components/OntologyDetails';
+import { Avatar, Button, ErrorCard, Loading } from '../../components/ui';
 import { useOntology } from './Layout';
 
 /** Links inside sentences are underlined in every look, so they never rely on colour alone. */
@@ -27,9 +31,13 @@ const IN_PROGRESS: ChangeRequestStatus[] = ['voting', 'review', 'triage', 'needs
  * waiting for you, what is changing, and how healthy the draft is. People and activity sit beside it.
  */
 export function OverviewTab() {
-  const { id, ontology: o, view, label, myRoles, hasRole } = useOntology();
+  const { id, ontology: o, view, label, myRoles, hasRole, reload, updateDetails } = useOntology();
+  const ontologies = useOntologies();
   const { session, now } = useSession();
   const me = session?.user?.id;
+  const [hiddenSteps, setHiddenSteps] = useLocalStorage(`concord:first-steps:${me ?? 'guest'}:${o.id}`, false);
+  const [editingDetails, setEditingDetails] = useState(false);
+  const firstSteps = !!me && myRoles.some((role) => ['owner', 'steward', 'editor'].includes(role)) && o.stats.releases === 0;
   const validation = useAsync(() => api.validation(id, 'working'), [id], { keep: `validation|${id}|working` });
   const changes = useAsync(() => api.changeRequests(id), [id], { keep: `changeRequests|${id}|` });
   const loc = useLocation();
@@ -72,6 +80,34 @@ export function OverviewTab() {
     <div className="grid gap-x-12 gap-y-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <div className="min-w-0 space-y-10">
         {o.sample && <SampleNotice sample={o.sample} />}
+        {typeof loc.state?.notice === 'string' && <p role="status" className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-sm">{loc.state.notice}</p>}
+        {firstSteps && !hiddenSteps && (
+          <section aria-labelledby="first-steps-title">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 id="first-steps-title" className="text-xl font-bold">First steps</h2>
+              <Button variant="ghost" size="sm" onClick={() => setHiddenSteps(true)}>Hide these steps</Button>
+            </div>
+            <p className="mt-2 text-sm text-muted">A new standard usually starts like this. Each step ticks itself when it's done.</p>
+            <ol className="mt-4 space-y-4" aria-label="First steps">
+              {[
+                { title: 'Describe a use case.', text: 'Say what the data needs to do, in your own words. Concord turns it into requirements.', link: 'Describe a use case', to: 'use-cases', done: (o.stats.activeUseCases ?? 0) > 0 },
+                { title: 'Propose the first terms.', text: 'Draft classes and properties from your use cases, or describe a change in plain language.', link: 'Propose a change', to: 'changes?new=1', done: (o.stats.classes ?? 0) > 0 || (changes.data ?? []).some((c) => !c.withheld && c.status !== 'withdrawn') },
+                { title: 'Bring in your working group.', text: 'Add the people who will review and decide.', link: 'Members and roles', to: 'governance#roles', done: (o.stats.members ?? 0) > 1 },
+                { title: 'Publish version 1.', text: 'A release gives the standard a permanent address and a public page.', link: 'Releases', to: 'releases', done: false },
+              ].map((step, i) => (
+                <li key={step.to} className="flex items-start gap-3">
+                  {step.done ? <CircleCheck className="mt-0.5 size-5 shrink-0 text-ok" aria-hidden /> : <Circle className="mt-0.5 size-5 shrink-0 text-muted" aria-hidden />}
+                  <span className="sr-only">{step.done ? 'Done' : 'To do'}</span>
+                  <div className="min-w-0 text-sm leading-relaxed">
+                    <p className="font-semibold">{i + 1}. {step.title}</p>
+                    <p>{step.text} <Link className={proseLink} to={`/o/${id}/${step.to}`}>{step.link}</Link>.</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <p className="mt-4 text-sm text-muted">Decisions follow the {o.governance.name} policy. Change it under <Link className={proseLink} to={`/o/${id}/governance`}>Governance</Link>.</p>
+          </section>
+        )}
         <section aria-label="About this ontology">
           <p className="max-w-[68ch] text-lg leading-relaxed">{o.description || <span className="text-muted">No description yet.</span>}</p>
           <p className="mt-3 max-w-[68ch] text-sm leading-relaxed text-muted" data-testid="overview-summary">
@@ -103,11 +139,14 @@ export function OverviewTab() {
           <Disclosure className="mt-4 max-w-[68ch] border-t border-line pt-3" tone="muted" title="Ontology details">
             <dl className="grid gap-x-4 gap-y-1.5 text-sm sm:grid-cols-[9rem_1fr]">
               {/* Only what isn't said already: the counts are in the line above, the version in the header. */}
+              <Row term="Prefix">
+                <span className="font-mono text-xs break-all">{o.prefix}: {o.namespace}</span>
+              </Row>
               <Row term="Ontology IRI">
                 <span className="font-mono text-xs break-all">{o.ontologyIRI}</span>
               </Row>
               {(o.stats.individuals ?? 0) > 0 && <Row term="Individuals">{o.stats.individuals}</Row>}
-              {o.domain && <Row term="Domain">{o.domain}</Row>}
+              {o.domain && <Row term="Subject area">{o.domain}</Row>}
               <Row term="Created">{formatDate(o.createdAt)}</Row>
               {o.github && (
                 <Row term="Published to">
@@ -117,6 +156,10 @@ export function OverviewTab() {
                 </Row>
               )}
             </dl>
+            {(hasRole('owner', 'steward') || (firstSteps && hiddenSteps)) && <div className="mt-3 flex flex-wrap items-center gap-3">
+              {hasRole('owner', 'steward') && <Button variant="ghost" size="sm" onClick={() => setEditingDetails(true)}>Edit details</Button>}
+              {firstSteps && hiddenSteps && <button type="button" className={proseLink} onClick={() => setHiddenSteps(false)}>Show first steps</button>}
+            </div>}
           </Disclosure>
         </section>
 
@@ -248,6 +291,14 @@ export function OverviewTab() {
         </section>
       </div>
 
+      {editingDetails && <EditOntologyDetailsDialog key={o.id} ontology={o} onClose={() => setEditingDetails(false)} onSaved={async (details) => {
+        forgetKept(`ontology|${details.id}`);
+        forgetKept(`ontology|${details.slug}`);
+        updateDetails(details);
+        // setData forgets the old per-browser list before reloading and keeping its new copy.
+        ontologies.setData((all) => (all ?? []).map((item) => item.id === details.id ? details : item));
+        await Promise.all([reload(), ontologies.reload()]);
+      }} />}
       <aside className="min-w-0 space-y-10" aria-label="People and activity">
         <section aria-labelledby="members-title" data-testid="overview-members">
           <div className="flex items-baseline justify-between gap-2">

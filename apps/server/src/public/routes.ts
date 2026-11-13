@@ -11,13 +11,14 @@ import { findProject } from '../services/ontologies.js';
 import { ontologyStore } from '../services/ontologyStore.js';
 import { releaseForViewer } from '../services/releases.js';
 import { holdLegacy, isHeld, readOntology } from './holds.js';
-import { publishedReleases } from './published.js';
+import { latestVersion, publishedReleases } from './published.js';
 import { escapeHtml } from './markdown.js';
 import { PAGE_GENERATOR, renderOntologyPage, type OntologyPageInput } from './render.js';
 import { publishedRequirements, requirementsFor, validSnapshot, type PublishedRequirements } from './requirements.js';
 import { examplesFor, examplesSnapshot, liveExamples, visibleExamples } from './examples.js';
 import { fragment, termAnchors } from './anchors.js';
 import { persistentIdRules, PUBLIC_BASE } from './w3id.js';
+import { catalogueEntries, catalogueJsonLd, catalogueTurtle, renderCatalogue } from './catalogue.js';
 
 export { PUBLIC_BASE };
 
@@ -169,14 +170,7 @@ export function splitExtension(segment: string): { base: string; format?: Public
   return { base: segment };
 }
 
-export { publishedReleases } from './published.js';
-
-/** The latest released version, if any, that exists in the repository. */
-export async function latestVersion(project: OntologyProject): Promise<string | undefined> {
-  const versions = await ontologyStore.versions(project);
-  if (project.currentVersion !== '0.0.0' && versions.includes(project.currentVersion)) return project.currentVersion;
-  return (await publishedReleases(project.id)).find((r) => versions.includes(r.version))?.version;
-}
+export { latestVersion, publishedReleases } from './published.js';
 
 /**
  * Everything the page needs for one version. `base` is the absolute site URL
@@ -220,7 +214,7 @@ export async function pageInput(
       exampleGetter: example?.datasetGetter,
       exampleProperty: example?.properties[0]?.name,
     },
-    view: graph.view(),
+    view: graph.view({ includeVocabularyDeclarations: true }),
     kind: isDraft ? 'draft' : 'release',
     version,
     release: release && !isDraft ? { level: release.level, notes: (await releaseForViewer(release, undefined)).notes, publishedAt: release.publishedAt, githubUrl: release.githubUrl } : undefined,
@@ -412,7 +406,7 @@ function held(res: Response, project: OntologyProject, version: string, format: 
   res
     .type('html')
     .send(
-      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Being reviewed</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 16px;color:#14181f;background:#fff}@media (prefers-color-scheme:dark){body{color:#e7eaf0;background:#0f1218}}</style></head><body><h1>Being reviewed</h1><p>${escapeHtml(message)}</p><p>Older versions of this site published changes without anyone approving them first, so a steward is checking it.</p></body></html>`,
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Being reviewed</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:15vh auto;padding:0 16px;color:#14181f;background:#fff}@media (prefers-color-scheme:dark){body{color:#e7eaf0;background:#0f1218}}</style></head><body><h1>Being reviewed</h1><p>${escapeHtml(message)}</p><p>Older versions of this site published changes without anyone approving them first, so a steward is checking it.</p><footer><a href="/def">All standards</a></footer></body></html>`,
     );
 }
 
@@ -444,7 +438,7 @@ async function serve(req: Request, res: Response) {
     if (await isHeld(project, latest ?? 'draft')) return notFound(res, `${project.title} has no version “${requested}”.`, root);
     const graph = await readOntology(project, latest ?? 'draft', undefined);
     const term = graph.term(`${project.namespace}${requested}`) ?? graph.term(`${project.ontologyIRI.replace(/[#/]$/, '')}/${requested}`);
-    const anchor = term && termAnchors(graph.view(), project.namespace).get(term.iri);
+    const anchor = term && termAnchors(graph.view({ includeVocabularyDeclarations: true }), project.namespace).get(term.iri);
     if (anchor && !last.format) return res.redirect(303, `${root}#${fragment(anchor)}`);
     return notFound(res, `${project.title} has no version “${requested}”.`, root);
   }
@@ -588,6 +582,24 @@ export async function sendFormat(req: Request, res: Response, o: SendFormatOptio
 
 export function publicRouter(): Router {
   const r = Router();
+  r.get([PUBLIC_BASE, `${PUBLIC_BASE}.jsonld`, `${PUBLIC_BASE}.ttl`], async (req, res, next) => {
+    try {
+      res.vary('Accept');
+      res.set('Access-Control-Allow-Origin', '*').set('Cache-Control', 'public, max-age=300');
+      const types = ['text/html', 'application/ld+json', 'text/turtle'];
+      const format = req.path.endsWith('.jsonld') ? types[1] : req.path.endsWith('.ttl') ? types[2] : req.accepts(types);
+      if (!format) return void res.status(406).set('Cache-Control', 'no-store').type('text/plain').send(`Not acceptable. Available: ${types.join(', ')}`);
+      const base = origin(req);
+      const url = `${base}${PUBLIC_BASE}`;
+      const entries = await catalogueEntries(base);
+      res.set('Link', `<${url}>; rel="canonical", <${url}.jsonld>; rel="alternate"; type="application/ld+json", <${url}.ttl>; rel="alternate"; type="text/turtle"`);
+      if (format === 'application/ld+json') res.type(format).send(JSON.stringify(catalogueJsonLd(entries, url)));
+      else if (format === 'text/turtle') res.type(format).send(await catalogueTurtle(entries, url));
+      else res.type('html').send(renderCatalogue(entries, base));
+    } catch (err) {
+      next(err);
+    }
+  });
   // Federation releases (manifest, derived shapes and frozen closure), before the ontology route so /def/fed/... isn't read as an ontology called "fed".
   r.get(`${PUBLIC_BASE}/fed/:slug{/:version}{/:part}`, async (req, res, next) => {
     try {

@@ -52,6 +52,9 @@ import type {
   Release,
   ReleaseDetail,
   Role,
+  Invite,
+  InviteInput,
+  InviteLookup,
   SessionInfo,
   TermEditInput,
   TermView,
@@ -254,10 +257,33 @@ export interface ClipManifest {
   clips: { id: string; file: string; title: string; summary?: string; duration?: number }[];
 }
 
+/**
+ * A sign-out that is still being confirmed. Signing in waits for it: the server's answer to the
+ * sign-out clears this browser's session cookie and closes the account on screen, which would
+ * otherwise undo a sign-in made in the meantime.
+ */
+let signingOut: Promise<void> = Promise.resolve();
+export function whileSigningOut(signOut: Promise<unknown>) {
+  const settled = signOut.then(
+    () => {},
+    () => {},
+  );
+  signingOut = Promise.all([signingOut, settled]).then(() => {});
+}
+
 export const api = {
   // Auth
   session: () => get<SessionInfo>('/api/session'),
-  demoLogin: (body: { userId?: string; name?: string; role?: Role } = {}) => post<SessionInfo>('/api/auth/demo', body),
+  // Straight after signing out, the old session is ended first (see whileSigningOut).
+  demoLogin: async (body: { userId?: string; name?: string; role?: Role } = {}) => {
+    // A reconnect check can register another sign-out while this login is already waiting.
+    let pending: Promise<void>;
+    do {
+      pending = signingOut;
+      await pending;
+    } while (pending !== signingOut);
+    return post<SessionInfo>('/api/auth/demo', body);
+  },
   /** Ends this browser's session; with `session`, only if it is still that one (see SessionInfo.sessionId). */
   logout: (session?: string) => post<{ ended: boolean }>('/api/auth/logout', session ? { session } : {}),
   /** The walkthrough videos for the latest release (see /welcome). */
@@ -272,9 +298,11 @@ export const api = {
   // Ontologies
   ontologies: () => get<OntologySummary[]>('/api/ontologies'),
   createOntology: (body: NewOntologyInput) => post<OntologySummary>('/api/ontologies', body),
+  updateOntology: (id: string, body: { title?: string; description?: string; domain?: string }) => patch<OntologySummary>(`/api/ontologies/${e(id)}`, body),
   ontology: (id: string) => get<OntologyDetail>(`/api/ontologies/${e(id)}`),
   queryChat: (id: string, body: QueryChatRequest) => post<QueryChatResponse>(`/api/ontologies/${e(id)}/query-chat`, body as unknown as Json),
   view: (id: string, ref = 'working') => get<OntologyView>(`/api/ontologies/${e(id)}/view${qs({ ref })}`),
+  examples: (id: string, version: string) => get<{ available: boolean }>(`/api/ontologies/${e(id)}/examples/${e(version)}`),
   term: (id: string, iri: string) => get<TermDetail>(`/api/ontologies/${e(id)}/terms/${e(iri)}`),
   search: (id: string, q: string) => get<TermView[]>(`/api/ontologies/${e(id)}/search${qs({ q })}`),
   sourceUrl: (id: string, format: OutputFormat, ref = 'working', download = false) =>
@@ -297,6 +325,11 @@ export const api = {
   // Members & governance
   setMemberRoles: (id: string, userId: string, roles: Role[]) => put<Membership>(`/api/ontologies/${e(id)}/members/${e(userId)}`, { roles }),
   removeMember: (id: string, userId: string) => del<unknown>(`/api/ontologies/${e(id)}/members/${e(userId)}`),
+  invites: (id: string) => get<Invite[]>(`/api/ontologies/${e(id)}/invites`),
+  createInvite: (id: string, input: InviteInput) => post<{ invite: Invite; link: string }>(`/api/ontologies/${e(id)}/invites`, { ...input }),
+  revokeInvite: (id: string, inviteId: string) => del<void>(`/api/ontologies/${e(id)}/invites/${e(inviteId)}`),
+  invite: (secret: string) => get<InviteLookup>(`/api/invites/${e(secret)}`),
+  acceptInvite: (secret: string) => post<{ ontologyId: string }>(`/api/invites/${e(secret)}/accept`, {}),
   governanceTemplates: () => get<GovernancePolicy[]>('/api/governance/templates'),
   setGovernance: (id: string, policy: GovernancePolicy) => put<OntologySummary>(`/api/ontologies/${e(id)}/governance`, { policy }),
   transferOwnership: (id: string, toUserId: string) =>
@@ -363,7 +396,7 @@ export const api = {
   approvePublication: (id: string, fingerprint: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/approve-publication`, { fingerprint }),
   publicHolds: (id: string) => get<PublicHoldReview[]>(`/api/ontologies/${e(id)}/public-holds`),
   approvePublicHold: (id: string, version: string, fingerprint: string) => post<{ ok: true }>(`/api/ontologies/${e(id)}/public-holds/${e(version)}/approve`, { fingerprint }),
-  updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[] }) =>
+  updateChangeRequest: (id: string, body: { title?: string; description?: string; ops?: ChangeOp[]; basis?: string }) =>
     patch<ChangeRequestDetail>(`/api/change-requests/${e(id)}`, body),
   submitChangeRequest: (id: string) => post<ChangeRequestDetail>(`/api/change-requests/${e(id)}/submit`),
   /** `round` is the review round of the version on screen; the server refuses a decision on one that has since changed. */

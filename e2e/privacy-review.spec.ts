@@ -143,6 +143,22 @@ test.describe('privacy review', () => {
     expect(calls).toEqual(['draft fp-draft-1', 'draft fp-draft-2', '1.0.0 fp-release', '0.9.0 fp-broken']);
   });
 
+  test('Validate data makes no refused public file request for a held version', async ({ page }) => {
+    // The page used to request a file the server refuses while a version is being reviewed.
+    await signIn(page, { name: 'Held version reader', role: 'contributor' });
+    await page.route(`**/api/ontologies/${demo.id}/examples/1.0.0`, (route) => route.fulfill({ json: { available: false } }));
+    const fileRequests: string[] = [];
+    await page.route('**/def/volunteering/1.0.0/examples/data.ttl', (route) => {
+      fileRequests.push(route.request().url());
+      return route.fulfill({ status: 503, body: 'Being reviewed' });
+    });
+    await page.goto(`/o/${demo.id}/validate?version=1.0.0`);
+    await expect(page.getByTestId('validation-report')).toBeVisible();
+    await settle(page);
+    await expect(page.getByRole('link', { name: 'Use example data', exact: true })).toHaveCount(0);
+    expect(fileRequests).toEqual([]);
+  });
+
   test('the hub shows a dash, not a count, for an ontology whose working draft is being reviewed', async ({ page }) => {
     // (Signed out, the home page is the landing page; the hub's cards are what show these counts.)
     // The server leaves out graph counts and health while the draft is held (apps/server/test/public.test.ts); the hub

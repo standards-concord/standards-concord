@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate, useParams } from 'react-router';
 import { ChevronDown, Clock, Plug, FastForward, LogOut, MessageSquareHeart, Shield, UserRound, Compass, Palette } from 'lucide-react';
-import { api, ApiError } from '../api';
+import { api, ApiError, whileSigningOut } from '../api';
 import { beginSignOut, finishSignOut, markSignOutPending, useSession } from '../lib/session';
 import { useOntologies } from '../lib/ontologies';
 import { testerRoleFor, useWalkthrough } from '../lib/walkthrough';
@@ -48,7 +48,7 @@ export function loginHref(loc: { pathname: string; search: string; hash: string 
 }
 
 function UserMenu() {
-  const { session, setSession, refresh, isDemo } = useSession();
+  const { session, refresh, isDemo } = useSession();
   const loc = useLocation();
   const w = useWalkthrough();
   const [open, setOpen] = useState(false);
@@ -83,7 +83,7 @@ function UserMenu() {
         Sign in
       </LinkButton>
     );
-  const logout = async () => {
+  const signOut = async () => {
     // Signing out leaves nothing of this account's query drafts or chats behind on a shared browser, in any tab.
     beginSignOut(user.id);
     // Sign-in is shown now, with the account closed on screen, not once the server has answered: a move made
@@ -96,8 +96,13 @@ function UserMenu() {
       if (e instanceof ApiError && e.offline) markSignOutPending(session?.sessionId);
     }
     finishSignOut(user.id);
-    const s = await refresh();
-    if (s) setSession(s);
+  };
+  // A sign-in made before this has finished waits for it (see whileSigningOut).
+  const logout = async () => {
+    const done = signOut();
+    whileSigningOut(done);
+    await done;
+    await refresh();
   };
   return (
     <div
@@ -289,6 +294,8 @@ export function Shell({ children }: { children: ReactNode }) {
         <Link to="/privacy" className="underline-offset-2 hover:text-fg hover:underline">
           Privacy policy
         </Link>
+        {' · '}
+        <a href="/def" className="underline-offset-2 hover:text-fg hover:underline">Public list of standards</a>
       </footer>
       <WalkthroughDock />
     </div>

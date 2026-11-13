@@ -10,6 +10,8 @@ The top of `/alpha` says which version of Concord the tester is using (and the b
 
 Testers are encouraged to sign in (Google, GitHub or their own WebID, or a tester account kept in their browser when those aren't switched on). Concord then saves each version they test, the roles they tried and their feedback to their own pod (`concord/alpha/testing.jsonld` and `concord/feedback/`). That stays tied to their own account while they play a simulated persona: a second cookie remembers who the tester is until they sign out. The history itself is kept on the Concord server, so a pod that is down never loses a visit or a piece of feedback, and the pod gets a copy that is rewritten whenever the history changes (and again on a later visit if the pod couldn't be written to). Signing in with Google, GitHub or a WebID after using a tester account moves the whole history and its feedback into that account in one step. The tester account is then closed and its other sessions end.
 
+To bring a real person into your group, open Governance, Members and roles, then Invite people. Choose their roles and create a link, copy it once and send it privately. The recipient signs in with their own account to join; an Alpha tester account works too. Simulated personas and agents cannot accept invitations. Demo personas can still be added through Add a simulated member below the invitation form.
+
 When they come back on a newer version, the page shows what changed since the last version they tested (signed-out testers pick it themselves), the role picker marks roles with changes made for them, the Explore step leads with those changes, and the feedback page offers a short questionnaire about just those changes before the overall questions.
 
 ## 1. Pick a role (2 minutes)

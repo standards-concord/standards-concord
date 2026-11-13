@@ -245,9 +245,8 @@ export function ValidateTab() {
   // Signing in or out (here or in another tab) drops what the last account's sources showed and checks again as the new one.
   const [accountEpoch, setAccountEpoch] = useState(0);
   const examples = useAsync(async () => {
-    const res = await fetch(`${iri}/examples/data.ttl`, { cache: 'no-store' });
-    return res.ok && !!(await res.text()).trim();
-  }, [iri, accountEpoch]);
+    return (await api.examples(id, version)).available;
+  }, [id, version, accountEpoch]);
 
   useEffect(() => {
     const off = onAccountChange(() => {

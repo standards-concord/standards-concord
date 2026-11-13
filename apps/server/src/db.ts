@@ -26,6 +26,7 @@ export type Collection =
   | 'votes'
   | 'releases'
   | 'agentTokens'
+  | 'invites'
   | 'agentReports'
   | 'oauthClients'
   | 'oauthRequests'

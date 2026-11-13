@@ -66,6 +66,8 @@ export interface TermAnnotations {
 
 export interface TermBase extends TermAnnotations {
   iri: IRI;
+  /** Ontologies named by rdfs:isDefinedBy, including terms outside their namespace. */
+  definedBy?: IRI[];
   deprecated?: boolean;
   replacedBy?: IRI;
 }
@@ -351,6 +353,8 @@ export interface FairResolution {
 }
 
 export interface FairContext {
+  /** Address checks begin only after the ontology's first published release. */
+  unreleased?: boolean;
   resolution?: FairResolution;
 }
 

@@ -53,8 +53,8 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.49.0',
-    date: '2026-11-11',
+    version: '0.53.0',
+    date: '2026-11-13',
     title: 'Nine sample standards from the Solid ecosystem',
     changes: [{
       id: 'solid-sample-standards', type: 'feat',
@@ -62,6 +62,157 @@ export const APP_RELEASES: AppRelease[] = [
       detail: 'Open Sample standards on the home page to explore vocabularies used by SolidOS, including sharing permissions, forms, contacts and meetings. Each sample names its original publisher, licence and conversion changes.',
       roles: [], to: '/',
     }],
+  },
+  {
+    version: '0.52.1',
+    date: '2026-11-13',
+    title: 'Signing in straight after signing out',
+    changes: [{
+      id: 'sign-in-after-sign-out',
+      type: 'fix',
+      title: 'Signing in straight after signing out keeps you signed in',
+      detail: 'Signing in again in the moment after signing out could leave you back at the sign-in page. The new sign-in now waits until the old session has ended, and a slow connection no longer undoes it. Signing out also opens plain sign-in now, so the next person on this browser starts on their own first page, not the page the last person had open.',
+      roles: [],
+      to: '/',
+    }],
+  },
+  {
+    version: '0.52.0',
+    date: '2026-11-13',
+    title: 'Invite people to a working group',
+    changes: [{
+      id: 'invite-people', type: 'feat', title: 'Invite people to a working group',
+      detail: 'Create a private invitation link with chosen roles, an expiry and a use limit. People sign in to join your group; revoke a link whenever you need to.',
+      roles: ['steward'], to: '{o}/governance#roles',
+    }],
+  },
+  {
+    version: '0.51.0',
+    date: '2026-11-13',
+    title: 'A public list of standards',
+    changes: [
+      {
+        id: 'public-catalogue',
+        type: 'feat',
+        title: 'A public list of standards',
+        detail: 'Discover standards before signing in, with public pages, release details and machine-readable catalogues.',
+        roles: ['member'],
+        to: '/def',
+      },
+    ],
+  },
+  {
+    version: '0.50.0',
+    date: '2026-11-13',
+    title: 'Edit a change request by hand',
+    changes: [{
+      id: 'edit-change-request-by-hand', type: 'feat', title: 'Edit a change request by hand',
+      detail: 'Correct a request’s title and reason, reword or rename drafted terms, and remove individual edits before or during review. Renaming keeps references together, and saving new edits asks reviewers to look again.',
+      roles: ['steward', 'contributor', 'member'], to: '{o}/changes',
+    }],
+  },
+  {
+    version: '0.49.0',
+    date: '2026-11-13',
+    title: 'First steps for a new standard, and editing its details',
+    changes: [
+      {
+        id: 'new-standard-first-steps', type: 'feat', title: 'First steps for a new standard',
+        detail: 'Follow four steps from a use case to a first release. Address checks wait until a version is published.',
+        roles: ['steward'], to: '/',
+      },
+      {
+        id: 'edit-standard-details', type: 'feat', title: 'Edit a standard’s details',
+        detail: 'Owners and stewards can update the title, description and subject area used in Concord’s listing.',
+        roles: ['steward'], to: '{o}',
+      },
+      {
+        id: 'empty-browse-diagram', type: 'fix', title: 'A useful start in Browse and Diagram',
+        detail: 'Empty views explain how to add the first terms. An empty Diagram stays at 100% zoom without an SVG error.',
+        roles: [], to: '{o}/browse',
+      },
+      {
+        id: 'new-standard-needs-description', type: 'fix', title: 'A new standard asks for its description',
+        detail: 'Without a description in the ontology file, every change failed its checks. The New ontology dialog now requires one.',
+        roles: ['steward'], to: '/',
+      },
+      {
+        id: 'policy-edit-kept-on-refresh', type: 'fix', title: 'Policy edits survive a background refresh',
+        detail: 'An edit made just after opening Governance could be dropped when the page refreshed, leaving Save policy disabled.',
+        roles: ['steward'], to: '{o}/governance',
+      },
+    ],
+  },
+  {
+    version: '0.48.2',
+    date: '2026-11-13',
+    title: "Public pages list only the standard's own terms, and smaller fixes",
+    changes: [
+      {
+        id: 'public-own-terms',
+        type: 'fix',
+        title: "Public pages list only the standard's own terms",
+        detail: 'Outside declarations are folded by vocabulary. Term search, counts and structured data list only terms the standard defines.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '/def/volunteering',
+      },
+      {
+        id: 'draft-release-next-step',
+        type: 'fix',
+        title: 'Draft releases explain when to publish',
+        detail: 'The next step for a draft release is to publish when the version is ready.',
+        roles: ['steward', 'odi'],
+        to: '{o}/releases',
+      },
+      {
+        id: 'held-version-example-availability',
+        type: 'fix',
+        title: 'Validate data opens cleanly for versions being reviewed',
+        detail: 'Example data is offered only when its public file is available, including the approval and consent checks.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '{o}/validate',
+      },
+      {
+        id: 'changes-draft-wording',
+        type: 'fix',
+        title: 'The empty Changes list names Draft changes',
+        detail: 'The hint uses the name of the action on Use cases.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '{o}/changes',
+      },
+      {
+        id: 'browse-and-code-keyboard-access',
+        type: 'fix',
+        title: 'Larger class tree controls and keyboard access to code views',
+        detail: 'Expand and collapse controls have larger hit areas. Read-only code views have named keyboard focus and support scrolling with the arrow keys.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '{o}/source',
+      },
+      {
+        id: 'interview-storage-link',
+        type: 'fix',
+        title: 'The interview privacy note links the storage name',
+        detail: "The note links to your Solid pod or Concord's private storage without printing the long address.",
+        roles: ['steward', 'contributor', 'member', 'odi'],
+        to: '{o}/use-cases',
+      },
+      {
+        id: 'required-dialog-field-hints',
+        type: 'fix',
+        title: 'Creation dialogs explain what is required',
+        detail: 'New ontology and New change request mark required fields and explain what is missing before their buttons can be used.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '/',
+      },
+      {
+        id: 'prefix-in-ontology-details',
+        type: 'fix',
+        title: 'The prefix appears with its namespace in Ontology details',
+        detail: 'Hub cards focus on the title. Open Ontology details to read the prefix and namespace together.',
+        roles: ['steward', 'contributor', 'member', 'odi', 'agent'],
+        to: '/',
+      },
+    ],
   },
   {
     version: '0.48.1',
@@ -933,7 +1084,7 @@ export const APP_RELEASES: AppRelease[] = [
         detail:
           'The login page now says “Sign in with Solid”, with the Solid logo. It opens the same sign-in window as the other Solid Suite apps: pick solidcommunity.net or another provider, enter your WebID, or type your provider’s address.',
         roles: [],
-        to: '/login',
+        to: '/',
         ask: 'Could you find your provider, and was it clear what to choose if you don’t have a pod yet?',
       },
     ],
@@ -1022,7 +1173,7 @@ export const APP_RELEASES: AppRelease[] = [
         detail:
           'Already have a Solid pod? Choose “Sign in with your WebID” on the login page. You sign in with your own Solid provider, and Concord checks that your WebID names that provider.',
         roles: [],
-        to: '/login',
+        to: '/',
         ask: 'If you have a WebID, how easy was it to sign in with it?',
       },
       {
