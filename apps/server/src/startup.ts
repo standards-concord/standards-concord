@@ -68,7 +68,7 @@ export async function unfinishedTasks(tasks: StartupTask[], appVersion = APP_VER
 
 /** The server's start-up tasks. */
 export async function defaultStartupTasks(): Promise<StartupTask[]> {
-  const [{ migrateClientSecrets }, { backfillDemoAvatars }, { seedDemo }, { refreshReleasePages }, { syncFeedbackSharing }] = await Promise.all([
+  const [{ migrateClientSecrets }, { backfillDemoAvatars }, { seedDemo, refreshPersonaProfiles, retireDemoDescriptions }, { refreshReleasePages }, { syncFeedbackSharing }] = await Promise.all([
     import('./oauth.js'),
     import('./services/users.js'),
     import('./services/simulation.js'),
@@ -95,6 +95,15 @@ export async function defaultStartupTasks(): Promise<StartupTask[]> {
             },
           },
           { name: 'demo-seed', run: async () => void (await seedDemo()) },
+          // A demo seeded by an earlier version keeps the wording it had then: bring it up to date.
+          {
+            name: 'demo-wording',
+            run: async () => {
+              const people = await refreshPersonaProfiles();
+              const descriptions = await retireDemoDescriptions();
+              if (people || descriptions) console.log(`[seed] updated ${people} simulated profile(s) and ${descriptions} demo description(s) to the current wording`);
+            },
+          },
         ]
       : []),
     // Release pages written by an older renderer (or without a use case snapshot) are regenerated.

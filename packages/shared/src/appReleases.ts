@@ -53,6 +53,19 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
+    version: '0.52.2',
+    date: '2026-11-13',
+    title: 'Up-to-date descriptions of the demo’s people',
+    changes: [{
+      id: 'demo-wording-refresh',
+      type: 'fix',
+      title: 'Up-to-date descriptions of the demo’s people',
+      detail: 'The simulated working group’s profiles and the demo standard’s description now follow the latest wording, also on servers that were set up before it changed.',
+      roles: [],
+      to: '/welcome',
+    }],
+  },
+  {
     version: '0.52.1',
     date: '2026-11-13',
     title: 'Signing in straight after signing out',

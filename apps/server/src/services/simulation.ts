@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { FORMAT_INFO, serialize, stampRelease, XSD } from '@concord/core';
@@ -44,6 +45,64 @@ async function ensurePersonas(): Promise<Map<string, User>> {
     byKey.set(p.key, u);
   }
   return byKey;
+}
+
+/** The demo ontology's description, as seeded. */
+export const DEMO_DESCRIPTION =
+  'A shared standard for publishing volunteering opportunities: who offers them, the roles, skills, sessions and locations involved, and how people apply.';
+
+/**
+ * Descriptions the demo ontology was seeded with in earlier versions, which must not be shown any more. They are kept
+ * only as SHA-256 hashes (of the whole description), so their wording isn't repeated here.
+ */
+export const RETIRED_DEMO_DESCRIPTION_HASHES: ReadonlySet<string> = new Set(['c8c241b29b204beaabd5051bee043561ed6fa77ea9125c1534b336597cf60f67']);
+
+const sha256 = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
+
+const personaUser = (users: User[], p: PersonaSpec) =>
+  users.find((u) => u.simulated && u.providers?.some((x) => x.provider === 'demo' && x.subject === `persona:${p.key}`)) ??
+  users.find((u) => u.simulated && u.name === p.name);
+
+/**
+ * The simulated people's profiles follow personas.ts. The seed only creates them, so a server seeded earlier kept
+ * whatever wording they had then. Returns how many changed; nobody is created here.
+ */
+export async function refreshPersonaProfiles(): Promise<number> {
+  let changed = 0;
+  const existing = await personas();
+  for (const p of PERSONAS) {
+    const u = personaUser(existing, p);
+    if (!u || (u.persona === p.persona && u.organisation === p.organisation)) continue;
+    // Re-read in the write's own transaction, so a change made meanwhile (a picture, say) isn't undone.
+    const done = await transaction(async () => {
+      const fresh = await getUser(u.id);
+      if (!fresh?.simulated || (fresh.persona === p.persona && fresh.organisation === p.organisation)) return false;
+      await put('users', { ...fresh, persona: p.persona, organisation: p.organisation });
+      return true;
+    });
+    if (done) changed++;
+  }
+  return changed;
+}
+
+/**
+ * A demo ontology still described with a retired seed description gets the current one. A description someone has
+ * edited since is left as it is. Returns how many changed.
+ */
+export async function retireDemoDescriptions(retired: ReadonlySet<string> = RETIRED_DEMO_DESCRIPTION_HASHES): Promise<number> {
+  let changed = 0;
+  const stale = (o: OntologyProject | undefined) => !!o?.demo && o.slug === DEMO_SLUG && typeof o.description === 'string' && retired.has(sha256(o.description));
+  for (const o of await list<OntologyProject>('ontologies')) {
+    if (!stale(o)) continue;
+    const done = await transaction(async () => {
+      const fresh = await get<OntologyProject>('ontologies', o.id);
+      if (!stale(fresh)) return false;
+      await updateProject({ ...fresh!, description: DEMO_DESCRIPTION });
+      return true;
+    });
+    if (done) changed++;
+  }
+  return changed;
 }
 
 /** Records a demo use case's seeded content as the only version public pages show. */
@@ -137,7 +196,7 @@ async function seedHistory() {
   const project = await createProject(
     {
       title: 'Volunteering opportunities',
-      description: 'A shared standard for publishing volunteering opportunities: who offers them, the roles, skills, sessions and locations involved, and how people apply.',
+      description: DEMO_DESCRIPTION,
       prefix: 'vol',
       domain: 'volunteering in the UK (charities, councils, volunteering platforms)',
       governanceTemplate: 'working-group',
