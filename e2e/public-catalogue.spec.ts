@@ -100,3 +100,29 @@ test('sign-in lists at most five standards and keeps its catalogue link when loa
   await expect(here.getByRole('list')).toHaveCount(0);
   await expect(here.getByRole('heading')).toHaveCount(0);
 });
+
+test('a tester follows "Try it" from the list of changes to the public catalogue', async ({ page }) => {
+  // The list of changes linked server-rendered pages (/def and a standard's public page) through the app's
+  // router, which has no such route, so "Try it" showed "Not found".
+  await demoOntology(page.request);
+  await page.goto('/alpha');
+  const fold = page.getByRole('button', { name: /What’s new/ });
+  await expect(async () => {
+    if ((await fold.getAttribute('aria-expanded')) !== 'true') await fold.click();
+    await expect(page.getByRole('region', { name: 'What’s changed' })).toBeVisible({ timeout: 1000 });
+  }).toPass();
+  const changed = page.getByRole('region', { name: 'What’s changed' });
+  await changed.getByLabel('Last version you tested').selectOption('0.48.1');
+  const all = changed.getByRole('button', { name: /^Show all \d+ changes$/ });
+  if (await all.count()) await all.click();
+  await changed.getByRole('link', { name: 'Try it: A public list of standards' }).click();
+  await expect(page).toHaveURL(/\/def$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'Standards on Concord' })).toBeVisible();
+  await page.goBack();
+  // The version picked is remembered; the longer list folds again after the reload.
+  await expect(changed.getByRole('heading', { name: 'What’s changed since 0.48.1' })).toBeVisible();
+  if (await all.count()) await all.click();
+  await changed.getByRole('link', { name: 'Try it: Public pages list only the standard\'s own terms' }).click();
+  await expect(page).toHaveURL(/\/def\/volunteering$/);
+  await expect(page.locator('meta[name="generator"]')).toHaveAttribute('content', /Concord public page/);
+});

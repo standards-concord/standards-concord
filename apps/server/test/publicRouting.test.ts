@@ -12,6 +12,9 @@ describe('public catalogue routing', () => {
     const proxy = viteConfig.server!.proxy!;
     for (const url of serverPaths) expect(Object.keys(proxy).some((key) => key.startsWith('^') && new RegExp(key).test(url)), url).toBe(true);
     expect(Object.keys(proxy).some((key) => key.startsWith('^') && new RegExp(key).test('/definitions'))).toBe(false);
+    // Vite matches against the URL with its query string: a link with one used to fall through to the app shell.
+    for (const url of ['/def?utm_source=link', '/def.jsonld?download=1', '/def.ttl?download=1']) expect(Object.keys(proxy).some((key) => key.startsWith('^') && new RegExp(key).test(url)), url).toBe(true);
+    for (const url of ['/definitions?x=1', '/def.txt', '/def.ttlx']) expect(Object.keys(proxy).some((key) => key.startsWith('^') && new RegExp(key).test(url)), url).toBe(false);
     // Vite preview inherits server.proxy unless overridden.
     expect(viteConfig.preview?.proxy).toBeUndefined();
   });

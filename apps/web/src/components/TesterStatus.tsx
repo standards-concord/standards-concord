@@ -6,7 +6,7 @@ import { api } from '../api';
 import { useAction } from '../lib/hooks';
 import { useSession } from '../lib/session';
 import { useDemoOntology } from '../lib/ontologies';
-import { CURRENT_RELEASE, changeLink, useTester } from '../lib/tester';
+import { CURRENT_RELEASE, changeLink, serverRendered, useTester } from '../lib/tester';
 import { TESTER_ROLES } from '../lib/walkthrough';
 import { formatDate } from '../lib/format';
 import { GitHubIcon, GoogleIcon } from './badges';
@@ -344,7 +344,7 @@ export function ChangeList({ changes, demoId, compact }: { changes: ChangeWithRe
               {!compact && <p className="mt-0.5 text-xs text-muted">{c.detail}</p>}
             </div>
             {href && (
-              <Link to={href} className="mt-0.5 inline-flex shrink-0 items-center gap-1 text-xs font-medium text-accent hover:underline" aria-label={`Try it: ${c.title}`}>
+              <Link to={href} reloadDocument={serverRendered(href)} className="mt-0.5 inline-flex shrink-0 items-center gap-1 text-xs font-medium text-accent hover:underline" aria-label={`Try it: ${c.title}`}>
                 Try it <ArrowRight className="size-3.5" aria-hidden />
               </Link>
             )}
