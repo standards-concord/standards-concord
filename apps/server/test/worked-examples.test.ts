@@ -238,3 +238,36 @@ describe('public worked examples', () => {
     expect((await request(app).get('/def/volunteering/draft/examples.json')).body).toEqual(original);
   });
 });
+
+// Validate used to probe a public file and log a 503 while the version was held.
+describe('example availability API', () => {
+  it('reports released and draft examples without exposing held or withdrawn data', async () => {
+    const { project, visible } = await setup();
+    await release(project);
+    const agent = request.agent(app);
+    await agent.post('/api/auth/demo').send({ name: 'Examples reader', role: 'contributor' });
+    const url = `/api/ontologies/${project.id}/examples`;
+    for (const version of ['1.0.0', 'draft']) {
+      const res = await agent.get(`${url}/${version}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ available: true });
+    }
+    await put('kv', { id: `public-hold:${project.id}`, ontologyId: project.id, versions: ['1.0.0'], since: clock.iso() });
+    expect((await agent.get(`${url}/1.0.0`)).body).toEqual({ available: false });
+    await withdrawUseCase(visible, owner);
+    expect((await agent.get(`${url}/draft`)).body).toEqual({ available: false });
+    expect((await agent.get(`${url}/9.9.9`)).status).toBe(404);
+    expect((await agent.get(`${url}/working`)).status).toBe(404);
+    expect((await request(app).get(`${url}/1.0.0`)).status).toBe(401);
+  });
+
+  it('reports no examples for an empty released version', async () => {
+    const project = await createProject({ title: newId('No examples'), prefix: 'none', description: '' }, owner);
+    await release(project);
+    const agent = request.agent(app);
+    await agent.post('/api/auth/demo').send({ name: 'No examples reader', role: 'editor' });
+    const res = await agent.get(`/api/ontologies/${project.id}/examples/1.0.0`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ available: false });
+  });
+});

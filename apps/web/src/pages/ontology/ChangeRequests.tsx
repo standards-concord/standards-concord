@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import type { ChangeRequestKind, ChangeRequestStatus } from '@concord/shared';
 import { Bug, GitPullRequest, Globe, Plus } from 'lucide-react';
@@ -38,6 +38,11 @@ function NewChangeRequestDialog({ open, onClose }: { open: boolean; onClose: () 
     onClose();
     nav(`/o/${id}/changes/${cr.id}`);
   });
+  const hintId = useId();
+  // Either text is enough: with no plain-language description, the changes are drafted from the reason.
+  const described = !!(f.naturalLanguage.trim() || f.description.trim());
+  const missing = !f.title.trim() && !described ? 'Add a title and describe the change to continue.'
+    : !f.title.trim() ? 'Add a title to continue.' : !described ? 'Describe the change, or say why it is needed, to continue.' : undefined;
   return (
     <Dialog
       open={open}
@@ -46,18 +51,19 @@ function NewChangeRequestDialog({ open, onClose }: { open: boolean; onClose: () 
       wide
       footer={
         <>
+          {missing && <p id={hintId} className="w-full text-sm text-muted">{missing}</p>}
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" loading={create.pending} disabled={!f.title.trim() || !(f.naturalLanguage.trim() || f.description.trim())} onClick={() => void create.run()}>
+          <Button variant="primary" loading={create.pending} disabled={!!missing} aria-describedby={missing ? hintId : undefined} onClick={() => void create.run()}>
             {create.pending ? 'Drafting changes…' : 'Create and draft changes'}
           </Button>
         </>
       }
     >
       <div className="space-y-4">
-        <Field label="Title">
-          <Input value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} placeholder="e.g. Model volunteer shifts" />
+        <Field label={<>Title <span className="text-muted">(required)</span></>}>
+          <Input required aria-required="true" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} placeholder="e.g. Model volunteer shifts" />
         </Field>
         <Field label="Kind">
           <Select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value as ChangeRequestKind })}>
@@ -260,7 +266,7 @@ export function ChangeRequestsTab() {
         <Loading />
       ) : !rows.length ? (
         <EmptyState icon={GitPullRequest} title={filter === 'open' ? 'No open change requests' : 'Nothing here'} action={<Button icon={Plus} onClick={() => setDialog('new')}>New change request</Button>}>
-          Change requests also come from use cases (Synthesise), meetings, coding agents and bug reports.
+          Change requests also come from use cases (Draft changes), meetings, coding agents and bug reports.
         </EmptyState>
       ) : (
         <Card>

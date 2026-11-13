@@ -20,6 +20,12 @@ test.describe('requirements', () => {
     const demo = await demoOntology(request);
     await signInAsPersona(page, 'Aisha Rahman');
     await startInterview(page, demo.id);
+    // The privacy note used to print the raw private storage address on the page.
+    const storage = page.getByRole('link', { name: "Concord's private storage", exact: true });
+    await expect(storage).toHaveAttribute('href', /\/private\/interviews\//);
+    const note = page.getByText(/This transcript is saved privately/);
+    await expect(note).toContainText("This transcript is saved privately to Concord's private storage.");
+    await expect(note).not.toContainText('http');
     const progress = page.getByRole('region', { name: 'Use case progress' });
 
     // Send is disabled until there is something to send; Enter sends.

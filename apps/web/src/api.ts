@@ -275,6 +275,7 @@ export const api = {
   ontology: (id: string) => get<OntologyDetail>(`/api/ontologies/${e(id)}`),
   queryChat: (id: string, body: QueryChatRequest) => post<QueryChatResponse>(`/api/ontologies/${e(id)}/query-chat`, body as unknown as Json),
   view: (id: string, ref = 'working') => get<OntologyView>(`/api/ontologies/${e(id)}/view${qs({ ref })}`),
+  examples: (id: string, version: string) => get<{ available: boolean }>(`/api/ontologies/${e(id)}/examples/${e(version)}`),
   term: (id: string, iri: string) => get<TermDetail>(`/api/ontologies/${e(id)}/terms/${e(iri)}`),
   search: (id: string, q: string) => get<TermView[]>(`/api/ontologies/${e(id)}/search${qs({ q })}`),
   sourceUrl: (id: string, format: OutputFormat, ref = 'working', download = false) =>

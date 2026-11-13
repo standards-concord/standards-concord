@@ -236,9 +236,10 @@ export function CodeEditor({
       indentFolding,
       theme,
       langComp.current.of(support ?? []),
-      EditorView.contentAttributes.of({ 'aria-label': ariaLabel, ...(testId ? { 'data-testid': testId } : {}) }),
-      // Read-only views stay focusable (no editable:false) so keyboard selection,
-      // copy and Ctrl/⌘-F search work in them.
+      EditorView.contentAttributes.of({ 'aria-label': ariaLabel, tabindex: '0', ...(testId ? { 'data-testid': testId } : {}) }),
+      // Read-only views stay focusable (no editable:false) so keyboard selection, copy and Ctrl/⌘-F search work
+      // in them. The content is a tab stop already (contenteditable); the explicit tabindex says so to tools that
+      // don't count contenteditable, so the scrolling region has a keyboard focus target they can see.
       EditorState.readOnly.of(readOnly),
       wrap ? EditorView.lineWrapping : [],
       placeholder ? placeholderExt(placeholder) : [],

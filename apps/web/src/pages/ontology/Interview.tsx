@@ -140,17 +140,12 @@ export function InterviewPage() {
               <p className="mt-2 flex items-start gap-1.5 text-xs text-subtle">
                 <Lock className="mt-0.5 size-3 shrink-0" />
                 <span>
-                  This transcript is saved privately to {s.storage.kind === 'solid' ? 'your Solid pod' : 'private storage'}
-                  {s.storage.url && (
-                    <>
-                      {' '}
-                      (
-                      <a href={s.storage.url} target="_blank" rel="noreferrer" className="break-all underline">
-                        {s.storage.url}
-                      </a>
-                      )
-                    </>
-                  )}
+                  This transcript is saved privately to{' '}
+                  {s.storage.url ? (
+                    <a href={s.storage.url} target="_blank" rel="noreferrer" className="underline">
+                      {s.storage.kind === 'solid' ? 'your Solid pod' : "Concord's private storage"}
+                    </a>
+                  ) : s.storage.kind === 'solid' ? 'your Solid pod' : "Concord's private storage"}
                   . The use case stays private to you unless you choose to share it.
                 </span>
               </p>

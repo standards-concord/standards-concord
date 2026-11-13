@@ -220,7 +220,7 @@ export async function pageInput(
       exampleGetter: example?.datasetGetter,
       exampleProperty: example?.properties[0]?.name,
     },
-    view: graph.view(),
+    view: graph.view({ includeVocabularyDeclarations: true }),
     kind: isDraft ? 'draft' : 'release',
     version,
     release: release && !isDraft ? { level: release.level, notes: (await releaseForViewer(release, undefined)).notes, publishedAt: release.publishedAt, githubUrl: release.githubUrl } : undefined,
@@ -444,7 +444,7 @@ async function serve(req: Request, res: Response) {
     if (await isHeld(project, latest ?? 'draft')) return notFound(res, `${project.title} has no version “${requested}”.`, root);
     const graph = await readOntology(project, latest ?? 'draft', undefined);
     const term = graph.term(`${project.namespace}${requested}`) ?? graph.term(`${project.ontologyIRI.replace(/[#/]$/, '')}/${requested}`);
-    const anchor = term && termAnchors(graph.view(), project.namespace).get(term.iri);
+    const anchor = term && termAnchors(graph.view({ includeVocabularyDeclarations: true }), project.namespace).get(term.iri);
     if (anchor && !last.format) return res.redirect(303, `${root}#${fragment(anchor)}`);
     return notFound(res, `${project.title} has no version “${requested}”.`, root);
   }

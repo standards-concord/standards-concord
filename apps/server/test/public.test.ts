@@ -44,6 +44,70 @@ beforeAll(async () => {
 });
 
 describe('public ontology pages', () => {
+  // The page used to present dcterms:title and friends as terms of the standard.
+  it('lists only own terms in references, search, counts, anchors and JSON-LD, with outside declarations folded by vocabulary', async () => {
+    const project = { ...(await findProject('volunteering'))!, namespace: 'https://example.org/own#', ontologyIRI: 'https://example.org/own', prefix: 'ex' };
+    const graph = await OntologyGraph.fromTurtle(`
+      @prefix ex: <https://example.org/own#> .
+      @prefix other: <https://other.example/vocab#> .
+      @prefix owl: <http://www.w3.org/2002/07/owl#> .
+      @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+      @prefix dcterms: <http://purl.org/dc/terms/> .
+      @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+      skos:definition a owl:AnnotationProperty .
+      <https://example.org/own> a owl:Ontology .
+      ex:Local a owl:Class ; rdfs:subClassOf other:Outside .
+      other:Adopted a owl:Class ; rdfs:isDefinedBy <https://example.org/own> .
+      other:Outside a owl:Class ; rdfs:isDefinedBy <https://elsewhere.example/ontology> .
+      other:object a owl:ObjectProperty . other:data a owl:DatatypeProperty .
+      other:item a owl:NamedIndividual . dcterms:title a owl:AnnotationProperty .
+      other:scheme a skos:ConceptScheme . other:code a skos:Concept ; skos:inScheme other:scheme .
+      <https://unmapped.example/vocab#term> a owl:AnnotationProperty .
+      ex:note a owl:AnnotationProperty .
+    `);
+    const turtleBefore = await graph.toTurtle();
+    const input = await pageInput(project, 'draft', 'https://example.org', { graph, examples: [] });
+    const html = renderOntologyPage(input);
+    expect(html).toContain('<article class="term" id="Local"');
+    expect(html).toContain('<article class="term" id="Adopted"');
+    expect(html).toContain('<article class="term" id="note"');
+    for (const name of ['Outside', 'object', 'data', 'item', 'title', 'scheme', 'code', 'term']) {
+      expect(html).not.toContain(`id="${name}"`);
+      expect(html).not.toContain(`href="#${name}"`);
+    }
+    expect(html).toContain('href="https://other.example/vocab#Outside"');
+    expect(html).toMatch(/<strong>2<\/strong><span>classes<\/span>/);
+    expect(html).not.toMatch(/<span>(object|datatype) properties<\/span>/);
+    expect(html).not.toContain('aria-label="Object properties"');
+    expect(html).not.toContain('data-term="outside');
+    const folded = html.match(/<details[^>]*><summary>Terms from other vocabularies \(9\)<\/summary>([^]*?)<\/details>/)!;
+    expect(folded).not.toBeNull();
+    expect(folded[0]).not.toMatch(/<details[^>]* open/);
+    expect(folded[1]).toContain('Dublin Core Terms:');
+    expect(folded[1]).toContain('SKOS:');
+    expect(folded[1]).toContain('href="http://www.w3.org/2004/02/skos/core#definition"');
+    expect(folded[1]).toContain('href="http://purl.org/dc/terms/title"');
+    expect(folded[1]).toContain('https://unmapped.example/vocab#:');
+    expect(folded[1]).toContain('href="https://unmapped.example/vocab#term"');
+    expect(folded[1]).not.toContain('Adopted');
+    const json = JSON.parse(html.match(/<script type="application\/ld\+json">([^]*?)<\/script>/)![1]);
+    expect(json.hasDefinedTerm.map((t: { '@id': string }) => t['@id']).sort()).toEqual(['https://example.org/own#Local', 'https://example.org/own#note', 'https://other.example/vocab#Adopted']);
+    expect([...termAnchors(input.view, project.namespace).keys()].sort()).toEqual(['https://example.org/own#Local', 'https://example.org/own#note', 'https://other.example/vocab#Adopted']);
+    // Rendering changes no RDF: declarations remain available to every download.
+    expect(await graph.toTurtle()).toBe(turtleBefore);
+    expect(turtleBefore).toContain('dcterms:title');
+  });
+
+  it('an empty ontology lists no terms despite its required vocabulary declarations', async () => {
+    const owner = await createUser({ name: 'Empty page owner', provider: 'github', subject: 'empty-page-owner' });
+    const project = await createProject({ title: 'Empty public reference', prefix: 'empty', description: '' }, owner);
+    const html = renderOntologyPage(await pageInput(project, 'draft', 'https://example.org'));
+    expect(html).not.toContain('<article class="term"');
+    expect(html).not.toContain('class="nav-group"');
+    expect(JSON.parse(html.match(/<script type="application\/ld\+json">([^]*?)<\/script>/)![1]).hasDefinedTerm).toEqual([]);
+    expect(html).toContain('Terms from other vocabularies (');
+  });
+
   it('serves the HTML page at the ontology IRI path with the latest release', async () => {
     const res = await request(app).get('/def/volunteering').set('Accept', 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8');
     expect(res.status).toBe(200);
@@ -345,8 +409,8 @@ describe('review fixes', () => {
     const view = {
       metadata: { iri: 'https://example.org/v', creators: [], contributors: [], imports: [], keywords: [], extra: [] },
       classes: [
-        cls('https://other.org/x#Thing'),
-        cls('https://other.org/x#main'),
+        { ...cls('https://other.org/x#Thing'), definedBy: ['https://example.org/v'] },
+        { ...cls('https://other.org/x#main'), definedBy: ['https://example.org/v'] },
         cls(`${NS}Café`),
         cls(`${NS}sec-classes`),
         cls(`${NS}main`),
@@ -376,7 +440,7 @@ describe('review fixes', () => {
 
     // The page's own ids step aside: #main and #sec-classes are the terms.
     const input = await pageInput((await findProject('volunteering'))!, '1.0.0', 'https://example.org');
-    input.project = { ...input.project, namespace: NS };
+    input.project = { ...input.project, namespace: NS, ontologyIRI: view.metadata.iri };
     input.view = view;
     const html = renderOntologyPage(input);
     const ids = [...html.matchAll(/\sid="([^"]*)"/g)].map((m) => m[1]);
