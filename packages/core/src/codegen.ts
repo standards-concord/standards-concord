@@ -20,7 +20,7 @@ import type { OntologyGraph } from './graph.js';
 import { deriveShapes, type DerivedShapes } from './shacl.js';
 import { primitiveOf } from './xsdTypes.js';
 import { codeModel, identifierFrom, JS_KEYWORDS, RESERVED_CLASSES, THING, type CodeModel } from './codemodel.js';
-import { distributionNotice, noticeComment } from './notices.js';
+import { distributionNotice } from './notices.js';
 
 const SH = NS.sh;
 const XSD = NS.xsd;
@@ -302,7 +302,9 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
   const dataset = `/** Finds the instances of every class above in an RDF/JS dataset. */\nexport class ${datasetClass} extends DatasetWrapper {\n${getters.join('\n\n')}\n}`;
 
   const notice = distributionNotice(graph);
-  const header = noticeComment(notice, 'block') + [
+  // Notices go inside the generated header, one line each, so they add as few lines as possible.
+  const noticeLines = notice ? notice.replace(/\r\n?/g, '\n').split('\n').filter((line) => line.trim()).map((line) => ` * ${commentSafe(line)}`) : [];
+  const header = [
     `/**`,
     ` * ${commentSafe(`${meta.title ?? ontology.iri ?? 'Ontology'}${ontology.version ? ` ${ontology.version}` : ''}`)}: classes for every SHACL node shape.`,
     ...(opts.sourceUrl ? [` * Source: ${commentSafe(opts.sourceUrl)}`] : []),
@@ -312,6 +314,7 @@ export async function toWrapperClasses(graph: OntologyGraph, opts: CodegenOption
     ` * Usage: const data = new ${datasetClass}(dataset, factory); for (const x of data.${getters.length ? /get (\w+)\(/.exec(getters[0])![1] : 'thing'}) { ... }`,
     ` * or wrap one node: new ${classes[0]?.name ?? 'Thing'}(iri, dataset, factory).`,
     ...(model.notes.length ? [` *`, ...model.notes.map((n) => ` * Note: ${commentSafe(n)}`)] : []),
+    ...(noticeLines.length ? [` *`, ...noticeLines] : []),
     ` */`,
   ].join('\n');
   const ontologyConst = `/** The ontology these classes were generated from. */\nexport const ontology = ${JSON.stringify(Object.fromEntries(Object.entries(ontology).filter(([, x]) => x !== undefined)), null, 2)} as const;`;

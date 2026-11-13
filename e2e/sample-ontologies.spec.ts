@@ -13,7 +13,7 @@ test('the public catalogue groups sample copies after ordinary standards and mar
   await expect(sampleLink).toBeHidden();
   await samples.locator('summary').click();
   await expect(sampleLink).toBeVisible();
-  await expect(samples.getByRole('listitem').filter({ has: sampleLink })).toContainText('Sample copy');
+  await expect(samples.getByRole('listitem').filter({ has: page.getByRole('link', { name: 'Web Access Control', exact: true }) })).toContainText('Sample copy');
   const standards = page.getByRole('list', { name: 'Standards', exact: true });
   await expect(standards.getByRole('link', { name: 'Volunteering opportunities', exact: true })).toBeVisible();
   await expect(standards.getByRole('link', { name: 'Web Access Control', exact: true })).toHaveCount(0);
@@ -118,4 +118,27 @@ test('the sample owner can open its policy editor', async ({ page }) => {
   await page.getByRole('button', { name: 'Edit policy', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Save policy', exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: 'Cancel', exact: true }).first().click();
+});
+
+test('sample notices link to their shapes in the Solid Shapes Catalogue, and the Schedule sample is there', async ({ page }) => {
+  await signIn(page, { name: 'Shapes reader', role: 'contributor' });
+  await page.goto('/');
+  const samples = page.getByRole('region', { name: 'Sample standards', exact: true });
+  await samples.getByRole('button', { name: 'Sample standards', exact: true }).click();
+  await samples.getByRole('link', { name: 'vCard', exact: true }).click();
+  const notice = page.getByRole('region', { name: 'About this sample', exact: true });
+  await expect(notice.getByRole('link', { name: 'Solid Shapes Catalogue', exact: true })).toHaveAttribute('href', 'https://github.com/solid/shapes');
+  await expect(notice.getByRole('link', { name: 'address_book.ttl', exact: true })).toHaveAttribute('href', 'https://github.com/solid/shapes/blob/main/shapes/address_book.ttl');
+  // Web Access Control has no shapes in the catalogue, so its notice has no shapes line.
+  await page.goto('/');
+  await samples.getByRole('button', { name: 'Sample standards', exact: true }).click();
+  await samples.getByRole('link', { name: 'Web Access Control', exact: true }).click();
+  await expect(notice).toBeVisible();
+  await expect(notice.getByRole('link', { name: 'Solid Shapes Catalogue', exact: true })).toHaveCount(0);
+  // The scheduler's vocabulary is public with the same notice.
+  await page.goto('/def/schedule/1.0.0');
+  await expect(page.getByRole('heading', { name: 'Schedule', exact: true, level: 1 })).toBeVisible();
+  const publicNotice = page.getByRole('region', { name: 'About this sample', exact: true });
+  await expect(publicNotice).toContainText('SolidOS scheduler pane');
+  await expect(publicNotice.getByRole('link', { name: 'event.ttl', exact: true })).toHaveAttribute('href', 'https://github.com/solid/shapes/blob/main/shapes/event.ttl');
 });

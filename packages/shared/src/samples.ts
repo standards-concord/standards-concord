@@ -9,6 +9,8 @@ export interface SampleAttribution {
   upstreamCopy: string;
   changes: string;
   usedBy: string;
+  /** SHACL shapes for this vocabulary in the Solid Shapes Catalogue (file names under shapes/). */
+  shapes?: readonly string[];
 }
 
 export interface SampleVocabulary extends SampleAttribution {
@@ -18,6 +20,13 @@ export interface SampleVocabulary extends SampleAttribution {
   namespace: string;
   description: string;
 }
+
+/** The Solid Shapes Catalogue, which describes the SolidOS data model as SHACL shapes. */
+export const SOLID_SHAPES_CATALOGUE = 'https://github.com/solid/shapes';
+
+/** Links to a sample's shapes in the Solid Shapes Catalogue. */
+export const sampleShapes = (sample: Pick<SampleAttribution, 'shapes'>) =>
+  (sample.shapes ?? []).map((file) => ({ file, url: `${SOLID_SHAPES_CATALOGUE}/blob/main/shapes/${file}` }));
 
 export const SAMPLE_HEALTH_NOTE = "Concord's checks flag some wording inherited from the original; it is kept as published so the copy stays faithful.";
 
@@ -33,6 +42,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     description: 'Settings and links that help Solid apps find profiles, preferences and storage.',
     usedBy: 'SolidOS account settings, profile discovery and type indexes', publisher: 'Solid Project',
     source: 'http://www.w3.org/ns/solid/terms', sourceTitle: 'Solid Terms', licence: cc0,
+    shapes: ['agent.ttl'],
     upstreamCopy: 'solid-terms.ttl', changes: `${common} Resolved rdf:Property declarations from their ranges and usage. Named anonymous provenance records with stable URNs.`,
   },
   {
@@ -49,6 +59,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     usedBy: 'SolidOS pod folders and resource browsing', publisher: 'W3C',
     source: 'http://www.w3.org/ns/ldp', sourceTitle: 'Linked Data Platform vocabulary', licence: w3c,
     copyrightNotice: w3cNotice('Linked Data Platform vocabulary', 'http://www.w3.org/ns/ldp', '2015'),
+    shapes: ['container.ttl'],
     upstreamCopy: 'ldp.ttl', changes: `${common} Preserved container hierarchies and resource links. Named anonymous publisher and author records with stable URNs; normalised owl:Individual declarations.`,
   },
   {
@@ -57,6 +68,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     usedBy: 'SolidOS workspaces, storage and preferences', publisher: 'W3C',
     source: 'http://www.w3.org/ns/pim/space', sourceTitle: 'Workspace Ontology', licence: w3c,
     copyrightNotice: w3cNotice('Workspace Ontology', 'http://www.w3.org/ns/pim/space'),
+    shapes: ['agent.ttl'],
     upstreamCopy: 'space.ttl', changes: `${common} Declared classes previously described only through their superclass.`,
   },
   {
@@ -80,6 +92,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     usedBy: 'SolidOS issue pane and meeting action items', publisher: 'W3C / Tim Berners-Lee; upstream copy maintained by SolidOS',
     source: 'http://www.w3.org/2005/01/wf/flow', sourceTitle: 'Issue Tracking Ontology', licence: w3c,
     copyrightNotice: w3cNotice('Issue Tracking Ontology', 'http://www.w3.org/2005/01/wf/flow'),
+    shapes: ['issue_tracker.ttl'],
     upstreamCopy: 'wf.ttl', changes: `${common} Expanded legacy N3 bare names in the original namespace. Removed label-only anonymous inverse properties, which do not identify an OWL inverse.`,
   },
   {
@@ -88,6 +101,7 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     usedBy: 'SolidOS address book and contacts', publisher: 'W3C',
     source: 'http://www.w3.org/2006/vcard/ns', sourceTitle: 'vCard Ontology', licence: w3c,
     copyrightNotice: w3cNotice('vCard Ontology', 'http://www.w3.org/2006/vcard/ns'),
+    shapes: ['address.ttl', 'address_book.ttl', 'agent.ttl', 'email.ttl', 'group.ttl', 'organization.ttl', 'person.ttl', 'personal_name.ttl', 'telephone.ttl', 'vcard.ttl', 'web-id.ttl', 'web-page.ttl'],
     upstreamCopy: 'vcard.nq', changes: `${common} Flattened the N-Quads document into one ontology graph and retained OWL class restrictions. Widened non-OWL date members in datatype unions to rdfs:Literal. Omitted incompatible equivalence edges while keeping original datatype property kinds.`,
   },
   {
@@ -97,6 +111,16 @@ export const SAMPLE_VOCABULARIES: readonly SampleVocabulary[] = [
     source: 'http://xmlns.com/foaf/0.1/', sourceTitle: 'FOAF Vocabulary Specification',
     licence: { name: 'CC BY 1.0', url: 'https://creativecommons.org/licenses/by/1.0/', noticePath: '/licences/CC-BY-1.0', copyPath: '/docs/licences/CC-BY-1.0.md' },
     authors: ['Dan Brickley', 'Libby Miller'],
+    shapes: ['agent.ttl'],
     upstreamCopy: 'foaf.nq', changes: `${common} Flattened N-Quads and resolved properties declared with both object and datatype kinds as annotations. Removed inverse-functional characteristics on literal-valued properties and incompatible equivalence edges; kept object-property inverses and compatible property hierarchies.`,
+  },
+  {
+    slug: 'schedule', title: 'Schedule', prefix: 'sched', namespace: 'http://www.w3.org/ns/pim/schedule#',
+    description: 'Polls for finding a time that suits everyone, and how well each option suits each person.',
+    usedBy: 'SolidOS scheduler pane', publisher: 'W3C',
+    source: 'http://www.w3.org/ns/pim/schedule', sourceTitle: 'Schedule Ontology', licence: w3c,
+    copyrightNotice: w3cNotice('Schedule Ontology', 'http://www.w3.org/ns/pim/schedule'),
+    shapes: ['event.ttl'],
+    upstreamCopy: 'schedule.ttl', changes: `${common} Promoted RDFS classes and properties to OWL declarations.`,
   },
 ];

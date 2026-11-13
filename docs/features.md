@@ -24,4 +24,4 @@ See also [running it locally](development.md) and [connecting a coding agent](ag
 
 ## Solid ecosystem samples
 
-In demo mode, the home page groups nine sample standards used by SolidOS under a collapsed Sample standards section. Browse their original term IRIs, read the publisher, source, licence and conversion notice, or propose a governed change. Each has a public 1.0.0 release. Existing samples are never overwritten by seeding; reset-demo restores the set. See [sample vocabularies](sample-vocabularies.md) for all sources and conversion decisions.
+In demo mode, the home page groups ten sample standards used by SolidOS under a collapsed Sample standards section. Browse their original term IRIs, read the publisher, source, licence and conversion notice, or propose a governed change. Each has a public 1.0.0 release. Existing samples are never overwritten by seeding; reset-demo restores the set. See [sample vocabularies](sample-vocabularies.md) for all sources and conversion decisions.

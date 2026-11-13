@@ -56,6 +56,33 @@ describe('sample creation races on the selected ontology store', () => {
     } finally { init.mockRestore(); activity.mockRestore(); }
   });
 
+  it('cleans up when initialisation itself fails part way, so the same slug can be retried', async () => {
+    // Review r3: a failure inside init (after files were written, before its last row) skipped clean-up.
+    const owner = (await simulation.ensurePersonas()).get('priya')!;
+    const input = { title: 'Retry init', slug: 'retry-init', prefix: 'retry', description: '' };
+    const realInit = ontologyStore.init.bind(ontologyStore);
+    const init = vi.spyOn(ontologyStore, 'init').mockImplementationOnce(async (...args: Parameters<typeof ontologyStore.init>) => {
+      await realInit(...args);
+      throw new Error('draft head insert failed');
+    });
+    try {
+      await expect(createProject(input, owner)).rejects.toThrow('draft head insert failed');
+      const retry = await createProject(input, owner);
+      expect(await ontologyStore.log(retry)).toHaveLength(1);
+      expect((await ontologyStore.working(retry)).metadata().title).toBe(input.title);
+    } finally { init.mockRestore(); }
+  });
+
+  it('never inherits an orphaned history left under a free slug', async () => {
+    // Review r3: if clean-up never ran, the next creator with that slug inherited the failed creation's history.
+    const owner = (await simulation.ensurePersonas()).get('priya')!;
+    const orphan = { id: 'ont_orphan', slug: 'orphaned-slug' } as OntologyProject;
+    await ontologyStore.init(orphan, '@prefix owl: <http://www.w3.org/2002/07/owl#> .\n<https://example.org/orphan> a owl:Ontology .\n', '# Orphan\n');
+    const created = await createProject({ title: 'Fresh start', slug: 'orphaned-slug', prefix: 'fresh', description: '' }, owner);
+    expect(await ontologyStore.log(created)).toHaveLength(1);
+    expect((await ontologyStore.working(created)).metadata().title).toBe('Fresh start');
+  });
+
   it('reserves sample names for ordinary titles, and atomically refuses competing explicit slugs before store writes', async () => {
     const owner = (await simulation.ensurePersonas()).get('priya')!;
     const ordinary = await createProject({ title: 'FOAF', prefix: 'my', description: '' }, owner);
@@ -90,7 +117,7 @@ describe('sample creation races on the selected ontology store', () => {
       const before = await ontologyStore.readWorkingText(user);
       const head = await ontologyStore.head(user);
       resume.resolve();
-      expect(await seeding).toHaveLength(8);
+      expect(await seeding).toHaveLength(SAMPLE_VOCABULARIES.length - 1);
       const projects = await list<OntologyProject>('ontologies');
       for (const { slug } of SAMPLE_VOCABULARIES) expect(projects.filter((p) => p.slug === slug)).toHaveLength(1);
       expect(projects.find((p) => p.slug === 'foaf')).toEqual(user);
@@ -122,7 +149,7 @@ describe('sample creation races on the selected ontology store', () => {
       expect(await list<OntologyProject>('ontologies')).toEqual(projects);
       expect(await list<Release>('releases')).toEqual(releases);
       expect(await list('gitObjects')).toEqual(objects);
-      expect(projects.filter((p) => p.sample)).toHaveLength(9);
+      expect(projects.filter((p) => p.sample)).toHaveLength(SAMPLE_VOCABULARIES.length);
       expect(projects.every((p) => !staleIds.includes(p.id))).toBe(true);
       for (const { slug } of SAMPLE_VOCABULARIES) expect(projects.filter((p) => p.slug === slug)).toHaveLength(1);
     } finally { resume.resolve(); await staleSeed; render.mockRestore(); }

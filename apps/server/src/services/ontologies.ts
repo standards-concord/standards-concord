@@ -137,8 +137,12 @@ export async function createProject(
     '',
   ].filter((p) => p !== undefined).join('\n\n') : '';
   const readme = `# ${input.title}\n\n${input.description}\n\n- Ontology IRI: <${graph.ontologyIRI}>\n- Namespace: \`${prefix}:\` <${graph.namespace}>\n- Licence: ${input.sample ? `[${input.sample.licence.name}](${input.sample.licence.url})` : 'CC BY 4.0'}\n\n${sampleNotice}Managed with Concord. The working draft is \`ontology.ttl\`; released versions are in \`releases/<version>/\` and tagged \`v<version>\`.\n`;
-  await ontologyStore.init(project, await graph.toTurtle(), readme);
+  // No project holds this slug, so any ontology history kept under it is an orphan from a creation that failed
+  // before its clean-up ran: start from a fresh history rather than inheriting it.
+  await ontologyStore.forget(project);
+  // Marked before initialising, so a failure part way through initialisation is cleaned up too.
   initialized = project;
+  await ontologyStore.init(project, await graph.toTurtle(), readme);
   try {
     await put('ontologies', project);
     await setRoles(project.id, owner.id, ['owner', 'steward', 'editor', 'member']);

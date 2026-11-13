@@ -30,10 +30,10 @@ describe('sample seeding through the selected ontology store', () => {
       expect(await samples()).toEqual([]);
     } finally { await remove('kv', 'demo-seed-state'); }
   });
-  it('creates nine once under concurrent callers, with attribution, ownership, README and public releases', async () => {
+  it('creates ten once under concurrent callers, with attribution, ownership, README and public releases', async () => {
     const init = vi.spyOn(ontologyStore, 'init');
     const results = await Promise.all([seedSamples(), seedSamples()]);
-    expect(results.flat()).toHaveLength(9);
+    expect(results.flat()).toHaveLength(SAMPLE_VOCABULARIES.length);
     const all = await samples();
     expect(all.map((p) => p.slug).sort()).toEqual(SAMPLE_VOCABULARIES.map((s) => s.slug).sort());
     for (const p of all) {
@@ -177,11 +177,11 @@ describe('sample seeding through the selected ontology store', () => {
     expect((await list<OntologyProject>('ontologies')).find((o) => o.id === p.id)).toEqual(ordinary);
   });
 
-  it('reset brings back all nine alongside the volunteering demo', async () => {
+  it('reset brings back all ten alongside the volunteering demo', async () => {
     const oldIds = (await samples()).map((p) => p.id);
     await resetAll();
     const all = await samples();
-    expect(all).toHaveLength(9);
+    expect(all).toHaveLength(SAMPLE_VOCABULARIES.length);
     expect(all.every((p) => !oldIds.includes(p.id))).toBe(true);
     expect((await list<OntologyProject>('ontologies')).find((p) => p.demo)?.slug).toBe('volunteering');
     expect(await seedSamples()).toEqual([]);

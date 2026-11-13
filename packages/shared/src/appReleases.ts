@@ -55,11 +55,11 @@ export const APP_RELEASES: AppRelease[] = [
   {
     version: '0.53.0',
     date: '2026-11-13',
-    title: 'Nine sample standards from the Solid ecosystem',
+    title: 'Ten sample standards from the Solid ecosystem',
     changes: [{
       id: 'solid-sample-standards', type: 'feat',
-      title: 'Nine sample standards from the Solid ecosystem',
-      detail: 'Open Sample standards on the home page to explore vocabularies used by SolidOS, including sharing permissions, forms, contacts and meetings. Each sample names its original publisher, licence and conversion changes.',
+      title: 'Ten sample standards from the Solid ecosystem',
+      detail: 'Open Sample standards on the home page to explore vocabularies used by SolidOS, including sharing permissions, forms, contacts, meetings and scheduling. Each sample names its original publisher and licence, links to its shapes in the Solid Shapes Catalogue, and lists what the conversion changed.',
       roles: [], to: '/',
     }],
   },

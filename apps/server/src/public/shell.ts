@@ -2,7 +2,7 @@ import { PAGE_CSS } from './assets.js';
 import { escapeHtml as esc } from './markdown.js';
 
 /** Bump when refreshReleasePages must regenerate the stored release pages. */
-export const PAGE_GENERATOR = 'Concord public page 10';
+export const PAGE_GENERATOR = 'Concord public page 11';
 
 export const formatDate = (iso?: string) => {
   if (!iso) return '';
