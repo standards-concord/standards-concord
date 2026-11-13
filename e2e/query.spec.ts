@@ -429,9 +429,15 @@ test.describe('Query tab', () => {
     await expect(page.getByTestId('editor-locked')).toBeVisible();
     const other = await context.newPage();
     await other.goto('/');
+    const signOuts = () => other.evaluate(() => localStorage.getItem('concord.signOuts'));
+    const before = await signOuts();
     await other.locator('.app-user-button').click();
     await other.getByRole('button', { name: /sign out|log out/i }).click();
     await expect(other).toHaveURL(/\/login/);
+    // Sign-in is shown before the server has ended the session, and until it has, a reply here is still saved
+    // (the next test). This one is about a reply after the sign-out has finished, so it waits for that: without
+    // the wait, a slow sign-out let the reply in first and the test failed now and then.
+    await expect.poll(signOuts).not.toBe(before);
     const mine = (p: Page) => p.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('concord.query.') && !k.startsWith('concord.query.guest.')));
     expect(await mine(other)).toEqual([]);
     release();

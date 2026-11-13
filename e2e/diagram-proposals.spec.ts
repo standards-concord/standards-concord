@@ -9,7 +9,8 @@ const form = (page: Page, action: string) => page.getByRole('form', { name: acti
 
 /**
  * Serves the page an edited copy of the ontology view. A view request still in flight when the page
- * navigates (a reload) is cancelled, and its response disposed: nothing waits for it, so it is let go.
+ * navigates (a reload) or the test ends is cancelled, and its response disposed: nothing waits for it,
+ * so it is let go. (A background refresh caught by the end of a test used to fail that test now and then.)
  */
 async function editView(page: Page, edit: (view: { classes: { iri: string; superClasses: string[] }[] } & Record<string, unknown>) => void) {
   await page.route(/\/api\/ontologies\/[^/]+\/view(\?|$)/, async (route) => {
@@ -19,7 +20,7 @@ async function editView(page: Page, edit: (view: { classes: { iri: string; super
       edit(view);
       await route.fulfill({ response: res, json: view });
     } catch (error) {
-      if (/disposed|closed|already handled/i.test(String(error))) return;
+      if (/disposed|closed|already handled|test ended/i.test(String(error))) return;
       throw error;
     }
   });
