@@ -1,5 +1,5 @@
 import { allTerms, compactIRI, localName, type WorkedExample } from '@concord/core';
-import type { ClassView, IndividualView, OntologyView, PropertyView, Restriction, TermView } from '@concord/core/types';
+import type { ClassView, ConceptView, IndividualView, OntologyView, PropertyView, Restriction, TermView } from '@concord/core/types';
 import type { ChangeLevel } from '@concord/shared';
 import { escapeHtml as esc, renderMarkdown, safeHref } from './markdown.js';
 import type { PublicUseCaseView, PublishedRequirements, RequirementView } from './requirements.js';
@@ -169,7 +169,10 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const ownSchemes = new Set((view.conceptSchemes ?? []).map((s) => s.iri));
   // A code that is also a class, property or individual already has its entry (and its anchor) there.
   const entered = new Set([...view.classes, ...view.objectProperties, ...view.datatypeProperties, ...view.annotationProperties, ...view.individuals].map((t) => t.iri));
-  const strayCodes = (view.concepts ?? []).filter((c) => !entered.has(c.iri) && !c.inScheme.some((s) => ownSchemes.has(s)));
+  const outsideListCodes = (view.concepts ?? []).filter((c) => !c.inScheme.some((s) => ownSchemes.has(s)));
+  const strayCodes = outsideListCodes.filter((c) => !entered.has(c.iri));
+  // ...and that entry carries what the code would have said: its value, its list and its broader code.
+  const alsoCode = new Map(outsideListCodes.filter((c) => entered.has(c.iri)).map((c) => [c.iri, c]));
   const groups: { id: string; title: string; terms: TermView[] }[] = [
     { id: id('sec-classes'), title: 'Classes', terms: view.classes },
     { id: id('sec-object-properties'), title: 'Object properties', terms: view.objectProperties },
@@ -259,10 +262,14 @@ export function renderOntologyPage(input: OntologyPageInput): string {
 
   const reportHref = (t: TermView) =>
     input.links.report ? `${input.links.report}?term=${encodeURIComponent(t.iri)}&version=${encodeURIComponent(input.kind === 'draft' ? 'draft' : input.version)}` : undefined;
+  const codeRows = (c: ConceptView) =>
+    row('Code', c.notation ? `<code class="notation">${esc(c.notation)}</code>` : '') + row('In code list', refs(c.inScheme)) + row('Broader', refs(c.broader));
   const card = (t: TermView) => {
     const { anchor, name } = index.get(t.iri)!;
+    const code = t.kind === 'concept' ? undefined : alsoCode.get(t.iri);
     const rows =
-      t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : t.kind === 'concept' ? row('Code', t.notation ? `<code class="notation">${esc(t.notation)}</code>` : '') + row('In code list', refs(t.inScheme)) + row('Broader', refs(t.broader)) : 'domain' in t ? propertyRows(t) : '';
+      (code ? codeRows(code) : '') +
+      (t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : t.kind === 'concept' ? codeRows(t) : 'domain' in t ? propertyRows(t) : '');
     const report = reportHref(t);
     return `<article class="term${t.deprecated ? ' is-deprecated' : ''}" id="${esc(anchor)}" data-kind="${t.kind}">
   <header class="term-head">

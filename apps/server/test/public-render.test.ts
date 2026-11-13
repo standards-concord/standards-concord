@@ -68,9 +68,13 @@ it('the renderer gives one entry to an own term that is both a class and a code 
     @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
     <https://example.org/own> a owl:Ontology .
     other:Scheme a skos:ConceptScheme .
-    ex:Code a owl:Class, skos:Concept ; skos:inScheme other:Scheme .
+    ex:Code a owl:Class, skos:Concept ; skos:inScheme other:Scheme ; skos:notation "OC" .
   `);
   const html = renderOntologyPage(page(graph));
   expect(html.match(/id="Code"/g)).toHaveLength(1);
   expect(html).not.toContain('Codes in other code lists');
+  // The one entry still says what the code is: its value and the list it belongs to.
+  expect(html).toContain('<code class="notation">OC</code>');
+  expect(html).toContain('In code list');
+  expect(html).toContain('https://other.example/vocab#Scheme');
 });
