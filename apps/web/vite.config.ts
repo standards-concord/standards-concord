@@ -68,7 +68,7 @@ export default defineConfig({
       '/mcp': { target },
       '^/(\\.well-known/|authorize|token|register|revoke)': { target },
       // Public ontology pages and fork documents; the regex keeps app routes such as /definitions out.
-      '^/def/': { target, changeOrigin: false },
+      '^/def(?:/|$|\\.(?:jsonld|ttl)$)': { target, changeOrigin: false },
     },
   },
   build: { outDir: 'dist', sourcemap: true, chunkSizeWarningLimit: 1500 },

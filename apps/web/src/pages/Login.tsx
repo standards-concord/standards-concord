@@ -3,7 +3,7 @@ import { Link, Navigate, useNavigate, useSearchParams } from 'react-router';
 import { Compass, KeyRound } from 'lucide-react';
 import { api } from '../api';
 import { useSession } from '../lib/session';
-import { useAction } from '../lib/hooks';
+import { useAction, useAsync } from '../lib/hooks';
 import { GitHubIcon, GoogleIcon } from '../components/badges';
 import { SolidSignIn } from '../components/SolidSignIn';
 import { AnchorButton, Button, Card, ErrorCard, InlineError, Loading } from '../components/ui';
@@ -13,6 +13,7 @@ export function LoginPage() {
   const [params] = useSearchParams();
   const nav = useNavigate();
   const after = useRef<string>(undefined);
+  const standards = useAsync(() => api.ontologies(), []);
   const next = params.get('next') || '/';
   const solidError = params.get('solidError') ?? undefined;
   const demo = useAction(async () => {
@@ -37,6 +38,23 @@ export function LoginPage() {
           Requirements come in from interviews, meeting transcripts and coding agents. Every proposed change is checked for consistency, FAIR principles and the
           questions the standard must answer, then reviewed, signed off or voted on under rules each group sets for itself.
         </p>
+        {!standards.loading && (
+          <section aria-label="Standards here" className="mt-6 max-w-md text-sm">
+            {!standards.error && standards.data && (
+              <>
+                <h2 className="font-semibold">Standards here</h2>
+                <ul className="mt-2 list-disc space-y-1 pl-5">
+                  {standards.data.slice(0, 5).map((standard) => (
+                    <li key={standard.id}>
+                      <a href={`/def/${encodeURIComponent(standard.slug)}`} className="text-accent hover:underline">{standard.title}</a>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <a href="/def" className="mt-3 inline-block text-accent hover:underline">See all standards</a>
+          </section>
+        )}
       </section>
 
       <div className="md:pt-10">
