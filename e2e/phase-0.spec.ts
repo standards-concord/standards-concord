@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { test, expect, signIn, signInAsPersona, demoOntology, settle, uniq } from './fixtures';
 
 async function ontology(page: Page) {
-  const r = await page.request.post('/api/ontologies', { data: { title: `Tidy demo ${uniq()}`, prefix: `td${uniq()}` } });
+  const r = await page.request.post('/api/ontologies', { data: { title: `Tidy demo ${uniq()}`, description: 'A throwaway standard for the Phase 0 checks.', prefix: `td${uniq()}` } });
   expect(r.status()).toBe(201);
   return r.json();
 }
