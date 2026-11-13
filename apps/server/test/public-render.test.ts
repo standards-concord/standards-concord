@@ -37,3 +37,24 @@ it('the renderer lists no terms for an empty ontology', () => {
   expect(html).not.toContain('class="nav-group"');
   expect(JSON.parse(html.match(/<script type="application\/ld\+json">([^]*?)<\/script>/)![1]).hasDefinedTerm).toEqual([]);
 });
+
+// A code the standard adds to another vocabulary's code list used to vanish from the page while the JSON-LD still named it.
+it('the renderer keeps an own code whose code list belongs to another vocabulary', async () => {
+  const graph = await OntologyGraph.fromTurtle(`
+    @prefix ex: <https://example.org/own#> .
+    @prefix other: <https://other.example/vocab#> .
+    @prefix owl: <http://www.w3.org/2002/07/owl#> .
+    @prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+    <https://example.org/own> a owl:Ontology .
+    other:Scheme a skos:ConceptScheme ; skos:prefLabel "Outside list"@en .
+    ex:Code a skos:Concept ; skos:inScheme other:Scheme ; skos:prefLabel "Own code"@en ; skos:notation "OC" .
+  `);
+  const html = renderOntologyPage(page(graph));
+  expect(html).toContain('id="Code"');
+  expect(html).toContain('href="#Code"');
+  expect(html).not.toContain('id="Scheme"');
+  expect(html).toContain('Codes in other code lists');
+  expect(html).toContain('https://other.example/vocab#Scheme');
+  const json = JSON.parse(html.match(/<script type="application\/ld\+json">([^]*?)<\/script>/)![1]);
+  expect(json.hasDefinedTerm.map((t: { '@id': string }) => t['@id'])).toEqual(['https://example.org/own#Code']);
+});

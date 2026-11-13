@@ -166,6 +166,8 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const anchors = termAnchors(view, project.namespace, project.ontologyIRI);
   // The page's own ids step aside for term anchors (an ontology may define #main).
   const id = pageIds(anchors.values());
+  const ownSchemes = new Set((view.conceptSchemes ?? []).map((s) => s.iri));
+  const strayCodes = (view.concepts ?? []).filter((c) => !c.inScheme.some((s) => ownSchemes.has(s)));
   const groups: { id: string; title: string; terms: TermView[] }[] = [
     { id: id('sec-classes'), title: 'Classes', terms: view.classes },
     { id: id('sec-object-properties'), title: 'Object properties', terms: view.objectProperties },
@@ -173,6 +175,8 @@ export function renderOntologyPage(input: OntologyPageInput): string {
     { id: id('sec-annotation-properties'), title: 'Annotation properties', terms: view.annotationProperties },
     { id: id('sec-individuals'), title: 'Individuals', terms: view.individuals },
     { id: id('sec-code-lists'), title: 'Code lists', terms: view.conceptSchemes ?? [] },
+    // Own codes added to another vocabulary's code list: that list has no entry here, so they get their own.
+    { id: id('sec-codes'), title: 'Codes in other code lists', terms: strayCodes },
   ].map((g) => ({ ...g, terms: [...g.terms].sort((a, b) => nameOf(a).localeCompare(nameOf(b), 'en', { sensitivity: 'base' })) }));
 
   const index = new Map<string, Indexed>();
@@ -256,7 +260,7 @@ export function renderOntologyPage(input: OntologyPageInput): string {
   const card = (t: TermView) => {
     const { anchor, name } = index.get(t.iri)!;
     const rows =
-      t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : 'domain' in t ? propertyRows(t) : '';
+      t.kind === 'class' ? classRows(t) : t.kind === 'individual' ? individualRows(t) : t.kind === 'concept' ? row('Code', t.notation ? `<code class="notation">${esc(t.notation)}</code>` : '') + row('In code list', refs(t.inScheme)) + row('Broader', refs(t.broader)) : 'domain' in t ? propertyRows(t) : '';
     const report = reportHref(t);
     return `<article class="term${t.deprecated ? ' is-deprecated' : ''}" id="${esc(anchor)}" data-kind="${t.kind}">
   <header class="term-head">
