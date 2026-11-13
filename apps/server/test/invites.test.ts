@@ -5,38 +5,43 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import type { Invite, InviteInput, OntologyProject, Role, User } from '@concord/shared';
 import { createApp } from '../src/app.js';
 import { DAY_MS, clock } from '../src/clock.js';
+import { config } from '../src/config.js';
 import { closeDb, get, list, openDb, put, rawStore, remove } from '../src/db.js';
 import { createProject, rolesFor, setRoles } from '../src/services/ontologies.js';
 import { createSession } from '../src/services/users.js';
 import type { InviteDoc } from '../src/services/invites.js';
-import * as inviteService from '../src/services/invites.js';
+import * as clockService from '../src/clock.js';
 import * as appChecks from '../src/services/appChecks.js';
 import * as users from '../src/services/users.js';
+import * as solidOidc from '../src/solidOidc.js';
 
 const app = createApp();
 let sequence = 0;
 let ontology: OntologyProject;
 let owner: User;
+let clientAddress = 0;
 const cookie = new Map<string, string>();
 
 // Exercise Express, auth and JSON parsing in memory: this also works in sandboxes without listening sockets.
-async function api(method: string, path: string, user?: User, body?: unknown): Promise<{ status: number; body: any; headers: ReturnType<ServerResponse['getHeaders']> }> {
+async function api(method: string, path: string, user?: User, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; body: any; headers: ReturnType<ServerResponse['getHeaders']> }> {
   if (user && !cookie.has(user.id)) cookie.set(user.id, `concord_session=${await createSession(user.id, 'demo')}`);
   return new Promise((resolve, reject) => {
     const req = new IncomingMessage(new Socket());
     req.method = method;
     req.url = path;
-    req.headers = { host: 'localhost', ...(user ? { cookie: cookie.get(user.id) } : {}) };
-    Object.defineProperty(req.socket, 'remoteAddress', { value: '127.0.0.1' });
-    const json = body === undefined ? undefined : JSON.stringify(body);
+    req.headers = { host: 'localhost', ...(user ? { cookie: cookie.get(user.id) } : {}), ...headers };
+    Object.defineProperty(req.socket, 'remoteAddress', { value: `192.0.2.${clientAddress}` });
+    const json = body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body);
     if (json !== undefined) {
-      req.headers['content-type'] = 'application/json';
+      req.headers['content-type'] ??= 'application/json';
       req.headers['content-length'] = String(Buffer.byteLength(json));
     }
     const res = new ServerResponse(req);
     res.end = ((chunk?: string | Buffer) => {
       try {
-        resolve({ status: res.statusCode, body: chunk ? JSON.parse(chunk.toString()) : undefined, headers: res.getHeaders() });
+        const text = chunk?.toString();
+        const body = text && String(res.getHeader('content-type')).includes('application/json') ? JSON.parse(text) : text;
+        resolve({ status: res.statusCode, body, headers: res.getHeaders() });
       } catch (error) { reject(error); }
       return res;
     }) as typeof res.end;
@@ -56,12 +61,14 @@ async function invite(input: Partial<InviteInput> = {}, by = owner) {
   expect(result.status).toBe(201);
   return { ...result.body, secret: result.body.link.split('/join/')[1] } as { invite: Invite; link: string; secret: string };
 }
-const accept = (secret: string, user: User) => api('POST', `/api/invites/${secret}/accept`, user);
+const accept = (secret: string, user: User) => api('POST', `/api/invites/${secret}/accept`, user, {});
 
 beforeAll(async () => {
   await openDb(process.env.TEST_DATABASE_URL ? { kind: 'postgres', url: process.env.TEST_DATABASE_URL } : undefined);
 });
 beforeEach(async () => {
+  // Each test gets its own rate-limit count; requests within the test still share a client.
+  clientAddress++;
   clock.reset();
   owner = await person('Invite owner');
   ontology = await createProject({ title: `Invite test ${++sequence}`, description: 'A group inviting people.', prefix: `iv${sequence}` }, owner);
@@ -149,6 +156,56 @@ describe('invitation API', () => {
     expect((await get<InviteDoc>('invites', created.invite.id))?.uses).toBe(0);
   });
 
+  it.each(['used up', 'expired', 'revoked'] as const)('%s invitations cannot restore any removed roles on retry', async (state) => {
+    // Previously usedBy bypassed exhaustion and silently restored removed stewardship.
+    const created = await invite({ roles: ['steward', 'reviewer'], maxUses: state === 'used up' ? 1 : 5, expiresInDays: 1 });
+    const recipient = await person();
+    expect((await accept(created.secret, recipient)).status).toBe(200);
+    if (state === 'expired') clock.advance(DAY_MS);
+    if (state === 'revoked') await api('DELETE', `${endpoint()}/${created.invite.id}`, owner);
+    for (const remaining of [['reviewer'], []] satisfies Role[][]) {
+      await setRoles(ontology.id, recipient.id, remaining);
+      const before = await (await rawStore()).rows();
+      const reconcile = vi.spyOn(appChecks, 'reconcile');
+      try {
+        expect(await accept(created.secret, recipient)).toMatchObject({ status: 410 });
+        expect(await rolesFor(ontology.id, recipient.id)).toEqual(remaining);
+        expect(await (await rawStore()).rows()).toEqual(before);
+        expect(reconcile).not.toHaveBeenCalled();
+      } finally { reconcile.mockRestore(); }
+    }
+  });
+
+  it.each(['used up', 'expired', 'revoked'] as const)('%s invitations allow only side-effect-free retries when every role is held', async (state) => {
+    // An unchanged membership must succeed without recording a use, activity or autopilot work.
+    const created = await invite({ roles: ['reviewer', 'member'], maxUses: state === 'used up' ? 1 : 5, expiresInDays: 1 });
+    const recipient = await person();
+    expect((await accept(created.secret, recipient)).status).toBe(200);
+    if (state === 'expired') clock.advance(DAY_MS);
+    if (state === 'revoked') await api('DELETE', `${endpoint()}/${created.invite.id}`, owner);
+    const before = await (await rawStore()).rows();
+    const reconcile = vi.spyOn(appChecks, 'reconcile');
+    try {
+      expect(await accept(created.secret, recipient)).toMatchObject({ status: 200, body: { ontologyId: ontology.id } });
+      expect(await (await rawStore()).rows()).toEqual(before);
+      expect(reconcile).not.toHaveBeenCalled();
+    } finally { reconcile.mockRestore(); }
+  });
+
+  it('rejects form and bodyless acceptance requests before changing membership', async () => {
+    // A sibling origin could previously submit a form with the recipient's same-site session cookie.
+    const created = await invite();
+    const recipient = await person();
+    for (const contentType of [undefined, 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=test', 'text/plain']) {
+      const response = await api('POST', `/api/invites/${created.secret}/accept`, recipient,
+        contentType ? 'ignored=value' : undefined, contentType ? { 'content-type': contentType } : {});
+      expect(response.status).toBe(415);
+      expect(await rolesFor(ontology.id, recipient.id)).toEqual([]);
+      expect(await get<InviteDoc>('invites', created.invite.id)).toMatchObject({ uses: 0, usedBy: [] });
+    }
+    expect((await api('POST', `/api/invites/${created.secret}/accept`, recipient, {})).status).toBe(200);
+  });
+
   it('enforces maximum uses and lets only one of two concurrent people take the last use', async () => {
     const created = await invite();
     const a = await person();
@@ -190,7 +247,7 @@ describe('invitation API', () => {
       expect((await accept(secret, owner)).status).toBe(404);
     }
     const created = await invite();
-    expect((await api('POST', `/api/invites/${created.secret}/accept`)).status).toBe(401);
+    expect((await api('POST', `/api/invites/${created.secret}/accept`, undefined, {})).status).toBe(401);
   });
 
   it('refuses personas and agents while allowing an Alpha tester', async () => {
@@ -211,18 +268,75 @@ describe('invitation API', () => {
     expect((await api('GET', `/api/invites/${created.secret}`)).status).toBe(404);
   });
 
-  it('redacts invitation secrets even when an exception contains the request path', async () => {
+  it.each(['/api/invites/', '/api/INVITES/', '/JOIN/'])('redacts invitation secrets in %s even when an exception contains the request path', async (prefix) => {
+    // Express accepts case variants; both path replacement and exception suppression must do so too.
     const created = await invite();
+    const path = `${prefix}${created.secret}`;
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const lookup = vi.spyOn(inviteService, 'lookupInvite').mockRejectedValueOnce(new Error(`Could not load /api/invites/${created.secret}`));
+    const sync = vi.spyOn(clockService, 'syncClock').mockRejectedValueOnce(new Error(`Could not load ${path}`));
     try {
-      expect((await api('GET', `/api/invites/${created.secret}`)).status).toBe(500);
-      expect(log).toHaveBeenCalledWith('[GET /api/invites/[redacted]]', 'HTTP 500');
+      expect((await api('GET', path)).status).toBe(500);
+      expect(log).toHaveBeenCalledWith(`[GET ${prefix}[redacted]]`, 'HTTP 500');
       expect(JSON.stringify(log.mock.calls)).not.toContain(created.secret);
     } finally {
-      lookup.mockRestore();
+      sync.mockRestore();
       log.mockRestore();
     }
+  });
+
+  it('builds the complete invitation URL from the web origin when the API is elsewhere', async () => {
+    // The copied URL used to point at the API port, where the browser app need not be served.
+    const saved = { webUrl: config.webUrl, publicUrl: config.publicUrl };
+    Object.assign(config, { webUrl: 'https://concord.example.org', publicUrl: 'https://api.example.org' });
+    try {
+      const created = await invite();
+      expect(created.link).toBe(`https://concord.example.org/join/${created.secret}`);
+    } finally { Object.assign(config, saved); }
+  });
+
+  it('keeps an invitation return path in a short-lived HttpOnly Solid cookie, never in the database', async () => {
+    // An abandoned Solid sign-in used to leave the plaintext invitation secret in a pending kv row.
+    const created = await invite();
+    const saved = config.publicUrl;
+    config.publicUrl = 'https://concord.example.org';
+    const issuer = vi.spyOn(solidOidc, 'resolveIssuer').mockResolvedValue({ as: {
+      issuer: 'https://solid.example.org', authorization_endpoint: 'https://solid.example.org/authorize', scopes_supported: ['webid'],
+    } });
+    try {
+      const result = await api('GET', `/auth/solid?${new URLSearchParams({ webId: 'https://solid.example.org', returnTo: `/join/${created.secret}` })}`);
+      expect(result.status).toBe(302);
+      // Check persistence first so this regression fails on the actual secret leak.
+      expect(JSON.stringify(await (await rawStore()).rows())).not.toContain(created.secret);
+      const cookies = result.headers['set-cookie'] as string[];
+      const returnCookie = cookies.find((value) => value.startsWith('solid_return='))!;
+      expect(decodeURIComponent(returnCookie.split(';')[0]!)).toBe(`solid_return=/join/${created.secret}`);
+      expect(returnCookie).toContain('HttpOnly');
+      expect(returnCookie).toContain('Max-Age=600');
+      expect(returnCookie).toContain('SameSite=Lax');
+      expect(returnCookie).toContain('Secure');
+      expect(String(result.headers.location)).not.toContain(created.secret);
+    } finally {
+      config.publicUrl = saved;
+      issuer.mockRestore();
+    }
+  });
+
+  it.each(['/join/a-secret', '//elsewhere.example', '/\\elsewhere.example', '/\nelsewhere', '/\u0000elsewhere', '/\u007felsewhere', 'https://elsewhere.example'])('validates the Solid return cookie at callback: %j', async (returnTo) => {
+    // Moving next into a cookie must preserve the existing same-site path checks in both directions.
+    const recipient = await person('Solid invitee');
+    await put('users', { ...recipient, providers: [{ provider: 'solid', subject: recipient.webId }] });
+    const finished = { webId: recipient.webId, issuer: 'https://solid.example.org', name: recipient.name, returnTo: '/', login: {} as solidOidc.SolidLogin };
+    const finish = vi.spyOn(solidOidc, 'finishLogin').mockResolvedValue(finished);
+    try {
+      const response = await api('GET', '/auth/solid/callback?code=test&state=test', undefined, undefined,
+        { cookie: `solid_login=browser-login; solid_return=${encodeURIComponent(returnTo)}` });
+      expect(response.status).toBe(302);
+      expect(response.headers.location).toBe(`${config.webUrl}${returnTo === '/join/a-secret' ? returnTo : '/'}`);
+      expect(finish).toHaveBeenCalledWith('browser-login', `${config.publicUrl}/auth/solid/callback?code=test&state=test`);
+      expect(response.headers['set-cookie']).toEqual(expect.arrayContaining([
+        expect.stringMatching(/^solid_login=;.*Expires=/), expect.stringMatching(/^solid_return=;.*Expires=/),
+      ]));
+    } finally { finish.mockRestore(); }
   });
 
   it('rolls back roles and the use together if recording the activity fails', async () => {

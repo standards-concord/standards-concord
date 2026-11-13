@@ -49,7 +49,7 @@ export async function createInvite(ontologyId: string, creator: User, input: Inv
     await put('invites', doc, ontologyId);
     // Direct hash lookup avoids scanning stored secrets or comparing their values. The index contains no secret.
     await put('kv', { id: indexId(hash), inviteId: doc.id, ontologyId }, ontologyId);
-    return { invite: await publicInvite(doc), link: `${config.publicUrl}/join/${secret}` };
+    return { invite: await publicInvite(doc), link: `${config.webUrl}/join/${secret}` };
   });
 }
 
@@ -87,17 +87,16 @@ export async function lookupInvite(secret: string) {
 export const inactiveMessage = (state: InviteState) => `This invitation link has ${state === 'used up' ? 'been used up' : state === 'revoked' ? 'been revoked' : 'expired'}.`;
 
 export async function acceptInvite(secret: string, actor: User) {
-  const result = await transaction(async () => {
+  const { changed, ...result } = await transaction(async () => {
     const doc = await findInvite(secret);
     const existing = await rolesFor(doc.ontologyId, actor.id);
     if (actor.simulated || existing.includes('agent'))
       throw new HttpError(403, 'Sign in with your own account to accept this invitation. Simulated members and agents cannot join.');
     const state = stateOf(doc);
-    // A successful retry is safe even after the final use; revocation and expiry still stop the link.
-    if (state === 'revoked' || state === 'expired') throw new HttpError(410, inactiveMessage(state));
-    if (doc.roles.every((role) => existing.includes(role))) return { ontologyId: doc.ontologyId };
+    // An inactive link can only acknowledge roles already held; it must never restore removed privileges.
+    if (doc.roles.every((role) => existing.includes(role))) return { ontologyId: doc.ontologyId, changed: false };
+    if (state !== 'active') throw new HttpError(410, inactiveMessage(state));
     const alreadyUsed = doc.usedBy.some((use) => use.userId === actor.id);
-    if (state !== 'active' && !alreadyUsed) throw new HttpError(410, inactiveMessage(state));
     await setRoles(doc.ontologyId, actor.id, [...existing, ...doc.roles]);
     if (!alreadyUsed) {
       doc.uses++;
@@ -106,9 +105,9 @@ export async function acceptInvite(secret: string, actor: User) {
       await logActivity({ ontologyId: doc.ontologyId, actorId: actor.id, type: 'member.joined',
         message: `joined as ${doc.roles.join(', ')}, invited by ${await creatorName(doc)}`, link: `/o/${doc.ontologyId}/governance#roles` });
     }
-    return { ontologyId: doc.ontologyId };
+    return { ontologyId: doc.ontologyId, changed: true };
   });
   // Reconciliation may run checks and take their locks, so it follows the membership transaction.
-  await reconcileAutopilot(result.ontologyId, [actor.id]);
+  if (changed) await reconcileAutopilot(result.ontologyId, [actor.id]);
   return result;
 }

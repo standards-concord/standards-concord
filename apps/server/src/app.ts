@@ -99,8 +99,8 @@ export function createApp(): express.Express {
       return void res.status(413).json({ error: `That's too large to send${limit ? ` (the limit is ${Math.floor(limit / 1024 / 1024)} MB)` : ''}.` });
     }
     if (status >= 500) {
-      const privatePath = /(?:\/join\/|\/api\/invites\/)/.test(req.path);
-      const loggedPath = req.path.replace(/(\/(?:join|api\/invites)\/)[^/]+/g, '$1[redacted]');
+      const privatePath = /(?:\/join\/|\/api\/invites\/)/i.test(req.path);
+      const loggedPath = req.path.replace(/(\/(?:join|api\/invites)\/)[^/]+/gi, '$1[redacted]');
       // An exception can contain the request URL too: private paths only log the status.
       console.error(`[${req.method} ${loggedPath}]`, privatePath ? `HTTP ${status}` : err);
     }

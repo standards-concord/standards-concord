@@ -205,7 +205,7 @@ afterEach(() => {
 /** Start a login and come back from the provider with a code (`between` runs while the browser is at the provider). */
 async function signIn(input = webId(), between?: () => void) {
   const { as } = await resolveIssuer(input);
-  const { loginId, url } = await startLogin(as, '/somewhere');
+  const { loginId, url } = await startLogin(as);
   between?.();
   const auth = new URL(url);
   expectedNonce = auth.searchParams.get('nonce')!;
@@ -217,7 +217,7 @@ async function signIn(input = webId(), between?: () => void) {
 describe('Solid-OIDC against a scripted provider', () => {
   it('signs in with a DPoP-bound token, a verified ID token and our nonce', async () => {
     const done = await signIn();
-    expect(done).toMatchObject({ webId: webId(), issuer, name: 'Alice', returnTo: '/somewhere' });
+    expect(done).toMatchObject({ webId: webId(), issuer, name: 'Alice' });
     // Step 5e: the pod the profile names, preferring the one the WebID is in, never one Concord can't use.
     expect(done.storage).toBe(`${base}/alice/`);
     expect(sawDpop).toBe(true);
@@ -230,9 +230,10 @@ describe('Solid-OIDC against a scripted provider', () => {
     // Step 5 (Vercel): the sign-in in progress was in this process's memory, so a callback reaching another
     // function instance failed with "it expired or was started in another browser".
     const { as } = await resolveIssuer(webId());
-    const { loginId, url } = await startLogin(as, '/somewhere');
+    const { loginId, url } = await startLogin(as);
     const row = `solid-login:${createHash('sha256').update(loginId).digest('hex')}`;
-    expect(await get('kv', row)).toMatchObject({ returnTo: '/somewhere', solidLoginExpires: expect.any(Number) });
+    expect(await get('kv', row)).toMatchObject({ solidLoginExpires: expect.any(Number) });
+    expect(await get('kv', row)).not.toHaveProperty('returnTo');
     const auth = new URL(url);
     expectedNonce = auth.searchParams.get('nonce')!;
     const callback = `${config.publicUrl}/auth/solid/callback?code=abc&state=${auth.searchParams.get('state')}`;
@@ -243,7 +244,7 @@ describe('Solid-OIDC against a scripted provider', () => {
 
   it('refuses a sign-in that has expired', async () => {
     const { as } = await resolveIssuer(webId());
-    const { loginId, url } = await startLogin(as, '/somewhere');
+    const { loginId, url } = await startLogin(as);
     const row = `solid-login:${createHash('sha256').update(loginId).digest('hex')}`;
     await put('kv', { ...(await get<object>('kv', row))!, id: row, solidLoginExpires: Date.now() - 1 });
     const callback = `${config.publicUrl}/auth/solid/callback?code=abc&state=${new URL(url).searchParams.get('state')}`;

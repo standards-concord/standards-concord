@@ -189,6 +189,7 @@ async function managedWebId(webId: string) {
 const tmpCookie = () => ({ httpOnly: true, sameSite: 'lax' as const, secure: config.publicUrl.startsWith('https://'), maxAge: 10 * 60 * 1000, path: '/' });
 const OAUTH_COOKIES = ['oauth_state', 'oauth_verifier', 'oauth_return'];
 const SOLID_COOKIE = 'solid_login';
+const SOLID_RETURN_COOKIE = 'solid_return';
 
 /**
  * The callback must carry the state this browser was given when it started
@@ -330,8 +331,8 @@ export function mountAuth(router: Router) {
     if (!input) return loginError(res, returnTo, 'Enter your WebID, or the address of your Solid provider.');
     try {
       const { as } = await resolveIssuer(input);
-      const { loginId, url } = await startLogin(as, returnTo);
-      res.cookie(SOLID_COOKIE, loginId, tmpCookie());
+      const { loginId, url } = await startLogin(as);
+      res.cookie(SOLID_COOKIE, loginId, tmpCookie()).cookie(SOLID_RETURN_COOKIE, returnTo, tmpCookie());
       res.redirect(url);
     } catch (err) {
       if (!(err instanceof SolidLoginError)) console.warn(`[solid-oidc] could not start sign-in: ${(err as Error).message}`);
@@ -342,15 +343,16 @@ export function mountAuth(router: Router) {
   router.get('/auth/solid/callback', async (req, res) => {
     if (!config.solidOidc.enabled) throw new HttpError(404, 'Signing in with Solid is turned off on this server');
     const loginId = req.cookies?.[SOLID_COOKIE] as string | undefined;
-    res.clearCookie(SOLID_COOKIE, { path: '/' });
+    const returnTo = safeReturn(req.cookies?.[SOLID_RETURN_COOKIE]);
+    res.clearCookie(SOLID_COOKIE, { path: '/' }).clearCookie(SOLID_RETURN_COOKIE, { path: '/' });
     let done;
     try {
       done = await finishLogin(loginId, `${config.publicUrl}${req.originalUrl}`);
     } catch (err) {
       if (!(err instanceof SolidLoginError)) console.warn(`[solid-oidc] sign-in failed: ${(err as Error).message}`);
-      return loginError(res, '/', err instanceof SolidLoginError ? err.message : 'Sign-in with Solid failed. Please try again.');
+      return loginError(res, returnTo, err instanceof SolidLoginError ? err.message : 'Sign-in with Solid failed. Please try again.');
     }
-    if (await managedWebId(done.webId)) return loginError(res, done.returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
+    if (await managedWebId(done.webId)) return loginError(res, returnTo, 'That WebID was made for you by Concord: sign in the way you created your account.');
     const { user, sessionToken } = await federatedSignIn(req, res, { provider: 'solid', subject: done.webId, webId: done.webId, name: done.name });
     // Keep an administrator's login for this browser session (to read testers' pods as them); drop everyone else's.
     // Their private data goes to their own pod, written as them (step 5e).
@@ -367,6 +369,6 @@ export function mountAuth(router: Router) {
         );
     }
     if (isAdmin(user, 'solid')) await keepAdminLogin(sessionToken, done.login, { sharedWith: ownLogin });
-    res.redirect(`${config.webUrl}${done.returnTo}`);
+    res.redirect(`${config.webUrl}${returnTo}`);
   });
 }

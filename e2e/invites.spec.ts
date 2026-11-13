@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
-import { test as base, expect, expectNoCrash, signIn, uniq, type Page } from './fixtures';
+import type { Page } from '@playwright/test';
+import { test as base, expect, expectNoCrash, signIn, uniq } from './fixtures';
 
 const test = base.extend<{ guest: Page }>({
   guest: async ({ browser, baseURL }, use) => {
@@ -22,7 +23,36 @@ async function accessible(page: Page, selector: string) {
   expect(result.violations).toEqual([]);
 }
 
-test('a steward invites a real reviewer, the link is used once, and another link can be revoked', async ({ page, context, guest }) => {
+async function expectInvitationNotStored(page: Page, secret: string) {
+  // The old assertion only read localStorage, but kept answers actually live in IndexedDB.
+  const stored = await page.evaluate(async () => {
+    const kept = await new Promise<{ keys: IDBValidKey[]; values: unknown[] }>((resolve, reject) => {
+      const open = indexedDB.open('concord-offline', 1);
+      open.onupgradeneeded = () => open.result.createObjectStore('kept');
+      open.onerror = () => reject(open.error);
+      open.onblocked = () => reject(new Error('Offline storage is blocked'));
+      open.onsuccess = () => {
+        const db = open.result;
+        const tx = db.transaction('kept', 'readonly');
+        const store = tx.objectStore('kept');
+        const keys = store.getAllKeys();
+        const values = store.getAll();
+        tx.oncomplete = () => {
+          db.close();
+          resolve({ keys: keys.result, values: values.result });
+        };
+        tx.onabort = tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+    });
+    return { local: Object.entries(localStorage), session: Object.entries(sessionStorage), kept };
+  });
+  expect(JSON.stringify(stored)).not.toContain(secret);
+  expect(JSON.stringify(stored.kept)).not.toMatch(/\/api\/invites\/|\|invite(?:s)?\|/i);
+  // Lookup responses contain these fields even if saved under a key with no secret in it.
+  expect(JSON.stringify(stored.kept.values)).not.toContain('"invitedBy"');
+}
+
+test('a steward copies a complete web URL, a real reviewer joins without storing the invitation, and links can be revoked', async ({ page, context, guest, baseURL }) => {
   // Previously Add a person only offered simulated personas, so real reviewers could not join.
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page, { name: `Invite steward ${uniq()}`, role: 'steward' });
@@ -37,27 +67,33 @@ test('a steward invites a real reviewer, the link is used once, and another link
   await page.getByRole('textbox', { name: 'Note (optional)' }).fill('Pilot reviewers');
   await page.getByRole('button', { name: 'Create invitation link' }).click();
   const link = await page.getByRole('textbox', { name: 'Invitation link', exact: true }).inputValue();
-  expect(new URL(link).pathname).toMatch(/^\/join\/[\w-]{43}$/);
+  const secret = new URL(link).pathname.split('/').pop()!;
+  expect(secret).toMatch(/^[\w-]{43}$/);
+  // The copied link used to have the API origin; navigating only to its pathname hid the broken URL.
+  expect(link).toBe(new URL(`/join/${secret}`, baseURL).href);
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.getByRole('button', { name: 'Copy link', exact: true }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(link);
   await accessible(page, '#roles');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 
-  await guest.goto(new URL(link).pathname);
+  await guest.goto(link);
   await expect(guest.getByRole('heading', { name: `You've been invited to join ${title}` })).toBeVisible();
   await expect(guest.getByText('as a reviewer and member', { exact: true })).toBeVisible();
   await expect(guest.locator('meta[name="referrer"]')).toHaveAttribute('content', 'no-referrer');
   await accessible(guest, 'main');
   expect(await guest.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expectInvitationNotStored(guest, secret);
   await guest.getByRole('link', { name: 'Sign in to accept' }).click();
   await guest.route('**/api/auth/demo', (route) => route.continue({ postData: JSON.stringify({ name: `Invited reviewer ${uniq()}` }) }));
   await guest.getByRole('button', { name: 'Try the demo', exact: true }).click();
   await expect(guest).toHaveURL(/\/join\//);
   const session = await (await guest.request.get('/api/session')).json();
+  await expect(guest.getByRole('button', { name: `Join as ${session.user.name}`, exact: true })).toBeVisible();
+  await expectInvitationNotStored(guest, secret);
   await guest.getByRole('button', { name: `Join as ${session.user.name}`, exact: true }).click();
   await expect(guest).toHaveURL(new RegExp(`/o/${id}$`));
-  expect(await guest.evaluate((secret) => Object.values(localStorage).some((value) => value.includes(secret)), new URL(link).pathname.split('/').pop()!)).toBe(false);
+  await expectInvitationNotStored(guest, secret);
   await expect(guest.getByRole('status').filter({ hasText: `You've joined ${title} as a reviewer and member.` })).toBeVisible();
   // The steward is already on this address, so going to it again would not load the page afresh.
   await page.reload();
@@ -76,9 +112,9 @@ test('a steward invites a real reviewer, the link is used once, and another link
   await guest.context().clearCookies();
   await guest.unroute('**/api/auth/demo');
   await signIn(guest, { name: `Third invitee ${uniq()}`, role: 'contributor' });
-  await guest.goto(new URL(link).pathname);
+  await guest.goto(link);
   await expect(guest.getByText('This invitation link has been used up.', { exact: true })).toBeVisible();
-  await guest.goto(new URL(revocable).pathname);
+  await guest.goto(revocable);
   await expect(guest.getByText('This invitation link has been revoked.', { exact: true })).toBeVisible();
   await expect(guest.getByRole('link', { name: `View ${title}` })).toHaveAttribute('href', /\/def\//);
 });
@@ -101,6 +137,41 @@ test('a contributor can view the group but cannot create invitation links', asyn
   expect((await page.request.post(`/api/ontologies/${id}/invites`, { data: { roles: ['reviewer'] } })).status()).toBe(403);
 });
 
+test('cross-site and sibling-origin forms cannot accept an invitation with the recipient session', async ({ page, baseURL, consoleGuard }) => {
+  // The bodyless accept route used to allow forms, including same-site posts carrying session cookies.
+  consoleGuard.allow(/^Failed to load resource: the server responded with a status of 415\b/);
+  await signIn(page, { name: `Form invite owner ${uniq()}`, role: 'steward' });
+  const created = await page.request.post('/api/ontologies', { data: { title: `Form invitation ${uniq()}`, description: 'Invitation consent.', prefix: `if${uniq()}` } });
+  expect(created.status()).toBe(201);
+  const { id } = await created.json();
+  const made = await page.request.post(`/api/ontologies/${id}/invites`, { data: { roles: ['reviewer'] } });
+  expect(made.status()).toBe(201);
+  const { link } = await made.json();
+  const secret = new URL(link).pathname.split('/').pop()!;
+  const recipient = await signIn(page, { name: `Form recipient ${uniq()}`, role: 'contributor' });
+  const target = new URL(`/api/invites/${secret}/accept`, baseURL).href;
+  const sibling = new URL('/invitation-form', baseURL);
+  sibling.port = String(Number(sibling.port) + 1);
+  const crossSite = new URL('/invitation-form', baseURL);
+  crossSite.hostname = crossSite.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+  for (const attacker of [sibling, crossSite]) {
+    await page.route(attacker.href, (route) => route.fulfill({ contentType: 'text/html', body: `<form method="post" action="${target}"><button>Accept invitation</button></form>` }));
+    await page.goto(attacker.href);
+    const response = page.waitForResponse((r) => r.url() === target && r.request().method() === 'POST');
+    await page.getByRole('button', { name: 'Accept invitation', exact: true }).click();
+    expect((await response).status()).toBe(415);
+    const lookup = await page.request.get(`/api/invites/${secret}`);
+    expect(lookup.status()).toBe(200);
+    expect((await lookup.json()).state).toBe('active');
+  }
+  // The normal client must still send JSON and let the person explicitly join.
+  await page.goto(link);
+  const acceptance = page.waitForRequest((r) => r.url() === target && r.method() === 'POST');
+  await page.getByRole('button', { name: `Join as ${recipient.user.name}`, exact: true }).click();
+  expect((await acceptance).headers()['content-type']).toMatch(/^application\/json\b/);
+  await expect(page).toHaveURL(new RegExp(`/o/${id}$`));
+});
+
 test('expired and invalid links explain how to get another invitation', async ({ page, consoleGuard }) => {
   consoleGuard.allow(/^Failed to load resource: the server responded with a status of (404|410)\b/);
   await signIn(page, { name: `Expiry owner ${uniq()}`, role: 'steward' });
@@ -113,7 +184,7 @@ test('expired and invalid links explain how to get another invitation', async ({
   const lookup = await (await page.request.get(`/api/invites/${secret}`)).json();
   // Stub only the display: real expiry is tested against clock in invites.test.ts, without moving the shared e2e clock.
   await page.route(`**/api/invites/${secret}`, (route) => route.fulfill({ status: 410, json: { ...lookup, state: 'expired', error: 'This invitation link has expired.' } }));
-  await page.goto(new URL(link).pathname);
+  await page.goto(link);
   await expect(page.getByText('This invitation link has expired.', { exact: true })).toBeVisible();
   await expect(page.getByText('Ask whoever sent it for a new link.', { exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: `View ${ontology.title}` })).toBeVisible();
