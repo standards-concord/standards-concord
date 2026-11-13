@@ -538,12 +538,14 @@ test.describe('progressive disclosure', () => {
     await expect(section.getByRole('button', { name: 'Agent', exact: true })).toHaveCount(1);
     await section.getByRole('button', { name: 'Done' }).click();
     await expect(section.getByRole('button', { name: 'Agent', exact: true })).toHaveCount(0);
-    // Adding a person and transferring ownership are each one click away.
+    // Simulated members stay available inside invitations in demo mode.
     await expect(section.getByRole('combobox')).toHaveCount(0);
-    await section.getByRole('button', { name: /Add a person/ }).click();
+    await section.getByRole('button', { name: /^Invite people/ }).click();
+    await section.getByRole('button', { name: 'Add a simulated member' }).click();
     await expect(section.getByRole('combobox', { name: 'Person to add' })).toBeVisible();
     await section.getByRole('button', { name: 'Transfer ownership' }).click();
-    await expect(section.getByRole('combobox')).toHaveCount(2);
+    await expect(section.getByRole('combobox')).toHaveCount(4);
+    await expect(section.getByRole('combobox', { name: 'New owner' })).toBeVisible();
   });
 
   test('a live interview lists sections still to cover on one line', async ({ page }) => {

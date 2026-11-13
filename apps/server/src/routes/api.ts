@@ -1,5 +1,9 @@
 import path from 'node:path';
 import express, { Router, type Request } from 'express';
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
+import { clientIp } from '../oauth.js';
+import { DbRateStore } from '../rateLimitStore.js';
+import * as invites from '../services/invites.js';
 import { allTerms, compactIRI, exampleFiles, expandIRI, FORMAT_INFO, serialize, usedBy, validate } from '@concord/core';
 import type { OutputFormat } from '@concord/core/types';
 import type { ChangeRequestKind, GovernancePolicy, Meeting, OntologySummary, Role, SessionInfo, UseCase, User } from '@concord/shared';
@@ -89,6 +93,10 @@ const str = (v: unknown, name: string, max = 20000) => {
   return v.trim();
 };
 const optStr = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+// Requiring JSON keeps another origin's forms from acting through same-site session cookies.
+const requireJson = (req: Request, action: string) => {
+  if (!req.is('application/json')) throw new HttpError(415, `Send ${action} as JSON`);
+};
 
 async function sessionInfo(user?: User, token?: unknown): Promise<SessionInfo> {
   return {
@@ -160,6 +168,26 @@ export function apiRouter(): Router {
   /* ------------------------------ auth ------------------------------ */
   r.get('/session', async (req, res) => res.json(await sessionInfo(req.user, req.cookies?.[SESSION_COOKIE])));
 
+  const inviteLimiter = rateLimit({
+    windowMs: 60_000, limit: 60,
+    ...(config.sharedLimits ? { store: new DbRateStore('invites') } : {}),
+    standardHeaders: true, legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(clientIp(req as Request)),
+    validate: { trustProxy: false, xForwardedForHeader: false },
+    message: { error: 'Too many invitation requests. Try again in a minute.' },
+  });
+  // Public lookup comes before the signed-in read gate. Neither route may be cached.
+  r.get('/invites/:secret', inviteLimiter, async (req, res) => {
+    const { info, status } = await invites.lookupInvite(String(req.params.secret));
+    // A link that no longer works says only which standard it was for, so the page can point there: not who
+    // sent it or what it granted.
+    res.status(status).json(status === 200 ? info : { ontology: info.ontology, state: info.state, error: invites.inactiveMessage(info.state) });
+  });
+  r.post('/invites/:secret/accept', inviteLimiter, async (req, res) => {
+    requireJson(req, 'the invitation acceptance');
+    res.json(await invites.acceptInvite(String(req.params.secret), requireUser(req)));
+  });
+
   // Walkthrough videos for the alpha landing page (public; see services/media.ts).
   r.get('/media/index.json', async (_req, res) => {
     const index = await mediaIndex().catch(() => ({ release: null, files: [], unavailable: true }));
@@ -211,7 +239,7 @@ export function apiRouter(): Router {
   r.post('/auth/logout', async (req, res) => {
     // Only Concord's own pages sign out: a JSON request can't come from another site's form, which
     // could otherwise sign people out of Concord without their asking.
-    if (!req.is('application/json')) throw new HttpError(415, 'Send the sign-out as JSON');
+    requireJson(req, 'the sign-out');
     // A sign-out made earlier with no connection names the session it meant (SessionInfo.sessionId):
     // if this browser's session is now another one (a newer sign-in, another account, or none), nothing ends.
     const meant = optStr(req.body?.session);
@@ -395,6 +423,16 @@ export function apiRouter(): Router {
   });
 
   /* ------------------------ members & governance --------------------- */
+  r.post('/ontologies/:id/invites', async (req, res) => {
+    res.status(201).json(await invites.createInvite((await project(req)).id, requireUser(req), req.body ?? {}));
+  });
+  r.get('/ontologies/:id/invites', async (req, res) => {
+    res.json(await invites.listInvites((await project(req)).id, requireUser(req)));
+  });
+  r.delete('/ontologies/:id/invites/:inviteId', async (req, res) => {
+    await invites.revokeInvite((await project(req)).id, String(req.params.inviteId), requireUser(req));
+    res.status(204).end();
+  });
   r.put('/ontologies/:id/members/:userId', async (req, res) => {
     const p = await project(req);
     await requireRole(p.id, req.user, ['owner', 'steward'], 'manage members');

@@ -84,6 +84,37 @@ export type Role =
   | 'agent'
   | 'odi';
 
+export type InviteState = 'active' | 'used up' | 'expired' | 'revoked';
+/** Public invitation record. The server alone keeps its secret's hash. */
+export interface Invite {
+  id: string;
+  ontologyId: string;
+  roles: Role[];
+  createdBy: string;
+  createdAt: string;
+  expiresAt: string;
+  maxUses: number;
+  uses: number;
+  usedBy: { userId: string; at: string }[];
+  revokedAt?: string;
+  note?: string;
+  invitedBy: string;
+  state: InviteState;
+}
+export interface InviteInput {
+  roles: Role[];
+  expiresInDays?: number;
+  maxUses?: number;
+  note?: string;
+}
+export interface InviteLookup {
+  ontology: { id: string; title: string; slug: string };
+  roles: Role[];
+  invitedBy: string;
+  expiresAt: string;
+  state: InviteState;
+}
+
 /**
  * Whether someone with these roles can cast a vote that counts under a rule's voter roles. Members
  * who only act as AI agents never vote. The server's acceptance check, its tally and the app's
@@ -1797,6 +1828,11 @@ export interface SessionInfo {
  *  POST /api/ontologies/:id/federations/:fed/commitment {committed} -> FederationDetail   (owners, stewards)
  *
  * Members & governance
+ *  POST /api/ontologies/:id/invites {roles, expiresInDays?, maxUses?, note?} -> { invite: Invite, link: string } (link shown once)
+ *  GET  /api/ontologies/:id/invites                  -> Invite[] (owners and stewards; newest first)
+ *  DELETE /api/ontologies/:id/invites/:inviteId       -> 204 (revoke; owners and stewards)
+ *  GET  /api/invites/:secret                         -> InviteLookup (public; 410 with reason when inactive)
+ *  POST /api/invites/:secret/accept                  -> { ontologyId } (signed in, real accounts only)
  *  PUT  /api/ontologies/:id/members/:userId {roles}  -> Membership
  *  DELETE /api/ontologies/:id/members/:userId
  *  GET  /api/governance/templates                    -> GovernancePolicy[]

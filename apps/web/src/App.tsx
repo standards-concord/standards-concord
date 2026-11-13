@@ -6,6 +6,7 @@ import { WalkthroughProvider } from './lib/walkthrough';
 import { Page, Shell } from './components/Shell';
 import { Button, ErrorCard, Loading } from './components/ui';
 import { LoginPage } from './pages/Login';
+import { JoinPage } from './pages/Join';
 import { HubPage } from './pages/Hub';
 import { FederationPage, FederationsPage } from './pages/Federations';
 import { AlphaPage } from './pages/Alpha';
@@ -73,7 +74,9 @@ function RequireUser({ children }: { children: ReactNode }) {
     if (!signedOut) return;
     const here = loc.pathname + loc.search + loc.hash;
     const toLogin = () => navigate(`/login?next=${encodeURIComponent(here)}`, { replace: true });
-    toLogin();
+    // Signing out moves to sign-in itself, and the address changes before the router shows it. Redirecting then
+    // as well would send the next person to sign in here to the page the last one had open.
+    if (window.location.pathname + window.location.search + window.location.hash === here) toLogin();
     // Going back just as that redirect is made can land on this same page before the router has shown /login. The
     // router then sees no change at all, so nothing renders or redirects again, and the page stays blank (#100). So
     // while this page is up, a move back to it redirects again. (A move anywhere else renders that page instead.)
@@ -122,6 +125,7 @@ function Routed() {
       <Suspense fallback={<Loading />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/join/:secret" element={<JoinPage />} />
           <Route path="/welcome" element={<WelcomePage />} />
           <Route path="/alpha" element={<AlphaPage />} />
           <Route path="/feedback" element={<FeedbackPage />} />

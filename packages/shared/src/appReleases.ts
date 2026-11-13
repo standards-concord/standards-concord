@@ -53,7 +53,7 @@ export interface AppRelease {
 /** Newest first. */
 export const APP_RELEASES: AppRelease[] = [
   {
-    version: '0.51.1',
+    version: '0.52.2',
     date: '2026-11-13',
     title: 'Tidier demo, clearer outcomes and a compact walkthrough button',
     changes: [
@@ -113,6 +113,29 @@ export const APP_RELEASES: AppRelease[] = [
         roles: ['steward', 'contributor', 'member', 'odi', 'agent'], to: '{o}#health',
       },
     ],
+  },
+  {
+    version: '0.52.1',
+    date: '2026-11-13',
+    title: 'Signing in straight after signing out',
+    changes: [{
+      id: 'sign-in-after-sign-out',
+      type: 'fix',
+      title: 'Signing in straight after signing out keeps you signed in',
+      detail: 'Signing in again in the moment after signing out could leave you back at the sign-in page. The new sign-in now waits until the old session has ended, and a slow connection no longer undoes it. Signing out also opens plain sign-in now, so the next person on this browser starts on their own first page, not the page the last person had open.',
+      roles: [],
+      to: '/',
+    }],
+  },
+  {
+    version: '0.52.0',
+    date: '2026-11-13',
+    title: 'Invite people to a working group',
+    changes: [{
+      id: 'invite-people', type: 'feat', title: 'Invite people to a working group',
+      detail: 'Create a private invitation link with chosen roles, an expiry and a use limit. People sign in to join your group; revoke a link whenever you need to.',
+      roles: ['steward'], to: '{o}/governance#roles',
+    }],
   },
   {
     version: '0.51.0',
@@ -1112,7 +1135,7 @@ export const APP_RELEASES: AppRelease[] = [
         detail:
           'The login page now says “Sign in with Solid”, with the Solid logo. It opens the same sign-in window as the other Solid Suite apps: pick solidcommunity.net or another provider, enter your WebID, or type your provider’s address.',
         roles: [],
-        to: '/login',
+        to: '/',
         ask: 'Could you find your provider, and was it clear what to choose if you don’t have a pod yet?',
       },
     ],
@@ -1201,7 +1224,7 @@ export const APP_RELEASES: AppRelease[] = [
         detail:
           'Already have a Solid pod? Choose “Sign in with your WebID” on the login page. You sign in with your own Solid provider, and Concord checks that your WebID names that provider.',
         roles: [],
-        to: '/login',
+        to: '/',
         ask: 'If you have a WebID, how easy was it to sign in with it?',
       },
       {

@@ -11,6 +11,8 @@ import { Avatar, Badge, Button, Card, CardHeader, Chip, ErrorCard, InlineError, 
 import { useOntology } from './Layout';
 import { alwaysRules, RuleList, ruleSummary } from '../../components/PolicyRules';
 import { scrollBehavior } from '../../lib/motion';
+import { useSession } from '../../lib/session';
+import { InvitationLinks } from './InvitationLinks';
 
 const LEVELS: ChangeLevel[] = ['patch', 'minor', 'major'];
 const ALL_ROLES = Object.keys(ROLE_INFO) as Role[];
@@ -116,7 +118,9 @@ function RulesTable({
 
 function Members() {
   const { id, ontology, hasRole, reload } = useOntology();
-  const personas = useAsync(() => api.personas(), []);
+  const { session } = useSession();
+  const demo = !!session?.providers.demo;
+  const personas = useAsync(() => demo ? api.personas() : Promise.resolve([]), [demo]);
   const [adding, setAdding] = useState('');
   const [transferTo, setTransferTo] = useState('');
   const [transferResult, setTransferResult] = useState<string>();
@@ -194,32 +198,36 @@ function Members() {
         ))}
       </div>
       {canManage && (
-        <Disclosure className="border-t border-line px-5 py-4" title="Add a person" summary={candidates.length ? `${plural(candidates.length, 'person', 'people')} available` : 'everyone is a member'}>
-          <div className="flex flex-wrap items-center gap-2">
-            <Select aria-label="Person to add" value={adding} onChange={(e) => setAdding(e.target.value)} className="w-auto min-w-56" disabled={!candidates.length}>
-              <option value="">{candidates.length ? 'Choose a person…' : 'Everyone is already a member'}</option>
-              {candidates.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                  {p.organisation ? ` — ${p.organisation}` : ''}
-                </option>
-              ))}
-            </Select>
-            <Button
-              icon={UserPlus}
-              disabled={!adding}
-              loading={act.pending}
-              onClick={() =>
-                void act.run(async () => {
-                  await api.setMemberRoles(id, adding, ['contributor']);
-                  setAdding('');
-                })
-              }
-            >
-              Add as contributor
-            </Button>
-          </div>
-        </Disclosure>
+        <InvitationLinks>
+          {demo && (
+            <Disclosure className="mt-5" title="Add a simulated member">
+              <div className="flex flex-wrap items-center gap-2">
+                <Select aria-label="Person to add" value={adding} onChange={(e) => setAdding(e.target.value)} className="w-auto min-w-56" disabled={!candidates.length}>
+                  <option value="">{candidates.length ? 'Choose a person…' : 'Everyone is already a member'}</option>
+                  {candidates.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                      {p.organisation ? ` — ${p.organisation}` : ''}
+                    </option>
+                  ))}
+                </Select>
+                <Button
+                  icon={UserPlus}
+                  disabled={!adding}
+                  loading={act.pending}
+                  onClick={() =>
+                    void act.run(async () => {
+                      await api.setMemberRoles(id, adding, ['contributor']);
+                      setAdding('');
+                    })
+                  }
+                >
+                  Add as contributor
+                </Button>
+              </div>
+            </Disclosure>
+          )}
+        </InvitationLinks>
       )}
       <InlineError error={act.error || personas.error} />
       <Disclosure className="border-t border-line px-5 py-4" title="Transfer ownership">

@@ -129,7 +129,8 @@ test('the steward adds people, gives them roles and removes one', async ({ page 
   const section = page.locator('#roles');
   await expect(section.getByText(steward.name)).toBeVisible();
 
-  await section.getByRole('button', { name: /Add a person/ }).click();
+  await section.getByRole('button', { name: /^Invite people/ }).click();
+  await section.getByRole('button', { name: 'Add a simulated member' }).click();
   for (const name of ['Tom Okafor', 'Mei Chen']) {
     const pick = section.getByRole('combobox', { name: 'Person to add' });
     await pick.selectOption({ label: (await pick.locator('option', { hasText: name }).innerText()).trim() });
@@ -317,7 +318,8 @@ test('when the policy asks for a vote, members vote after review and the result 
   await page.goto(`/o/${ontologyId}/governance#roles`);
   await settle(page);
   const section = page.locator('#roles');
-  await section.getByRole('button', { name: /Add a person/ }).click();
+  await section.getByRole('button', { name: /^Invite people/ }).click();
+  await section.getByRole('button', { name: 'Add a simulated member' }).click();
   const pick = section.getByRole('combobox', { name: 'Person to add' });
   await pick.selectOption({ label: (await pick.locator('option', { hasText: 'Gareth Lewis' }).innerText()).trim() });
   await section.getByRole('button', { name: 'Add as contributor' }).click();

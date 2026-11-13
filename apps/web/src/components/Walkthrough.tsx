@@ -58,6 +58,7 @@ function WelcomeStep() {
           <li>• Describe how you use data to an AI interviewer (typed or spoken), or let a bot co-facilitate your Google Meet.</li>
           <li>• Proposed changes are classified as patch / minor / major, validated by a reasoner, quality-checked and FAIR-scored.</li>
           <li>• Review and voting follow a governance policy you choose, then versions are released and published.</li>
+          <li>• Owners and stewards can invite real people from Governance, Members and roles. Choose roles, create a link and send it privately; people sign in to join.</li>
           <li>• Coding agents connect over MCP to read the ontology and report gaps.</li>
         </ul>
       </Disclosure>
