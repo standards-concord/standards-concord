@@ -11,12 +11,17 @@ export function changeOutcome(cr: ChangeRequestDetail, name: (id?: string) => st
   const who = (id?: string) => name(id) ?? 'a former member';
   if (cr.status === 'withdrawn') return `Withdrawn${event?.actorId ? ` by ${who(event.actorId)}` : ''} on ${date}.`;
 
-  // The evaluator has already selected the effective decisions, including rounds and autopilot.
-  const vetoes = cr.reviews.filter((r) => r.decision === 'object' && cr.governance.vetoedBy.includes(r.userId));
-  if (!merged && (event?.message.includes('vetoed') || cr.governance.vetoedBy.length)) {
-    const veto = vetoes[0];
+  // Whether it was a veto is in the recorded decision. Today's roles only stand in for a record without one:
+  // an objector given a veto role after a vote failed did not veto it.
+  const vetoed = event ? event.message.includes('vetoed') : cr.governance.vetoedBy.length > 0;
+  if (!merged && vetoed) {
+    // Likewise the veto is the objection of someone who held a veto role when they made it. The evaluator's
+    // list (which knows rounds and autopilot) picks among those; reviews saved without roles fall back to it.
+    const objections = cr.reviews.filter((r) => r.decision === 'object');
+    const held = objections.filter((r) => r.roles?.some((role) => cr.governance.rule.vetoRoles.includes(role)));
+    const veto = held.find((r) => cr.governance.vetoedBy.includes(r.userId)) ?? held.at(-1) ?? objections.find((r) => cr.governance.vetoedBy.includes(r.userId));
     if (veto) {
-      const role = veto.roles.find((r) => cr.governance.rule.vetoRoles.includes(r));
+      const role = veto.roles?.find((r) => cr.governance.rule.vetoRoles.includes(r));
       const label = role === 'odi' ? 'ODI' : role ? roleLabel(role).toLowerCase() : undefined;
       return `Rejected by ${who(veto.userId)} (${label ? `${label} ` : ''}veto) on ${date}.`;
     }

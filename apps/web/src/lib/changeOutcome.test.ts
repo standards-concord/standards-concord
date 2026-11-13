@@ -38,6 +38,36 @@ it('credits the owner who objects, not an owner who only requests changes', () =
   expect(changeOutcome(cr, names)).toBe('Rejected by Priya Shah (owner veto) on 8 Nov 2026.');
 });
 
+it('keeps a failed vote a failed vote when an objector has since been given a veto role', () => {
+  // Today's roles used to decide: promote someone who had objected and the vote became their veto.
+  const cr = base();
+  cr.governance.vetoedBy = ['owner'];
+  cr.reviews = [{ userId: 'owner', decision: 'object', at, roles: ['reviewer'] } as Review];
+  expect(changeOutcome(cr, names)).toBe('Rejected by vote on 8 Nov 2026: 0 in favour, 4 against.');
+});
+
+it('names the objector who held the veto role at the time, whoever holds it now', () => {
+  // An earlier objector promoted afterwards used to be named as the person who vetoed.
+  const cr = base();
+  cr.timeline[0].message = 'rejected (vetoed)';
+  cr.reviews = [
+    { userId: 'author', decision: 'object', at, roles: ['reviewer'], seq: 1 },
+    { userId: 'owner', decision: 'object', at, roles: ['owner'], seq: 2 },
+  ] as Review[];
+  cr.governance.vetoedBy = ['author', 'owner'];
+  expect(changeOutcome(cr, names)).toBe('Rejected by Priya Shah (owner veto) on 8 Nov 2026.');
+  // The person who vetoed has since lost the role, and the other objector gained it.
+  cr.governance.vetoedBy = ['author'];
+  expect(changeOutcome(cr, names)).toBe('Rejected by Priya Shah (owner veto) on 8 Nov 2026.');
+});
+
+it('still reads a veto from the evaluator when the decision was never recorded or reviews carry no roles', () => {
+  const cr = base({ timeline: [] });
+  cr.governance.vetoedBy = ['owner'];
+  cr.reviews = [{ userId: 'owner', decision: 'object', at } as Review];
+  expect(changeOutcome(cr, names)).toBe('Rejected by Priya Shah (veto) on 8 Nov 2026.');
+});
+
 it('names only the sign-offs counted by governance, excluding the author and co-author', () => {
   // The decision named everyone with an approver role, including people who wrote the edits.
   const cr = base({ authorId: 'author', revisedBy: ['co-author'], status: 'merged', timeline: [{ type: 'status', at, message: 'merged into the working draft' }] });

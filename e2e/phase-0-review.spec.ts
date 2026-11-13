@@ -212,3 +212,51 @@ test('a previous-version saved merged request opens while its refresh waits', as
   }
   await page.unroute(`**${url}`);
 });
+
+test('removing the person you searched for brings the rest of a now-small group back', async ({ page }) => {
+  // With 13 members, finding one and removing them hid the search box (12 members need none) but kept
+  // its text filtering the list: it said "No members match" with no way to clear it.
+  const owner = await person(page, 'Owner', 'owner');
+  const o = await project(page);
+  const people = [];
+  for (let i = 0; i < 12; i++) people.push(await person(page, `Member ${i}`, 'member'));
+  await owner.restore();
+  for (const p of people) await addMember(page, o.id, p.id, ['member']);
+  await page.goto(`/o/${o.id}/governance#roles`);
+  const members = page.locator('#roles');
+  await members.getByRole('searchbox', { name: 'Find a member' }).fill(people[0].name);
+  await expect(members.getByText(people[1].name, { exact: true })).toHaveCount(0);
+  page.once('dialog', (d) => void d.accept());
+  await members.getByRole('button', { name: 'Remove member' }).click();
+  await expect(members.getByRole('searchbox', { name: 'Find a member' })).toHaveCount(0);
+  await expect(members.getByText(people[0].name, { exact: true })).toHaveCount(0);
+  await expect(members.getByText(people[1].name, { exact: true })).toBeVisible();
+  await expect(members.getByText(owner.name, { exact: true })).toBeVisible();
+  await expect(members.getByText('No members match.')).toHaveCount(0);
+});
+
+test('a veto stays with the person who made it when another objector later gains a veto role', async ({ page }) => {
+  // The decision read today's roles: promote an earlier objector to owner and the closed request
+  // said that person had vetoed it.
+  const author = await person(page, 'Author', 'owner');
+  const o = await project(page);
+  const objector = await person(page, 'Objects as reviewer', 'reviewer');
+  const vetoer = await person(page, 'Vetoes', 'owner');
+  await author.restore();
+  await addMember(page, o.id, objector.id, ['reviewer']);
+  await addMember(page, o.id, vetoer.id, ['owner']);
+  const cr = await change(page, o);
+  expect((await page.request.post(`/api/change-requests/${cr.id}/submit`)).ok()).toBeTruthy();
+  await objector.restore();
+  await page.goto(`/o/${o.id}/changes/${cr.id}`);
+  await page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Object', exact: true }).click();
+  await expect(page.getByText('You previously chose “object”.')).toBeVisible();
+  await vetoer.restore();
+  await page.reload();
+  await page.getByRole('group', { name: 'Your actions' }).getByRole('button', { name: 'Object', exact: true }).click();
+  await expect(page.getByTestId('decision-outcome')).toContainText(`Rejected by ${vetoer.name} (owner veto) on`);
+  await author.restore();
+  await addMember(page, o.id, objector.id, ['owner']);
+  await page.reload();
+  await expect(page.getByTestId('decision-outcome')).toContainText(`Rejected by ${vetoer.name} (owner veto) on`);
+});

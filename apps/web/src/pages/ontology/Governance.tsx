@@ -138,7 +138,9 @@ function Members() {
     Number(b.roles.some((r) => r !== 'member') || ontology.ownerIds.includes(b.userId)) - Number(a.roles.some((r) => r !== 'member') || ontology.ownerIds.includes(a.userId)) ||
     (b.lastActiveAt ?? b.addedAt).localeCompare(a.lastActiveAt ?? a.addedAt));
   const summary = `${plural(ordered.length, 'member')}: ${ordered.slice(0, 8).map((m) => m.user?.name ?? m.userId).join(', ')}${ordered.length > 8 ? ` and ${ordered.length - 8} others` : ''}`;
-  const query = memberSearch.trim().toLocaleLowerCase();
+  // Small groups have no search box, so nothing typed into it earlier may go on filtering them.
+  const searchable = ontology.members.length > 12;
+  const query = searchable ? memberSearch.trim().toLocaleLowerCase() : '';
   const shown = ontology.members.filter((m) => !query || [m.user?.name, m.user?.organisation, m.user?.email].some((v) => v?.toLocaleLowerCase().includes(query)));
 
   return (
@@ -150,7 +152,7 @@ function Members() {
       summary={summary}
       defaultOpen={window.location.hash === '#roles'}
     >
-      {ontology.members.length > 12 && <div className="px-5 pb-3"><Input type="search" aria-label="Find a member" placeholder="Find a member" value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)} /></div>}
+      {searchable && <div className="px-5 pb-3"><Input type="search" aria-label="Find a member" placeholder="Find a member" value={memberSearch} onChange={(e) => setMemberSearch(e.target.value)} /></div>}
       {!shown.length && <p className="px-5 pb-3 text-sm text-muted">No members match.</p>}
       <div className="divide-y divide-line">
         {shown.map((m) => (
