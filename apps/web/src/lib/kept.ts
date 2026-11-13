@@ -118,6 +118,12 @@ function forget(key: string) {
   void dropOffline(key);
 }
 
+/** Forget an alias after a write, including its offline copy and any older load still on its way. */
+export function forgetKept(keep: string) {
+  const key = keptKey(keep);
+  if (key) forget(key);
+}
+
 /**
  * What one page (one useAsync) has loaded, so that a change it makes itself (after an edit) can forget
  * everything that change may have made untrue. An edit can finish after the page has moved on to other

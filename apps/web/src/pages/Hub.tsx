@@ -11,7 +11,8 @@ import { plural, relativeTime, titleCase } from '../lib/format';
 import { Page } from '../components/Shell';
 import { HealthChip } from '../components/Phase';
 import { ActivityFeed } from '../components/ActivityFeed';
-import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, PageHeader, Select, Textarea, LinkButton } from '../components/ui';
+import { OntologyDetailsFields } from '../components/OntologyDetails';
+import { Badge, Button, Card, Dialog, EmptyState, ErrorCard, Field, InlineError, Input, Loading, PageHeader, Select, LinkButton } from '../components/ui';
 
 function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const nav = useNavigate();
@@ -35,8 +36,9 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
     void ontologies.reload();
   });
   const hintId = useId();
-  const missing = !form.title.trim() && !form.prefix.trim() ? 'Add a title and prefix to continue.'
-    : !form.title.trim() ? 'Add a title to continue.' : !form.prefix.trim() ? 'Add a prefix to continue.' : undefined;
+  // A description is needed from the start: without one in the ontology file, every change fails its checks.
+  const needed = [!form.title.trim() && 'a title', !form.prefix.trim() && 'a prefix', !form.description.trim() && 'a description'].filter((x): x is string => !!x);
+  const missing = needed.length ? `Add ${needed.length > 1 ? `${needed.slice(0, -1).join(', ')} and ${needed[needed.length - 1]}` : needed[0]} to continue.` : undefined;
   const chosen = templates.data?.find((t) => t.templateId === form.governanceTemplate);
   const autoPrefix = (title: string) =>
     title
@@ -64,24 +66,9 @@ function NewOntologyDialog({ open, onClose }: { open: boolean; onClose: () => vo
       }
     >
       <div className="space-y-4">
-        <Field label={<>Title <span className="text-muted">(required)</span></>}>
-          <Input
-            required
-            aria-required="true"
-            value={form.title}
-            onChange={(e) => setForm((f) => ({ ...f, title: e.target.value, prefix: f.prefix && f.prefix !== autoPrefix(f.title) ? f.prefix : autoPrefix(e.target.value) }))}
-            placeholder="e.g. Volunteering Data Standard"
-          />
-        </Field>
-        <Field label={<>Prefix <span className="text-muted">(required)</span></>} hint="Short namespace prefix used in CURIEs, e.g. vol:Shift">
+        <OntologyDetailsFields creating value={form} onChange={(field, value) => setForm((f) => ({ ...f, [field]: value, ...(field === 'title' && { prefix: f.prefix && f.prefix !== autoPrefix(f.title) ? f.prefix : autoPrefix(value) }) }))} afterTitle={<Field label={<>Prefix <span className="text-muted">(required)</span></>} hint="Short namespace prefix used in CURIEs, e.g. vol:Shift">
           <Input required aria-required="true" value={form.prefix} onChange={set('prefix')} placeholder="vol" pattern="[a-z][a-z0-9-]*" />
-        </Field>
-        <Field label="Description">
-          <Textarea value={form.description} onChange={set('description')} placeholder="What is this ontology for, and who will use it?" />
-        </Field>
-        <Field label="Domain" hint="Helps the AI interviewer ask relevant questions.">
-          <Input value={form.domain} onChange={set('domain')} placeholder="e.g. charity volunteering, energy networks" />
-        </Field>
+        </Field>} />
         <Field label="Governance policy" hint="You can change this later from the Governance tab.">
           <Select value={form.governanceTemplate} onChange={set('governanceTemplate')} disabled={!templates.data}>
             <option value="">Default</option>

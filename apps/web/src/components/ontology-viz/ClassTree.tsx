@@ -173,7 +173,7 @@ export function ClassTree({ model, label, selected, onSelect, filter }: { model:
         </div>
       </div>
       <div hidden={!shown}>
-        {!rows.length && <p className="px-2 py-3 text-sm text-muted">No classes match.</p>}
+        {!rows.length && <p className="px-2 py-3 text-sm text-muted">{model.classes.size || f ? 'No classes match.' : 'No classes yet.'}</p>}
         <ul role="tree" aria-labelledby="class-tree-label" className="text-sm">
           {rows.map((r, i) => {
             const c = model.classes.get(r.iri)!;

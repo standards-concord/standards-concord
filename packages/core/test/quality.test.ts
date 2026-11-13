@@ -88,6 +88,27 @@ describe('lint', () => {
 });
 
 describe('fairCheck', () => {
+  it('leaves address checks out until the first release, even with a cached resolution', async () => {
+    // Unreleased addresses used to be probed and reported as failures that could not be fixed yet.
+    const graph = await loadFixture();
+    const report = fairCheck(graph, { unreleased: true, resolution: { rdf: false, html: false } });
+    for (const id of ['A1-rdf', 'A1-html']) expect(report.checks.find((c) => c.id === id)).toMatchObject({
+      status: 'not-checked', passed: false, message: 'Checked once the first version is published.',
+    });
+    expect(report.byPrinciple.A).toEqual({ passed: 1, total: 1, score: 1 });
+    expect(report.score).toBe(fairCheck(graph).score);
+  });
+
+  it('keeps the ordinary not-looked-up message and released resolution results', async () => {
+    const graph = await loadFixture();
+    const unchecked = fairCheck(graph);
+    for (const id of ['A1-rdf', 'A1-html']) {
+      expect(unchecked.checks.find((c) => c.id === id)).toMatchObject({ status: 'not-checked', message: 'not checked: the IRI was not looked up' });
+      expect(fairCheck(graph, { unreleased: false, resolution: { rdf: true, html: true } }).checks.find((c) => c.id === id)?.status).toBe('pass');
+      expect(fairCheck(graph, { unreleased: false, resolution: { rdf: false, html: false } }).checks.find((c) => c.id === id)?.status).toBe('fail');
+    }
+  });
+
   it('the fixture scores 1.0', async () => {
     const r = fairCheck(await loadFixture());
     expect(r.checks.filter((c) => c.status === 'fail')).toEqual([]);

@@ -30,7 +30,12 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
 
   const fit = useCallback(() => {
     const el = box.current;
-    if (!el || !size.width || !size.height || !el.clientWidth || !el.clientHeight) return;
+    if (!Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0) {
+      touched.current = false;
+      setT({ x: 0, y: 0, k: 1 });
+      return;
+    }
+    if (!el || !el.clientWidth || !el.clientHeight) return;
     touched.current = false;
     const pad = 24;
     const w = el.clientWidth - pad * 2;
@@ -82,13 +87,14 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
 
   const zoomAt = useCallback((factor: number, cx?: number, cy?: number) => {
     move((p) => {
+      if (size.width <= 0 || size.height <= 0) return p;
       const el = box.current;
       const px = cx ?? (el ? el.clientWidth / 2 : 0);
       const py = cy ?? (el ? el.clientHeight / 2 : 0);
       const k = clamp(p.k * factor);
       return { k, x: px - ((px - p.x) * k) / p.k, y: py - ((py - p.y) * k) / p.k };
     });
-  }, [box, move]);
+  }, [box, move, size.width, size.height]);
 
   useEffect(() => {
     const el = box.current;
@@ -143,31 +149,31 @@ export function usePanZoom(box: RefObject<HTMLDivElement | null>, size: { width:
   return { t, fit, reveal, zoomIn: () => zoomAt(1.2), zoomOut: () => zoomAt(1 / 1.2), handlers };
 }
 
-export function ZoomControls({ onIn, onOut, onFit, onExport, exportLabel = 'Download as SVG', onExportPng, k, children }: { onIn: () => void; onOut: () => void; onFit: () => void; onExport?: () => void; exportLabel?: string; onExportPng?: () => void; k: number; children?: ReactNode }) {
+export function ZoomControls({ onIn, onOut, onFit, onExport, exportLabel = 'Download as SVG', onExportPng, k, children, disabledReason }: { disabledReason?: string; onIn: () => void; onOut: () => void; onFit: () => void; onExport?: () => void; exportLabel?: string; onExportPng?: () => void; k: number; children?: ReactNode }) {
   const btn = 'flex size-8 items-center justify-center text-muted hover:bg-surface-2 hover:text-fg focus-visible:outline-2 focus-visible:outline-accent';
   return (
     <div className="absolute top-2 right-2 z-10 flex items-center gap-2">
       {children}
       <div className="flex items-center overflow-hidden rounded-lg border border-line-strong bg-surface shadow-sm">
-        <button type="button" className={btn} onClick={onOut} aria-label="Zoom out" title="Zoom out (−)">
+        <button type="button" className={btn} onClick={onOut} aria-label="Zoom out" disabled={!!disabledReason} title={disabledReason ?? 'Zoom out (−)'}>
           <Minus className="size-4" />
         </button>
         <span className="w-11 text-center text-xs text-muted tabular-nums" aria-live="polite" aria-label={`Zoom ${Math.round(k * 100)} percent`}>
           {Math.round(k * 100)}%
         </span>
-        <button type="button" className={btn} onClick={onIn} aria-label="Zoom in" title="Zoom in (+)">
+        <button type="button" className={btn} onClick={onIn} aria-label="Zoom in" disabled={!!disabledReason} title={disabledReason ?? 'Zoom in (+)'}>
           <Plus className="size-4" />
         </button>
-        <button type="button" className={cx(btn, 'border-l border-line')} onClick={onFit} aria-label="Fit to view" title="Fit to view (0)">
+        <button type="button" className={cx(btn, 'border-l border-line')} onClick={onFit} aria-label="Fit to view" disabled={!!disabledReason} title={disabledReason ?? 'Fit to view (0)'}>
           <Maximize2 className="size-4" />
         </button>
         {onExport && (
-          <button type="button" className={cx(btn, 'border-l border-line')} onClick={onExport} aria-label={exportLabel} title={exportLabel}>
+          <button type="button" className={cx(btn, 'border-l border-line')} onClick={onExport} aria-label={exportLabel} disabled={!!disabledReason} title={disabledReason ?? exportLabel}>
             <Download className="size-4" />
           </button>
         )}
         {onExportPng && (
-          <button type="button" className={cx(btn, 'border-l border-line')} onClick={onExportPng} aria-label="Download as PNG" title="Download as PNG">
+          <button type="button" className={cx(btn, 'border-l border-line')} onClick={onExportPng} aria-label="Download as PNG" disabled={!!disabledReason} title={disabledReason ?? 'Download as PNG'}>
             <ImageDown className="size-4" />
           </button>
         )}

@@ -333,6 +333,7 @@ test.describe('Public ontology page', () => {
     await expect(dialog).toContainText(`“${user.name}” is shown publicly`);
     await credit.uncheck();
     await dialog.getByLabel('Title').fill(`Uncredited ${Date.now()}`);
+    await dialog.getByLabel('Description').fill('A standard that does not name its creator.');
     await dialog.getByRole('button', { name: 'Create ontology' }).click();
     await expect(page).toHaveURL(/\/o\/[^/]+/);
     const [pub] = await Promise.all([page.waitForEvent('popup'), page.getByTestId('public-page-link').click()]);

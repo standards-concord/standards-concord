@@ -4,6 +4,8 @@
  * cached for an hour, and a lookup never takes longer than a few seconds.
  */
 import type { FairContext, FairResolution } from '@concord/core/types';
+import type { Release } from '@concord/shared';
+import { list } from '../db.js';
 
 const TTL_MS = 60 * 60 * 1000;
 const TIMEOUT_MS = 4000;
@@ -31,7 +33,8 @@ async function resolve(iri: string): Promise<FairResolution> {
 }
 
 /** FAIR context for an ontology IRI. Off in tests and when FAIR_RESOLVE=0, so those checks show as not checked. */
-export async function fairContext(iri: string | undefined): Promise<FairContext> {
+export async function fairContext(iri: string | undefined, ontologyId: string): Promise<FairContext> {
+  if (!(await list<Release>('releases', ontologyId)).some((r) => r.status === 'published')) return { unreleased: true };
   if (!iri || !/^https?:\/\//.test(iri) || process.env.NODE_ENV === 'test' || process.env.FAIR_RESOLVE === '0') return {};
   let hit = cache.get(iri);
   if (!hit || Date.now() - hit.at > TTL_MS) {

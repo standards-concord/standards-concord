@@ -233,7 +233,7 @@ export function layoutDiagram(model: OntologyModel, scope: Set<string>, opts: Di
     for (const pt of e.points) (width = Math.max(width, pt.x)), (height = Math.max(height, pt.y));
     if (e.lx !== undefined && e.ly !== undefined) (width = Math.max(width, e.lx + (e.lw ?? 0) / 2)), (height = Math.max(height, e.ly + 8));
   }
-  return { nodes: [...nodes.values()], edges: [...edges, ...loops], width: width || 400, height: height || 300 };
+  return { nodes: [...nodes.values()], edges: [...edges, ...loops], width: nodes.size ? width || 400 : 0, height: nodes.size ? height || 300 : 0 };
 }
 
 function nearestInDirection(from: DNode, all: DNode[], key: string) {
@@ -428,7 +428,7 @@ export function ClassDiagram({
             Go to details of {name(selected)}
           </a>
         )}
-        <ZoomControls k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => save(downloadSvg, 'svg')} onExportPng={() => save(downloadPng, 'png')}>
+        <ZoomControls disabledReason={!layout.nodes.length ? 'No classes to draw yet.' : undefined} k={pz.t.k} onIn={pz.zoomIn} onOut={pz.zoomOut} onFit={pz.fit} onExport={() => save(downloadSvg, 'svg')} onExportPng={() => save(downloadPng, 'png')}>
           {toolbar}
         </ZoomControls>
         {exportError && (
@@ -557,7 +557,7 @@ export function ClassDiagram({
           </g>
         </svg>
         <Legend />
-        {!layout.nodes.length && <p className="absolute inset-0 flex items-center justify-center text-sm text-muted">Nothing to draw with these settings.</p>}
+        {!layout.nodes.length && <p className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center text-sm text-muted">{model.classes.size ? 'Nothing to draw with these settings.' : 'No classes yet. Use Propose changes to draw the first ones.'}</p>}
       </div>
       {textList && (layout.edges.length > 0 || !!preview?.terms.size) && (
         <details className="group rounded-lg border border-line px-3 py-2 text-sm" data-testid="diagram-text">

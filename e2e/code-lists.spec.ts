@@ -50,7 +50,7 @@ async function setup(page: Page) {
   await dialog.getByLabel('Title').fill(`Activities ${u}`);
   await dialog.getByLabel('Prefix').fill(`cl${u}`.replace(/[^a-z0-9]/g, '').slice(0, 12));
   await dialog.getByLabel('Description').fill('Activity codes for community events.');
-  await dialog.getByLabel('Domain').fill('community events');
+  await dialog.getByLabel('Subject area').fill('community events');
   await dialog.getByLabel('Governance policy').selectOption({ label: 'Steward-led' });
   await dialog.getByRole('button', { name: 'Create ontology' }).click();
   await expect(page).toHaveURL(/\/o\/[^/]+$/);

@@ -37,15 +37,21 @@ test('a signed-in person creates an ontology from the hub with a governance temp
   const d = page.getByRole('dialog', { name: 'New ontology' });
   await expect(d.getByRole('button', { name: 'Create ontology' })).toBeDisabled();
   // Empty required fields used to leave the disabled button unexplained.
-  await expect(d.getByText('Add a title and prefix to continue.', { exact: true })).toBeVisible();
+  await expect(d.getByText('Add a title, a prefix and a description to continue.', { exact: true })).toBeVisible();
   await expect(d.getByLabel('Title')).toHaveAttribute('aria-required', 'true');
   await expect(d.getByLabel('Prefix')).toHaveAttribute('aria-required', 'true');
-  await expect(d.getByRole('button', { name: 'Create ontology' })).toHaveAccessibleDescription('Add a title and prefix to continue.');
+  // A standard created without a description used to fail every change's checks ("ontology header has no
+  // dcterms:description") with nothing in the dialog saying one was needed.
+  await expect(d.getByLabel('Description')).toHaveAttribute('aria-required', 'true');
+  await expect(d.getByRole('button', { name: 'Create ontology' })).toHaveAccessibleDescription('Add a title, a prefix and a description to continue.');
   const id = uniq();
   ontologyTitle = `Rota exchange ${id}`;
   await d.getByLabel('Title').fill(ontologyTitle);
   // The prefix is suggested from the title's initials.
   await expect(d.getByLabel('Prefix')).toHaveValue(/^re/);
+  await expect(d.getByRole('button', { name: 'Create ontology' })).toHaveAccessibleDescription('Add a description to continue.');
+  await expect(d.getByRole('button', { name: 'Create ontology' })).toBeDisabled();
+  await d.getByLabel('Description').fill('Swapping volunteer shifts between organisations.');
   prefix = `rx${id}`.replace(/[^a-z0-9]/g, '').slice(0, 12);
   await d.getByLabel('Prefix').fill('');
   await expect(d.getByRole('button', { name: 'Create ontology' })).toHaveAccessibleDescription('Add a prefix to continue.');
@@ -54,8 +60,7 @@ test('a signed-in person creates an ontology from the hub with a governance temp
   await expect(d.getByRole('button', { name: 'Create ontology' })).toHaveAccessibleDescription('Add a title to continue.');
   await d.getByLabel('Title').fill(ontologyTitle);
   await expect(d.getByText(/to continue\.$/)).toHaveCount(0);
-  await d.getByLabel('Description').fill('Swapping volunteer shifts between organisations.');
-  await d.getByLabel('Domain').fill('charity volunteering');
+  await d.getByLabel('Subject area').fill('charity volunteering');
   await d.getByLabel('Governance policy').selectOption({ label: 'Steward-led' });
   await d.getByRole('button', { name: 'Create ontology' }).click();
 
@@ -273,6 +278,38 @@ async function editMinorRule(page: Page, edit: (table: import('@playwright/test'
   await page.getByRole('button', { name: 'Save policy' }).first().click();
   await expect(page.getByText('Saved', { exact: true })).toBeVisible();
 }
+
+test('a policy edit made while the page is still refreshing is kept', async ({ page }) => {
+  // The governance page opens at once from the copy this device kept, then refreshes in the background. The
+  // refreshed copy used to reset the policy form even when the saved policy had not changed, so an edit made
+  // in between was silently dropped and "Save policy" stayed disabled.
+  await asSteward(page);
+  await page.goto(`/o/${ontologyId}/governance`);
+  await settle(page);
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route(new RegExp(`/api/ontologies/${ontologyId}$`), async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.reload();
+  await page.getByRole('button', { name: 'Edit policy' }).click();
+  await page.getByRole('button', { name: /Change request rules/ }).click();
+  await page.getByRole('group', { name: 'Level to edit' }).first().getByRole('button', { name: 'Edit minor' }).click();
+  const lazy = page.locator('table').first().getByRole('switch', { name: 'Lazy consensus (minor)' });
+  const before = await lazy.getAttribute('aria-checked');
+  await lazy.click();
+  await expect(lazy).not.toHaveAttribute('aria-checked', before!);
+  const refreshed = page.waitForResponse(new RegExp(`/api/ontologies/${ontologyId}$`));
+  release();
+  await refreshed;
+  await settle(page);
+  await expect(lazy).not.toHaveAttribute('aria-checked', before!);
+  await expect(page.getByText('Unsaved changes').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save policy' }).first()).toBeEnabled();
+  // Nothing is saved: later tests set the rules they need themselves.
+  await page.getByRole('button', { name: 'Discard' }).first().click();
+});
 
 test('when the policy asks for a vote, members vote after review and the result decides', async ({ page }) => {
   // Gareth joins as a voting member.

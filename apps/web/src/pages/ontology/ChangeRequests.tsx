@@ -196,6 +196,13 @@ export function ChangeRequestsTab() {
   const filter = (params.get('status') ?? 'open') as (typeof FILTERS)[number];
   const list = useAsync(() => api.changeRequests(id, filter === 'open' || filter === 'all' ? undefined : filter), [id, filter], { keep: `changeRequests|${id}|${filter === 'open' || filter === 'all' ? '' : filter}` });
   const [dialog, setDialog] = useState<'new' | 'bug'>();
+  useEffect(() => {
+    if (params.get('new') !== '1') return;
+    setDialog('new');
+    const next = new URLSearchParams(params);
+    next.delete('new');
+    setParams(next, { replace: true });
+  }, [params, setParams]);
   const setFilter = (s: (typeof FILTERS)[number]) => {
     const n = new URLSearchParams(params);
     n.set('status', s);

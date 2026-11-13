@@ -353,6 +353,8 @@ export interface FairResolution {
 }
 
 export interface FairContext {
+  /** Address checks begin only after the ontology's first published release. */
+  unreleased?: boolean;
   resolution?: FairResolution;
 }
 

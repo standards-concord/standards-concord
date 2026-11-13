@@ -332,6 +332,8 @@ export interface OntologySummary extends OntologyProject {
     properties?: number;
     individuals?: number;
     useCases?: number;
+    /** Visible use cases excluding withdrawn and archived ones. */
+    activeUseCases?: number;
     openChangeRequests?: number;
     releases: number;
     members?: number;

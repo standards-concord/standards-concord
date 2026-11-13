@@ -361,7 +361,7 @@ export async function preview(project: OntologyProject, ops: ChangeOp[], tests: 
   const classification = classifyChange(diff, before, after);
   // The request's own tests are marked as such, so readers can tell them from use cases' questions.
   const cqs = [...await competencyTests(project.id), ...(tests ?? []).map((t) => ({ ...t, source: OWN_TEST }))];
-  const checked = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI), imports: await hostedImportClosure(after) });
+  const checked = await validate(after, { cqs, reasoner: 'owl', owlReasoner: reasonInWorker, fair: await fairContext(after.ontologyIRI, project.id), imports: await hostedImportClosure(after) });
   // Across federations: advisory, except that breaking one the ontology committed to (or not being able to check it) fails the change.
   const federations = await federationImpact(project, after);
   const validation: ValidationReport = federations.length
