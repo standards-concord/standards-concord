@@ -2,7 +2,7 @@ import { createElement, lazy, type ComponentType } from 'react';
 
 /** Route loaders are registered by App, shared by React.lazy and navigation prefetches. */
 const pages = new Map<string, () => Promise<unknown>>();
-/** Pages whose download has ended. React.lazy keeps either outcome, so neither is waited for again. */
+/** Pages with nothing left to wait for: the code is here, or React.lazy was given a failure (which it keeps). */
 const settled = new Set<string>();
 
 let pendingPages = { chunks: 0, fallbacks: 0 };
@@ -64,15 +64,15 @@ export function pageWanted(name: string) {
 
 export function pageChunk<T>(name: string, load: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | undefined;
-  const done = () => {
-    settled.add(name);
+  const ended = () => {
     if (waits.delete(name)) setPending({ ...pendingPages, chunks: waits.size });
   };
   const preload = () => pending ??= load().then(
-    (page) => { done(); return page; },
+    (page) => { settled.add(name); ended(); return page; },
     (cause: unknown) => {
+      // Not settled: a failed prefetch is downloaded again when the page is opened, and that is waited for.
       pending = undefined;
-      done();
+      ended();
       throw new RouteChunkError(cause);
     },
   );
@@ -80,9 +80,21 @@ export function pageChunk<T>(name: string, load: () => Promise<T>): () => Promis
   return preload;
 }
 
+/** The loader for React.lazy, which calls it once and keeps what it gets: a failure here is final. */
+export function lazyChunk<T>(name: string, load: () => Promise<T>): () => Promise<T> {
+  const chunk = pageChunk(name, load);
+  return () => {
+    pageWanted(name);
+    return chunk().catch((cause: unknown) => {
+      settled.add(name);
+      throw cause;
+    });
+  };
+}
+
 /** A page that downloads when it is first opened, and says it is wanted every time it is rendered. */
 export function lazyPage(name: string, load: () => Promise<{ default: ComponentType }>) {
-  const Page = lazy(pageChunk(name, load));
+  const Page = lazy(lazyChunk(name, load));
   return function LazyPage() {
     pageWanted(name);
     return createElement(Page);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { dismissPageWaits, lazyPage, pageChunk, pagePending, pageWanted, prefetchOntologyPage, prefetchPage, registerPageFallback, RouteChunkError, warmOntology } from './routeChunks';
+import { dismissPageWaits, lazyChunk, lazyPage, pageChunk, pagePending, pageWanted, prefetchOntologyPage, prefetchPage, registerPageFallback, RouteChunkError, warmOntology } from './routeChunks';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
@@ -34,8 +34,16 @@ describe('page chunk pending feedback', () => {
       await expect(result).rejects.toBeInstanceOf(RouteChunkError);
     }
     expect(pagePending.get().chunks).toBe(0);
-    // React keeps either outcome: rendering the page again (or its error) is not a wait.
-    pageWanted(`pending-${outcome}`);
+  });
+
+  it.each(['success', 'failure'])('does not count a page again once React.lazy has its outcome: %s', async (outcome) => {
+    // React keeps either outcome, so rendering the page (or its error) again is not a wait.
+    const load = lazyChunk(`kept-${outcome}`, () => (outcome === 'success' ? Promise.resolve('ready') : Promise.reject(new Error('offline'))));
+    const result = load();
+    expect(pagePending.get().chunks).toBe(1);
+    await result.catch(() => {});
+    expect(pagePending.get().chunks).toBe(0);
+    pageWanted(`kept-${outcome}`);
     expect(pagePending.get().chunks).toBe(0);
   });
 
@@ -106,6 +114,26 @@ describe('page chunk pending feedback', () => {
     expect(load).toHaveBeenCalledOnce();
     release();
     await download;
+    expect(pagePending.get().chunks).toBe(0);
+  });
+
+  it('counts a page whose background download failed when it is opened and downloaded again', async () => {
+    // A failed prefetch used to mark the page as finished for good, so the retry on opening it showed no Loading.
+    vi.stubGlobal('navigator', { onLine: true });
+    let release!: (page: string) => void;
+    const load = vi.fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    const chunk = pageChunk('prefetch-failed', load);
+    prefetchPage('prefetch-failed');
+    await vi.waitFor(() => expect(load).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    pageWanted('prefetch-failed');
+    const retry = chunk();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(pagePending.get().chunks).toBe(1);
+    release('ready');
+    await retry;
     expect(pagePending.get().chunks).toBe(0);
   });
 
