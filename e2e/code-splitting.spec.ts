@@ -94,7 +94,7 @@ test.describe('Route chunks', () => {
     }
   });
 
-  test('going elsewhere while a tab is still downloading opens that page and clears Loading', async ({ page }) => {
+  test('going elsewhere while a tab is still downloading clears Loading, and coming back to that tab shows it again', async ({ page }) => {
     // The Loading bar used to stay until the abandoned tab's download ended, over a page that had already opened.
     await signIn(page, { name: `E2E abandoned tab ${uniq()}`, role: 'editor' });
     await page.goto('/o/volunteering/connect');
@@ -114,10 +114,13 @@ test.describe('Route chunks', () => {
       await expect(page).toHaveURL(/\/connect$/);
       await expect(page.getByRole('tree', { name: /Classes/ })).toHaveCount(0);
       await expect(loading).toHaveCount(0);
-      // The abandoned download ending later changes nothing.
+      // Choosing the first tab again while it is still downloading used to show no Loading at all: its
+      // wait had been dropped for good, and React asks for a page's code only once.
+      await page.getByRole('link', { name: 'Source & export', exact: true }).click();
+      await expect(loading).toHaveCount(1);
+      await expect(page.getByRole('heading', { name: 'Connect an agent' }).first()).toBeVisible();
       release();
-      await networkQuiet(page);
-      await expect(page).toHaveURL(/\/connect$/);
+      await expect(page.getByTestId('source-code')).toContainText('@prefix');
       await expect(loading).toHaveCount(0);
     } finally {
       release();

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { dismissPageWaits, pageChunk, pagePending, prefetchOntologyPage, prefetchPage, registerPageFallback, RouteChunkError, warmOntology } from './routeChunks';
+import { dismissPageWaits, lazyPage, pageChunk, pagePending, pageWanted, prefetchOntologyPage, prefetchPage, registerPageFallback, RouteChunkError, warmOntology } from './routeChunks';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
@@ -17,12 +17,13 @@ describe('page chunk pending feedback', () => {
     expect(pagePending.get().chunks).toBe(0);
   });
 
-  it.each(['success', 'failure'])('counts lazy loads until they settle: %s', async (outcome) => {
+  it.each(['success', 'failure'])('counts a page being opened until its download settles: %s', async (outcome) => {
     // Transition navigation used to have no separate indication that a page was waiting.
     let resolve!: (value: string) => void;
     let reject!: (cause: Error) => void;
     const download = new Promise<string>((yes, no) => { resolve = yes; reject = no; });
     const load = pageChunk(`pending-${outcome}`, () => download);
+    pageWanted(`pending-${outcome}`);
     const result = load();
     expect(pagePending.get().chunks).toBe(1);
     if (outcome === 'success') {
@@ -33,14 +34,18 @@ describe('page chunk pending feedback', () => {
       await expect(result).rejects.toBeInstanceOf(RouteChunkError);
     }
     expect(pagePending.get().chunks).toBe(0);
+    // React keeps either outcome: rendering the page again (or its error) is not a wait.
+    pageWanted(`pending-${outcome}`);
+    expect(pagePending.get().chunks).toBe(0);
   });
 
-  it('counts overlapping lazy calls separately and notifies subscribers outside render', async () => {
+  it('counts each page once however often it renders, and notifies subscribers outside render', async () => {
     // Several suspended pages must not clear pending feedback when just one finishes.
     const releases: Array<() => void> = [];
     const loads = ['first', 'second'].map((name) => pageChunk(name, () => new Promise<void>((resolve) => { releases.push(resolve); })));
     const changed = vi.fn();
     const unsubscribe = pagePending.subscribe(changed);
+    pageWanted('first'); pageWanted('first'); pageWanted('second');
     const first = loads[0]();
     const second = loads[1]();
     expect(pagePending.get().chunks).toBe(2);
@@ -58,33 +63,62 @@ describe('page chunk pending feedback', () => {
     expect(changed).not.toHaveBeenCalled();
   });
 
-  it('counts an already prefetched chunk for no longer than a microtask', async () => {
+  it('never counts a page whose code a prefetch has already downloaded', async () => {
     // A fully downloaded first navigation used to blank and flash Loading anyway.
     vi.stubGlobal('navigator', { onLine: true });
     const load = pageChunk('already-downloaded', () => Promise.resolve('ready'));
     prefetchPage('already-downloaded');
-    await Promise.resolve();
-    const result = load();
-    expect(pagePending.get().chunks).toBe(1);
-    await Promise.resolve();
+    await load();
+    pageWanted('already-downloaded');
     expect(pagePending.get().chunks).toBe(0);
-    await expect(result).resolves.toBe('ready');
   });
 
-  it('stops counting a wait once another page has opened, and never counts it again', async () => {
+  it('stops counting a wait once another page has opened', async () => {
     // Going elsewhere while a page was still downloading used to leave Loading showing until that download ended.
     let release!: () => void;
     const load = pageChunk('abandoned', () => new Promise<void>((resolve) => { release = resolve; }));
+    pageWanted('abandoned');
     const abandoned = load();
     expect(pagePending.get().chunks).toBe(1);
     dismissPageWaits();
     expect(pagePending.get().chunks).toBe(0);
-    const next = pageChunk('wanted-next', () => Promise.resolve())();
+    pageChunk('wanted-next', () => new Promise(() => {}));
+    pageWanted('wanted-next');
     expect(pagePending.get().chunks).toBe(1);
     release();
     await abandoned;
-    await next;
+    expect(pagePending.get().chunks).toBe(1);
+    dismissPageWaits();
+  });
+
+  it('counts a page again when it is chosen again while still downloading', async () => {
+    // Coming back to a page left while it downloaded used to show no Loading: the wait was tied to
+    // React.lazy asking for the code, which happens once.
+    let release!: () => void;
+    const load = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const chunk = pageChunk('returned-to', load);
+    pageWanted('returned-to');
+    const download = chunk();
+    dismissPageWaits();
     expect(pagePending.get().chunks).toBe(0);
+    pageWanted('returned-to');
+    expect(pagePending.get().chunks).toBe(1);
+    expect(load).toHaveBeenCalledOnce();
+    release();
+    await download;
+    expect(pagePending.get().chunks).toBe(0);
+  });
+
+  it('wraps a lazy page so that every render says it is wanted', async () => {
+    let release!: (page: { default: () => null }) => void;
+    const Page = lazyPage('wrapped', () => new Promise<{ default: () => null }>((resolve) => { release = resolve; }));
+    const render = () => { Page(); };
+    render();
+    expect(pagePending.get().chunks).toBe(1);
+    dismissPageWaits();
+    render();
+    expect(pagePending.get().chunks).toBe(1);
+    dismissPageWaits();
   });
 
   it('tracks mounted Suspense fallbacks so first loads have only one Loading status', () => {

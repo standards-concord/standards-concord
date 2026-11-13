@@ -1,9 +1,13 @@
+import { createElement, lazy, type ComponentType } from 'react';
+
 /** Route loaders are registered by App, shared by React.lazy and navigation prefetches. */
 const pages = new Map<string, () => Promise<unknown>>();
+/** Pages whose download has ended. React.lazy keeps either outcome, so neither is waited for again. */
+const settled = new Set<string>();
 
 let pendingPages = { chunks: 0, fallbacks: 0 };
-/** The downloads a page on screen is waiting for now. One left behind by going elsewhere is taken out. */
-const waits = new Set<object>();
+/** The pages the person is waiting for now, by name. One left behind by going elsewhere is taken out. */
+const waits = new Set<string>();
 const listeners = new Set<() => void>();
 let notificationQueued = false;
 
@@ -18,7 +22,7 @@ function setPending(next: typeof pendingPages) {
   });
 }
 
-/** Only React.lazy's waits count; speculative downloads leave the current page alone. */
+/** Only pages being opened count (see pageWanted); speculative downloads leave the current page alone. */
 export const pagePending = {
   get: () => pendingPages,
   subscribe(listener: () => void) {
@@ -47,21 +51,41 @@ export class RouteChunkError extends Error {
   }
 }
 
+/**
+ * A page is being opened. Until its code has downloaded it counts as waited for, unless another page
+ * opens first. Called each time the page is rendered, not from React.lazy's loader: React asks for a
+ * page's code once, so someone coming back to a page still downloading would get no Loading.
+ */
+export function pageWanted(name: string) {
+  if (settled.has(name) || waits.has(name)) return;
+  waits.add(name);
+  setPending({ ...pendingPages, chunks: waits.size });
+}
+
 export function pageChunk<T>(name: string, load: () => Promise<T>): () => Promise<T> {
   let pending: Promise<T> | undefined;
-  const preload = () => pending ??= load().catch((cause: unknown) => {
-    pending = undefined;
-    throw new RouteChunkError(cause);
-  });
+  const done = () => {
+    settled.add(name);
+    if (waits.delete(name)) setPending({ ...pendingPages, chunks: waits.size });
+  };
+  const preload = () => pending ??= load().then(
+    (page) => { done(); return page; },
+    (cause: unknown) => {
+      pending = undefined;
+      done();
+      throw new RouteChunkError(cause);
+    },
+  );
   pages.set(name, preload);
-  return () => {
-    const result = preload();
-    const wait = {};
-    waits.add(wait);
-    setPending({ ...pendingPages, chunks: waits.size });
-    return result.finally(() => {
-      if (waits.delete(wait)) setPending({ ...pendingPages, chunks: waits.size });
-    });
+  return preload;
+}
+
+/** A page that downloads when it is first opened, and says it is wanted every time it is rendered. */
+export function lazyPage(name: string, load: () => Promise<{ default: ComponentType }>) {
+  const Page = lazy(pageChunk(name, load));
+  return function LazyPage() {
+    pageWanted(name);
+    return createElement(Page);
   };
 }
 
