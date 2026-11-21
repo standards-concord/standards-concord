@@ -22,9 +22,9 @@ cp .env.example .env
 docker compose up --build   # Concord on :8787, Community Solid Server on :3000
 ```
 
-## Deploy (Vercel and Azure)
+## Deploy (Vercel and Neon)
 
-The web app is served by Vercel. Everything that needs a long-running server (the API, sign-in, the MCP endpoint, live meeting streams, the governance clock, the Solid server) runs on one small Azure VM, launched by [deploy/azure/deploy.sh](../deploy/azure/deploy.sh), which fits Azure for Students' free tier (an AWS template is kept as an alternative). Vercel forwards `/api`, `/auth`, `/mcp`, `/people` and the OAuth endpoints for MCP clients to it, so people only ever see the Vercel link. GitHub Actions tests every push and builds the backend image; the server picks up a new image within five minutes. Step by step: [deploy.md](deploy.md).
+Concord runs on Vercel: the web app as static files and the API (sign-in, the MCP endpoint, live meeting streams, the governance clock) as one function, with its data in a Neon Postgres database. GitHub Actions tests every push and deploys each merge to `main`. Step by step: [deploy.md](deploy.md).
 
 ## Optional services
 

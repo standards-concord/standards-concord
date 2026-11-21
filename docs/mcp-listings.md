@@ -51,7 +51,7 @@ Curated from the official registry. Once the official entry is live, email partn
 ## OpenAI plugin directory (ChatGPT and Codex)
 
 - Submit at https://platform.openai.com/plugins → Submit for review. Guide: https://developers.openai.com/plugins/deploy/submission. Needs a verified individual or business identity.
-- Domain verification: set `OPENAI_APPS_CHALLENGE` on the backend (via `deploy/azure/set-key.sh`) to the token OpenAI gives; Concord serves it at `/.well-known/openai-apps-challenge`.
+- Domain verification: set `OPENAI_APPS_CHALLENGE` in Vercel's environment variables ([deploy.md](deploy.md#adding-keys-later)) to the token OpenAI gives; Concord serves it at `/.well-known/openai-apps-challenge`.
 - Also needed: website, support, privacy policy and terms URLs; a test account without MFA; five positive and three negative test cases; a short video walkthrough; release notes. The example prompts above work as positive cases. Negative cases: asking it to delete an ontology, to merge a change request without review, or to act on a private ontology the account can't see.
 - Static bearer tokens are not accepted for listing, which is one reason for the OAuth work.
 - What ChatGPT's connector needs from the OAuth server, all of which Concord does (covered by `apps/server/test/oauth.test.ts`):

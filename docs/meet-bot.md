@@ -41,12 +41,12 @@ By default the bot's prompts only show on the meeting's page in Concord, for the
 1. **Create the bot's Google account**, for example `concord.odi@gmail.com` (a Google Workspace account works too). In its Google Calendar settings, under *Event settings > Add invitations to my calendar*, choose **From everyone**, so invites from people it hasn't met appear on its calendar.
 2. **Copy the calendar's secret iCal address.** In Google Calendar settings, open the bot's calendar under *Settings for my calendars*, then *Integrate calendar > Secret address in iCal format*. Anyone with this address can read the bot's calendar, so treat it like a password. (Workspace admins can switch this address off; if it's missing, ask them to allow it.)
 3. **Get a Recall.ai API key** from the Recall.ai dashboard, and note its region (`us-west-2` unless you chose another).
-4. **Set the keys on the server:**
+4. **Add the keys** to Vercel's Production environment variables as Sensitive, then redeploy ([deploy.md](deploy.md#adding-keys-later)):
 
    ```sh
-   ./deploy/azure/set-key.sh RECALL_API_KEY
-   ./deploy/azure/set-key.sh MEET_BOT_EMAIL      # concord.odi@gmail.com
-   ./deploy/azure/set-key.sh MEET_BOT_ICS_URL    # the secret iCal address
+   vercel env add RECALL_API_KEY production
+   vercel env add MEET_BOT_EMAIL production      # concord.odi@gmail.com
+   vercel env add MEET_BOT_ICS_URL production    # the secret iCal address
    ```
 
    Optional: `RECALL_REGION`, `MEET_BOT_NAME` (the name shown in the call, "Concord co-facilitator" by default), `MEET_BOT_DEFAULT_ONTOLOGY` and `MEET_BOT_POST_TO_CHAT`.
