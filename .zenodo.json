@@ -1,0 +1,23 @@
+{
+  "upload_type": "software",
+  "title": "Concord: collaborative development of open data standards",
+  "description": "<p>Concord is where working groups design open data standards together. Each standard is a strict OWL 2 ontology. Requirements come in from interviews, meeting transcripts and coding agents, and every proposed change is checked, then reviewed or voted on under rules the group sets for itself, without needing a meeting.</p><p>Live at <a href=\"https://standards-concord.vercel.app\">standards-concord.vercel.app</a>.</p>",
+  "creators": [
+    {
+      "name": "Wright, Jesse",
+      "affiliation": "Open Data Institute"
+    }
+  ],
+  "license": "mit",
+  "access_right": "open",
+  "keywords": [
+    "open data standards",
+    "ontology engineering",
+    "OWL 2",
+    "collaborative ontology development",
+    "deliberation",
+    "governance",
+    "linked data",
+    "semantic web"
+  ]
+}

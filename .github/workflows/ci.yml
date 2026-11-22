@@ -16,6 +16,9 @@ on:
       - '!docs/**'
       - '!deploy/**'
       - '!**/*.md'
+      # Citation metadata for GitHub and Zenodo.
+      - '!CITATION.cff'
+      - '!.zenodo.json'
       # The walkthrough reads its script and README from Markdown.
       - 'walkthrough/**'
       - '!.github/workflows/e2e-live.yml'
@@ -29,6 +32,9 @@ on:
       - '!docs/**'
       - '!deploy/**'
       - '!**/*.md'
+      # Citation metadata for GitHub and Zenodo.
+      - '!CITATION.cff'
+      - '!.zenodo.json'
       - 'walkthrough/**'
       - '!.github/workflows/e2e-live.yml'
       - '!.github/workflows/mcp-registry.yml'

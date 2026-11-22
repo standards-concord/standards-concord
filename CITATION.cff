@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use Concord in your research, please cite it using these metadata."
+type: software
+title: "Concord: collaborative development of open data standards"
+abstract: >-
+  Concord is where working groups design open data standards together. Each
+  standard is a strict OWL 2 ontology. Requirements come in from interviews,
+  meeting transcripts and coding agents, and every proposed change is checked,
+  then reviewed or voted on under rules the group sets for itself, without
+  needing a meeting.
+authors:
+  - family-names: Wright
+    given-names: Jesse
+    affiliation: Open Data Institute
+repository-code: "https://github.com/standards-concord/standards-concord"
+url: "https://standards-concord.vercel.app"
+license: MIT
+keywords:
+  - open data standards
+  - ontology engineering
+  - OWL 2
+  - collaborative ontology development
+  - deliberation
+  - governance
+  - linked data
+  - semantic web
