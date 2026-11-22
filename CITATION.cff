@@ -1,6 +1,7 @@
 cff-version: 1.2.0
 message: "If you use Concord in your research, please cite it using these metadata."
 type: software
+doi: "10.5281/zenodo.24450045"
 title: "Concord: collaborative development of open data standards"
 abstract: >-
   Concord is where working groups design open data standards together. Each
