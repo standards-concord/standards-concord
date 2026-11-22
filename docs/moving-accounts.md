@@ -38,12 +38,9 @@ Options: `--yes` (don't ask before each step), `--reset-secrets`, `--no-pr`, `--
 2. In the Claude project, open **Project settings → Repositories** and replace `jeswr/standards-concord` with the new address.
 3. Merge the repoint PR from step 2.5 once its CI is green.
 
-## 4. The backend image (only while the Azure VM is in use)
+## 4. The server image
 
-The backend is moving to Vercel, after which this step goes away. Until then: the next `main` build publishes `ghcr.io/<org>/standards-concord`, and the old `ghcr.io/jeswr/standards-concord` stops updating, so:
-
-1. After that build, open the organisation's **Packages → standards-concord → Package settings → Change visibility → Public**.
-2. On the VM, change `IMAGE=` in `/opt/concord/stack.env` to the new image, then `systemctl start concord-refresh.service`. With the Azure CLI: `az vm run-command invoke -g concord -n concord --command-id RunShellScript --scripts "sed -i 's#^IMAGE=.*#IMAGE=ghcr.io/<org>/standards-concord:latest#' /opt/concord/stack.env && systemctl start concord-refresh.service"`.
+The next `main` build publishes `ghcr.io/<org>/standards-concord`, and the old `ghcr.io/jeswr/standards-concord` stops updating. After that build, open the organisation's **Packages → standards-concord → Package settings → Change visibility → Public**. Concord's own site doesn't use the image (its API is a Vercel function); it is for anyone running their own server.
 
 ## 5. Move the site to the new Vercel account
 
@@ -54,8 +51,7 @@ The site should keep its address, `standards-concord.vercel.app`, because it is 
 1. Sign up at <https://vercel.com/signup> with the other email address, on the **Hobby** plan. If Vercel says your GitHub login is already linked to another Vercel account, sign up with email instead and connect GitHub in step 2.
 2. **Add New → Project → Import Git Repository**, and when asked, install the Vercel GitHub app on the new organisation (only `standards-concord` is enough). Import the repository. Leave the root directory as the repository root; the framework, build command and output come from [vercel.json](../vercel.json). Name the project anything for now, such as `concord-new`.
 3. Before the first deploy, or straight after it, add the environment variables under **Settings → Environment Variables** (Production), copying the values from the old project's same page:
-   - `BACKEND_URL`, the backend server's address.
-   - `CONCORD_PROXY_SECRET`, which must equal the backend's key of the same name. If the old value can't be revealed, generate a new one (`openssl rand -hex 32`), set it here, redeploy, then run `./deploy/azure/set-key.sh CONCORD_PROXY_SECRET` with the same value.
+   - Every key in [deploy.md](deploy.md#adding-keys-later) that the old project has, and the Neon database (connect it from the new project's Storage tab, or copy `DATABASE_URL`). A value marked Sensitive can't be revealed: copy it from where it was made, or make a new one.
 4. **Settings → Git**: check **Production Branch** is `main`. Nothing else is needed for previews: vercel.json already turns off every branch except `main` and skips builds that don't touch the site.
 5. Redeploy and check the new `*.vercel.app` address loads and signs in.
 6. In the **old** account, delete the old project (**Settings → General → Delete Project**). This frees its address.

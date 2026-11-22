@@ -38,7 +38,7 @@ All six, or the App is off and the App checks page shows only the token route.
 | `GITHUB_APP_CLIENT_ID` | On the App's settings page. Not secret. |
 | `GITHUB_APP_CLIENT_SECRET` | From "Generate a new client secret". |
 
-`GITHUB_APP_API_URL` and `GITHUB_APP_WEB_URL` point it at another GitHub (the tests' stand-in). Secrets go in Vercel's environment (Production, Sensitive) and, while it runs, the VM's `/opt/concord/keys.env`. Never in the repository, a repository secret or a chat. If the private key leaks, generate a new one on the App's page and delete the old one: installation tokens last an hour.
+`GITHUB_APP_API_URL` and `GITHUB_APP_WEB_URL` point it at another GitHub (the tests' stand-in). Secrets go in Vercel's environment (Production, Sensitive). Never in the repository, a repository secret or a chat. If the private key leaks, generate a new one on the App's page and delete the old one: installation tokens last an hour.
 
 ## How it works
 

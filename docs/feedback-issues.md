@@ -50,13 +50,7 @@ Each submission gets one record in `feedbackPublications`, keyed by the feedback
    - **Resource owner:** `standards-concord`
    - **Repository access:** Only select repositories → `standards-concord` (GitHub doesn't let a link choose this)
    - **Repository permissions:** Issues → **Read and write** (Metadata: read-only is added automatically). Nothing else.
-2. Set it on the server (the value is read without echoing):
-
-   ```sh
-   # Works from any folder; needs `gh` and `az` signed in. Inside a checkout, ./deploy/azure/set-key.sh does the same.
-   setkey() { local r=standards-concord/standards-concord; bash <(gh api -H 'Accept: application/vnd.github.raw' "repos/$r/contents/deploy/azure/set-key.sh") "$@"; }
-   setkey FEEDBACK_GITHUB_TOKEN
-   ```
+2. Add it to Vercel's Production environment variables as Sensitive (`vercel env add FEEDBACK_GITHUB_TOKEN production` asks for the value without showing it), then redeploy ([deploy.md](deploy.md#adding-keys-later)).
 
    The server applies it within five minutes. To post to another repository, also set `FEEDBACK_GITHUB_REPO=owner/name`.
 

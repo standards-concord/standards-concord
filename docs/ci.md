@@ -9,10 +9,9 @@ GitHub Actions minutes are free and unlimited on a public repository, but metere
 | Push to a branch with no PR | nothing | 0 min |
 | Push to a draft PR | `test` (typecheck, unit tests, build, listing checks) | 14 min |
 | PR marked ready for review, and every push after | `test`, `e2e` (preview: everything; dev: smoke test), `e2e-vercel` (two packaged API servers on Postgres), `walkthrough` | 25 min |
-| Push to `main` | all of the above, then `image` (backend deploy) | 30 min |
+| Push to `main` | all of the above, then `image` (the server image for running your own server) | 30 min |
 | Vercel production deploy | `Live site` smoke test | 2 min |
 | Only `docs/`, `deploy/` or Markdown changed (outside `walkthrough/`) | nothing | 0 min |
-| `deploy/azure/set-key*` changed | `Deploy scripts` (checks the key never reaches a command line) | under 1 min |
 
 Before this, every push to a PR branch ran the whole suite twice (once for the push, once for the PR) and built a branch image, about 50 billed minutes a push.
 
@@ -60,17 +59,16 @@ Merge a pull request only when its head commit, after merging current `main`, ha
 
 A private repository on GitHub's free plan has no branch protection, so GitHub doesn't enforce any of this: it is the rule we follow.
 
-Deploys also come from Actions: the `image` job builds the backend image the server pulls, and [vercel-deploy.yml](../.github/workflows/vercel-deploy.yml) deploys the web app. Without minutes, deploy by hand after a merge: `vercel deploy --prod` from a checkout of `main` (signed in to the jeswr1 team), and build and push `ghcr.io/standards-concord/standards-concord:latest` (`docker buildx build --platform linux/amd64 --push`).
+Deploys also come from Actions: [vercel-deploy.yml](../.github/workflows/vercel-deploy.yml) deploys the web app and the API function, and the `image` job publishes the server image for anyone running their own server. Without minutes, deploy by hand after a merge: `vercel deploy --prod` from a checkout of `main` (signed in to the jeswr1 team).
 
 ## Option: a self-hosted runner
 
 Jobs on a self-hosted runner use no GitHub minutes. This is an option, not something that is set up.
 
-**Where.** The backend VM (`Standard_B2ats_v2`, 1 GB of RAM) is too small to run the browser tests next to the live server: a Playwright run needs 2 to 3 GB and would push the live API into swap. Choose one of:
+**Where.** A Playwright run needs 2 to 3 GB of RAM. Choose one of:
 
-1. **A second VM just for CI** (recommended if minutes run short). `Standard_B2als_v2` (2 vCPU, 4 GB) in the same resource group, billed against the student credit (roughly a dollar a day while it is running). Stop it when nobody is working (`az vm deallocate -g concord -n concord-runner`) and it costs only its disk.
-2. **The backend VM, resized** to `Standard_B2als_v2` (see [deploy.md](deploy.md#cost)), running only the quick `test` job. Keep `e2e` on GitHub's runners.
-3. **A Mac or other machine that is usually on.** Free, and fast, but jobs queue whenever it is asleep.
+1. **A small cloud VM just for CI** (2 vCPU, 4 GB), stopped when nobody is working so it costs only its disk.
+2. **A Mac or other machine that is usually on.** Free, and fast, but jobs queue whenever it is asleep.
 
 **Setup outline** (Ubuntu VM, as an unprivileged user):
 
