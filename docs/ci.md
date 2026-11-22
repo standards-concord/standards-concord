@@ -11,7 +11,7 @@ GitHub Actions minutes are free and unlimited on a public repository, but metere
 | PR marked ready for review, and every push after | `test`, `e2e` (preview: everything; dev: smoke test), `e2e-vercel` (two packaged API servers on Postgres), `walkthrough` | 25 min |
 | Push to `main` | all of the above, then `image` (the server image for running your own server) | 30 min |
 | Vercel production deploy | `Live site` smoke test | 2 min |
-| Only `docs/`, `deploy/` or Markdown changed (outside `walkthrough/`) | nothing | 0 min |
+| Only `docs/`, `deploy/`, Markdown (outside `walkthrough/`) or the citation files (`CITATION.cff`, `.zenodo.json`) changed | nothing | 0 min |
 
 Before this, every push to a PR branch ran the whole suite twice (once for the push, once for the PR) and built a branch image, about 50 billed minutes a push.
 

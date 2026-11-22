@@ -13,6 +13,10 @@ Concord, from the Open Data Institute, is where working groups design open data 
 - [Connect a coding agent, use development forks and test apps against changes](docs/agents.md)
 - [Working on Concord](CLAUDE.md)
 
+## Cite Concord
+
+If you use Concord in your research, please cite it. Releases are archived on Zenodo with a DOI, and GitHub's **Cite this repository** button (from [CITATION.cff](CITATION.cff)) gives APA and BibTeX.
+
 ## Licence
 
 [MIT](LICENSE). The Open Data Institute's name and logo and the [third-party logos](docs/third-party-marks.md) are trademarks of their owners and aren't covered by the licence.
