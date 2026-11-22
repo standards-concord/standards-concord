@@ -11,7 +11,8 @@ abstract: >-
 authors:
   - family-names: Wright
     given-names: Jesse
-    affiliation: Open Data Institute
+    affiliation: University of Oxford
+    orcid: "https://orcid.org/0000-0002-5771-988X"
 repository-code: "https://github.com/standards-concord/standards-concord"
 url: "https://standards-concord.vercel.app"
 license: MIT
