@@ -15,7 +15,7 @@ Concord, from the Open Data Institute, is where working groups design open data 
 
 ## Cite Concord
 
-If you use Concord in your research, please cite it. Each GitHub release is archived on Zenodo with a DOI, and GitHub's **Cite this repository** button (from [CITATION.cff](CITATION.cff)) gives APA and BibTeX.
+If you use Concord in your research, please cite it. Releases are archived on Zenodo with a DOI, and GitHub's **Cite this repository** button (from [CITATION.cff](CITATION.cff)) gives APA and BibTeX.
 
 ## Licence
 
