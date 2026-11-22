@@ -1,5 +1,7 @@
 # Concord
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24450045.svg)](https://doi.org/10.5281/zenodo.24450045)
+
 Concord, from the Open Data Institute, is where working groups design open data standards together. Each standard is a strict OWL 2 ontology. Requirements come in from interviews, meeting transcripts and coding agents, and every proposed change is checked, then reviewed or voted on under rules the group sets for itself, without needing a meeting.
 
 **Try it at [standards-concord.vercel.app](https://standards-concord.vercel.app).** Alpha testers start at [/alpha](https://standards-concord.vercel.app/alpha).
@@ -15,7 +17,7 @@ Concord, from the Open Data Institute, is where working groups design open data 
 
 ## Cite Concord
 
-If you use Concord in your research, please cite it. Releases are archived on Zenodo with a DOI, and GitHub's **Cite this repository** button (from [CITATION.cff](CITATION.cff)) gives APA and BibTeX.
+If you use Concord in your research, please cite it as [doi:10.5281/zenodo.24450045](https://doi.org/10.5281/zenodo.24450045), which always points at the latest release (each release also has its own DOI on Zenodo). GitHub's **Cite this repository** button (from [CITATION.cff](CITATION.cff)) gives APA and BibTeX.
 
 ## Licence
 
