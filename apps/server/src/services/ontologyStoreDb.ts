@@ -185,11 +185,16 @@ export const dbStore = {
     return commit;
   },
 
-  async updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string): Promise<string> {
+  async readRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, commit?: string): Promise<string | undefined> {
+    if (!/^[\w.-]+$/.test(name)) return undefined;
+    return await readFile(commit ?? await this.head(project), name);
+  },
+
+  async updateRepoFile(project: Pick<OntologyProject, 'slug'>, name: string, content: string, message: string, base?: string): Promise<string> {
     if (!/^[\w.-]+$/.test(name) || name === FILE) throw new Error(`Not a repository file Concord rewrites: ${name}`);
-    const parent = await this.head(project);
+    const parent = base ?? await this.head(project);
     const commit = await buildCommit(parent, { [name]: content }, message, { name: 'Concord', email: 'steward@concord' });
-    if (commit !== parent) await this.advanceTo(project, parent, commit);
+    if (commit !== parent || base !== undefined) await this.advanceTo(project, parent, commit);
     return commit;
   },
 
